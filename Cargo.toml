@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/sql-lens-core",
+    "crates/sql-lens-proxy",
+    "crates/sql-lens-protocol",
+    "crates/sql-lens-protocol-mysql",
+    "crates/sql-lens-storage",
+    "crates/sql-lens-api",
+    "crates/sql-lens-plugin",
+    "crates/sql-lens-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+

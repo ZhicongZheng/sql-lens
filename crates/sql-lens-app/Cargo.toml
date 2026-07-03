@@ -1,0 +1,13 @@
+[package]
+name = "sql-lens-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sql-lens"
+path = "src/main.rs"
+
+[dependencies]
+

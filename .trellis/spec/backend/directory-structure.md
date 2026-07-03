@@ -20,6 +20,21 @@ crates/
 └── sql-lens-app/
 ```
 
+## Workspace Manifest Contract
+
+Root `Cargo.toml` is a virtual workspace manifest.
+
+Required workspace settings:
+
+- `resolver = "3"`.
+- `edition = "2024"` through `[workspace.package]`.
+- `rust-version = "1.85"` through `[workspace.package]`.
+- `license = "Apache-2.0"` through `[workspace.package]`.
+
+Member packages inherit shared package metadata instead of repeating it.
+
+`sql-lens-app` is the application package and exposes the user-facing binary named `sql-lens`.
+
 ## Module Ownership
 
 - `sql-lens-core`: protocol-neutral domain models such as SQL events, connections, parameters, timings, result summaries, error summaries, and protocol metadata containers.
@@ -54,4 +69,3 @@ crates/
 - Do not block TCP forwarding on storage, UI, exporters, or plugin hooks.
 - Do not introduce generic multi-protocol abstractions before a second real adapter needs them.
 - Do not treat SQLite as a TCP proxy target; it requires a separate tracing or driver integration design.
-
