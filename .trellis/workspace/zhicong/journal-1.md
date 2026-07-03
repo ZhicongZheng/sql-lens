@@ -39,3 +39,36 @@ Designed the SQL Lens open source project from scratch, generated root documenta
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Add Rust workspace skeleton
+
+**Date**: 2026-07-03
+**Task**: Add Rust workspace skeleton
+**Branch**: `main`
+
+### Summary
+
+Created the minimal Cargo workspace skeleton for SQL Lens with eight documented crates, edition 2024, MSRV 1.85, resolver 3, sql-lens binary wiring, Cargo validation, and backend workspace spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5aecc67` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
