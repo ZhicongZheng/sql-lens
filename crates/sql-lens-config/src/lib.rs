@@ -43,6 +43,30 @@ impl SqlLensConfig {
     ) -> Result<Self, ConfigLoadError> {
         toml::from_str(input).map_err(|source| ConfigLoadError::Parse { path, source })
     }
+
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let mut violations = Vec::new();
+
+        if self.proxy.listen.trim().is_empty() {
+            violations.push(ConfigValidationViolation::MissingProxyListen);
+        }
+
+        if self.backend.address.trim().is_empty() {
+            violations.push(ConfigValidationViolation::MissingBackendAddress);
+        }
+
+        if self.proxy.protocol != Protocol::MySql {
+            violations.push(ConfigValidationViolation::UnsupportedProtocol {
+                protocol: self.proxy.protocol,
+            });
+        }
+
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigValidationError { violations })
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -85,6 +109,50 @@ impl std::error::Error for ConfigLoadError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigValidationError {
+    pub violations: Vec<ConfigValidationViolation>,
+}
+
+impl fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.violations.as_slice() {
+            [] => write!(f, "invalid config"),
+            [violation] => write!(f, "invalid config: {violation}"),
+            violations => {
+                write!(f, "invalid config: {} violations", violations.len())?;
+                for violation in violations {
+                    write!(f, "; {violation}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigValidationError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValidationViolation {
+    MissingProxyListen,
+    MissingBackendAddress,
+    UnsupportedProtocol { protocol: Protocol },
+}
+
+impl fmt::Display for ConfigValidationViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingProxyListen => write!(f, "`proxy.listen` must not be empty"),
+            Self::MissingBackendAddress => write!(f, "`backend.address` must not be empty"),
+            Self::UnsupportedProtocol { protocol } => write!(
+                f,
+                "`proxy.protocol` `{}` is not supported in this build; currently supported: `mysql`",
+                protocol.config_value()
+            ),
         }
     }
 }
@@ -310,6 +378,17 @@ pub enum Protocol {
     ClickHouse,
 }
 
+impl Protocol {
+    fn config_value(self) -> &'static str {
+        match self {
+            Self::MySql => "mysql",
+            Self::PostgreSql => "postgresql",
+            Self::Sqlite => "sqlite",
+            Self::ClickHouse => "clickhouse",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DatabaseType {
     #[default]
@@ -533,6 +612,125 @@ mod tests {
 
         assert!(!error.to_string().is_empty());
         assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn default_config_passes_validation() {
+        let config = SqlLensConfig::default();
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn config_validation_error_supports_standard_error_traits() {
+        assert_error::<ConfigValidationError>();
+
+        let error = ConfigValidationError {
+            violations: vec![ConfigValidationViolation::MissingProxyListen],
+        };
+
+        assert!(!error.to_string().is_empty());
+        assert!(std::error::Error::source(&error).is_none());
+    }
+
+    #[test]
+    fn missing_proxy_listen_is_rejected() {
+        let mut config = SqlLensConfig::default();
+        config.proxy.listen.clear();
+
+        let error = config
+            .validate()
+            .expect_err("missing proxy listen should fail");
+
+        assert_eq!(
+            error.violations,
+            vec![ConfigValidationViolation::MissingProxyListen]
+        );
+    }
+
+    #[test]
+    fn whitespace_proxy_listen_is_rejected() {
+        let mut config = SqlLensConfig::default();
+        config.proxy.listen = "   ".to_owned();
+
+        let error = config
+            .validate()
+            .expect_err("whitespace proxy listen should fail");
+
+        assert_eq!(
+            error.violations,
+            vec![ConfigValidationViolation::MissingProxyListen]
+        );
+    }
+
+    #[test]
+    fn missing_backend_address_is_rejected() {
+        let mut config = SqlLensConfig::default();
+        config.backend.address.clear();
+
+        let error = config
+            .validate()
+            .expect_err("missing backend address should fail");
+
+        assert_eq!(
+            error.violations,
+            vec![ConfigValidationViolation::MissingBackendAddress]
+        );
+    }
+
+    #[test]
+    fn whitespace_backend_address_is_rejected() {
+        let mut config = SqlLensConfig::default();
+        config.backend.address = "\t\n".to_owned();
+
+        let error = config
+            .validate()
+            .expect_err("whitespace backend address should fail");
+
+        assert_eq!(
+            error.violations,
+            vec![ConfigValidationViolation::MissingBackendAddress]
+        );
+    }
+
+    #[test]
+    fn unsupported_protocol_is_rejected() {
+        let mut config = SqlLensConfig::default();
+        config.proxy.protocol = Protocol::PostgreSql;
+
+        let error = config
+            .validate()
+            .expect_err("unsupported protocol should fail");
+
+        assert_eq!(
+            error.violations,
+            vec![ConfigValidationViolation::UnsupportedProtocol {
+                protocol: Protocol::PostgreSql
+            }]
+        );
+    }
+
+    #[test]
+    fn validation_collects_multiple_violations() {
+        let mut config = SqlLensConfig::default();
+        config.proxy.listen = " ".to_owned();
+        config.backend.address.clear();
+        config.proxy.protocol = Protocol::ClickHouse;
+
+        let error = config
+            .validate()
+            .expect_err("multiple validation failures should be collected");
+
+        assert_eq!(
+            error.violations,
+            vec![
+                ConfigValidationViolation::MissingProxyListen,
+                ConfigValidationViolation::MissingBackendAddress,
+                ConfigValidationViolation::UnsupportedProtocol {
+                    protocol: Protocol::ClickHouse
+                }
+            ]
+        );
     }
 
     #[test]

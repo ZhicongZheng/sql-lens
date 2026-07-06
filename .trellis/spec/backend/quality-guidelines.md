@@ -241,6 +241,102 @@ pub fn load_config(path: impl AsRef<std::path::Path>) -> Result<SqlLensConfig, C
 }
 ```
 
+## Scenario: Config Validation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-config` validates semantic startup readiness after TOML loading and before CLI/runtime startup.
+- Validation must stay separate from TOML parsing, environment overrides, and service startup.
+- Validation errors are public contracts for later CLI and runtime error display.
+
+### 2. Signatures
+
+Public validation API:
+
+```rust
+impl SqlLensConfig {
+    pub fn validate(&self) -> Result<(), ConfigValidationError>;
+}
+```
+
+Structured validation errors:
+
+```rust
+pub struct ConfigValidationError {
+    pub violations: Vec<ConfigValidationViolation>,
+}
+
+pub enum ConfigValidationViolation {
+    MissingProxyListen,
+    MissingBackendAddress,
+    UnsupportedProtocol { protocol: Protocol },
+}
+```
+
+### 3. Contracts
+
+- `SqlLensConfig::default().validate()` must succeed.
+- Validation collects all detected violations instead of failing fast.
+- Empty and whitespace-only required string fields are treated as missing.
+- The current supported startup protocol is `Protocol::MySql`.
+- Future protocol enum variants may deserialize, but validation rejects them until their adapters exist.
+- Address syntax parsing, port availability checks, TLS certificate checks, and auth checks are outside the first validation layer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `proxy.listen.trim().is_empty()` | Add `MissingProxyListen` |
+| `backend.address.trim().is_empty()` | Add `MissingBackendAddress` |
+| `proxy.protocol != Protocol::MySql` | Add `UnsupportedProtocol { protocol }` |
+| Multiple violations exist | Return all in one `ConfigValidationError` |
+| No violations exist | Return `Ok(())` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- CLI later calls `SqlLensConfig::from_path(path)?.validate()?` before runtime startup.
+- A config with missing listen address and unsupported protocol reports both issues.
+
+Base:
+
+- TOML parsing rejects unknown fields before validation runs.
+- Validation rejects known-but-currently-unsupported protocol variants such as `postgresql`.
+
+Bad:
+
+- Duplicating validation logic in CLI or runtime startup.
+- Starting services and discovering missing required fields later.
+- Doing socket bind tests or network probes inside `sql-lens-config`.
+
+### 6. Tests Required
+
+For config validation changes:
+
+- Default config validates successfully.
+- Empty and whitespace-only `proxy.listen` fail.
+- Empty and whitespace-only `backend.address` fail.
+- Non-MySQL `proxy.protocol` fails.
+- Multiple violations are returned together and in deterministic order.
+- `ConfigValidationError` implements `Display` and `std::error::Error`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+if config.proxy.listen.is_empty() {
+    panic!("missing proxy listen");
+}
+```
+
+#### Correct
+
+```rust
+config.validate()?;
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.
