@@ -204,3 +204,36 @@ Implemented SqlLensConfig validation with structured validation errors, determin
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: Add CLI entry point
+
+**Date**: 2026-07-06
+**Task**: Add CLI entry point
+**Branch**: `main`
+
+### Summary
+
+Implemented the initial sql-lens CLI entry point with clap, config loading and validation, integration tests, and backend CLI contract spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `82f46b6` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
