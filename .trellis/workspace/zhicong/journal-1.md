@@ -337,3 +337,36 @@ Ignored local codegraph index, added backend dialing from accepted proxy clients
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: Implement bidirectional TCP forwarding
+
+**Date**: 2026-07-06
+**Task**: Implement bidirectional TCP forwarding
+**Branch**: `main`
+
+### Summary
+
+Added TcpForwarder over ProxiedConnection with Tokio bidirectional copy, forwarding summaries, structured IO failures, real loopback forwarding tests, and backend forwarding code-spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1048c99` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
