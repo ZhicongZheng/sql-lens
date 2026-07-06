@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
+- **Total Sessions**: 15
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~473 | Active |
+| `journal-1.md` | ~507 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-07-06 | Define protocol adapter trait | `58c1850`, `0f64eaa` | `main` |
 | 14 | 2026-07-06 | Add capture pipeline channel | `7c81cd8`, `67c456e` | `main` |
 | 13 | 2026-07-06 | Track proxy connection lifecycle | `942a382`, `bd435b6` | `main` |
 | 12 | 2026-07-06 | Add proxy graceful shutdown | `16ed045` | `main` |

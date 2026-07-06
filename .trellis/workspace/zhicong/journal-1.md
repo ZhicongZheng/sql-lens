@@ -471,3 +471,37 @@ Started and completed Issue 018 by adding the sql-lens-capture workspace crate, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Define protocol adapter trait
+
+**Date**: 2026-07-06
+**Task**: Define protocol adapter trait
+**Branch**: `main`
+
+### Summary
+
+Started and completed Issue 019 by defining the object-safe protocol adapter trait, type-erased protocol connection state, capture event emitter contract, observation summaries, structured errors, dummy adapter tests, and protocol contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `58c1850` | (see git log) |
+| `0f64eaa` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
