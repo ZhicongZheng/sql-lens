@@ -1711,6 +1711,143 @@ shutdown.request_shutdown()?;
 let summary = ActiveSessionDrain::drain(session_handles, &shutdown_config).await;
 ```
 
+## Scenario: HTTP API Server Foundation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` owns the first HTTP server primitive for the Web/API surface.
+- The foundation must let later REST, WebSocket, static web, auth, and dashboard work compose routes without changing listener and request-correlation contracts.
+- This layer must not start the application runtime, install OS signal handlers, parse SQL protocols, query storage, or define product endpoints that are owned by later API tasks.
+
+### 2. Signatures
+
+HTTP server types live in `crates/sql-lens-api/src/` and are re-exported from `lib.rs`:
+
+```rust
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+pub struct HttpServerConfig {
+    pub listen: String,
+    pub request_timeout_ms: u64,
+}
+
+impl From<&sql_lens_config::WebConfig> for HttpServerConfig;
+
+pub struct BoundHttpServer;
+
+impl BoundHttpServer {
+    pub fn local_addr(&self) -> std::net::SocketAddr;
+
+    pub async fn serve_with_shutdown(
+        self,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), HttpServerError>;
+}
+
+pub async fn bind_http_server(
+    config: &HttpServerConfig,
+) -> Result<BoundHttpServer, HttpServerError>;
+
+pub fn router() -> axum::Router;
+```
+
+Allowed dependencies for this first API server layer:
+
+```toml
+axum = "0.8"
+sql-lens-config = { path = "../sql-lens-config" }
+tokio = { version = "1", features = ["net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+```
+
+Do not add `uuid`, `time`, storage crates, proxy crates, protocol crates, auth dependencies, TLS dependencies, or OpenAPI generation dependencies to this foundation layer without a task-level design update.
+
+### 3. Contracts
+
+- `HttpServerConfig::from(&WebConfig)` copies `web.listen` and `web.request_timeout_ms`.
+- `bind_http_server` binds a `tokio::net::TcpListener` using the configured listen address.
+- Tests and later runtime composition discover the actual address with `BoundHttpServer::local_addr`.
+- `serve_with_shutdown` uses Axum graceful shutdown and a caller-owned shutdown future.
+- `sql-lens-api` does not own OS signal handling; later application composition belongs in `sql-lens-app`.
+- `router()` installs request ID middleware but does not define product endpoints by default.
+- The request ID header is `x-request-id`.
+- If a request includes `x-request-id`, the same value is exposed to handlers and propagated to the response.
+- If a request omits `x-request-id`, middleware generates a dependency-light process-local ID suitable for correlation, not security.
+- Request IDs may be stored in request extensions for handlers.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `web.listen` is valid and bindable | Return `BoundHttpServer` |
+| `web.listen` cannot be bound | Return `HttpServerError::Bind` with the configured listen value and IO source |
+| bound local address cannot be read | Return `HttpServerError::LocalAddr` |
+| Axum server returns an IO error | Return `HttpServerError::Serve` |
+| shutdown future resolves | Stop accepting new connections and drain through Axum graceful shutdown |
+| request includes `x-request-id` | Preserve and propagate that value |
+| request omits `x-request-id` | Generate and propagate an ID |
+| a product endpoint is needed | Add it in a dedicated endpoint task, not as part of foundation cleanup |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- API tests bind to `127.0.0.1:0` and assert `local_addr().port() != 0`.
+- Middleware tests call the router through `tower::ServiceExt::oneshot`.
+- Runtime composition later owns Ctrl-C handling and passes a shutdown future into `serve_with_shutdown`.
+
+Base:
+
+- An empty foundation router returns 404 while still attaching `x-request-id`.
+- A caller converts `&config.web` into `HttpServerConfig` and then binds the server.
+
+Bad:
+
+- Adding `/api/v1/health` in a server foundation task when a dedicated health endpoint task exists.
+- Starting the HTTP server from `sql-lens-app` while app specs still require startup-check-only behavior.
+- Using cryptographic request ID dependencies before a security task requires them.
+- Putting proxy, storage, protocol parser, or SQL replay logic inside `sql-lens-api`.
+
+### 6. Tests Required
+
+For HTTP server foundation changes:
+
+- `HttpServerConfig::from(&WebConfig)` field mapping test.
+- Bind test using an ephemeral port.
+- Graceful shutdown test using a caller-provided future.
+- Generated request ID response header test.
+- Incoming request ID propagation test.
+- No change to existing `sql-lens-app` startup-check behavior unless a later runtime task updates that contract.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+#[tokio::main]
+async fn main() {
+    let app = sql_lens_api::router()
+        .route("/api/v1/health", get(health));
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+#### Correct
+
+```rust
+let server_config = HttpServerConfig::from(&config.web);
+let server = bind_http_server(&server_config).await?;
+let local_addr = server.local_addr();
+server.serve_with_shutdown(shutdown_future).await?;
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

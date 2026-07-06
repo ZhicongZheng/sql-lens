@@ -6,4 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+axum = "0.8"
+sql-lens-config = { path = "../sql-lens-config" }
+tokio = { version = "1", features = ["net"] }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
