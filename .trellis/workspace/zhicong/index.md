@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 13
+- **Total Sessions**: 14
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~439 | Active |
+| `journal-1.md` | ~473 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 14 | 2026-07-06 | Add capture pipeline channel | `7c81cd8`, `67c456e` | `main` |
 | 13 | 2026-07-06 | Track proxy connection lifecycle | `942a382`, `bd435b6` | `main` |
 | 12 | 2026-07-06 | Add proxy graceful shutdown | `16ed045` | `main` |
 | 11 | 2026-07-06 | Implement bidirectional TCP forwarding | `1048c99` | `main` |

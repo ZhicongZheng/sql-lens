@@ -437,3 +437,37 @@ Started and completed Issue 017 by adding proxy-local connection lifecycle ID ge
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: Add capture pipeline channel
+
+**Date**: 2026-07-06
+**Task**: Add capture pipeline channel
+**Branch**: `main`
+
+### Summary
+
+Started and completed Issue 018 by adding the sql-lens-capture workspace crate, bounded non-blocking SqlEvent channel, explicit overload policies, dropped-event stats, unit tests, and capture boundary documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7c81cd8` | (see git log) |
+| `67c456e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
