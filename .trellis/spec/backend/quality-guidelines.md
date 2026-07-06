@@ -447,6 +447,126 @@ fn run(cli: Cli) -> Result<(), AppError> {
 }
 ```
 
+## Scenario: TCP Proxy Listener Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-proxy` owns the first network listener boundary for database client connections.
+- The listener layer binds local TCP sockets, accepts clients, and hands accepted sockets to later session logic.
+- This layer must not dial backends, forward bytes, parse protocols, emit capture events, or start the application runtime.
+
+### 2. Signatures
+
+Public listener types live in `crates/sql-lens-proxy/src/lib.rs`:
+
+```rust
+pub struct ProxyListenerConfig {
+    pub listen: String,
+}
+
+pub struct TcpProxyListener;
+
+impl TcpProxyListener {
+    pub async fn bind(config: ProxyListenerConfig) -> Result<Self, ProxyListenerError>;
+    pub fn local_addr(&self) -> Result<std::net::SocketAddr, ProxyListenerError>;
+    pub async fn accept(&self) -> Result<AcceptedClient, ProxyListenerError>;
+    pub async fn run_accept_loop(
+        self,
+        accepted_tx: tokio::sync::mpsc::Sender<AcceptedClient>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<AcceptLoopStats, ProxyListenerError>;
+}
+```
+
+Allowed listener dependencies:
+
+```toml
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+tracing = "0.1"
+```
+
+Do not add `tokio-util`, `thiserror`, `anyhow`, `async-trait`, backend client libraries, protocol crates, or app composition dependencies for the first listener boundary.
+
+### 3. Contracts
+
+- `ProxyListenerConfig.listen` is the runtime bind address string.
+- `TcpProxyListener::bind` binds a Tokio `TcpListener`.
+- `TcpProxyListener::local_addr` returns the actual bound local address, including OS-assigned ports from `127.0.0.1:0`.
+- `TcpProxyListener::accept` returns an `AcceptedClient` with the peer address and owned client stream.
+- `TcpProxyListener::run_accept_loop` sends accepted clients through an `mpsc::Sender<AcceptedClient>`.
+- Shutdown is represented by `tokio::sync::watch::Receiver<bool>`.
+- `shutdown = true` stops accepting new client sockets.
+- Dropping the shutdown sender also stops the accept loop.
+- `AcceptLoopStats.accepted_connections` reports how many accepted clients were delivered before the loop stopped.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Listener bind succeeds | Return `TcpProxyListener` |
+| Listener bind fails | Return `ProxyListenerError::Bind { listen, source }` |
+| Local address lookup fails | Return `ProxyListenerError::LocalAddr { source }` |
+| Accept fails | Return `ProxyListenerError::Accept { source }` |
+| Accepted-client receiver is closed | Return `ProxyListenerError::AcceptedClientReceiverClosed` |
+| Shutdown receiver changes to `true` | Stop loop and return stats |
+| Shutdown sender is dropped | Stop loop and return stats |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Bind `127.0.0.1:0` in tests and inspect `local_addr`.
+- Use `watch::Receiver<bool>` for the first simple shutdown boundary.
+- Use `mpsc::Sender<AcceptedClient>` as the handoff point to future session/backend dialing work.
+
+Base:
+
+- The accept loop owns the listener and returns stats when it stops.
+- Tests use `tokio::time::timeout` around async accept-loop joins so failures do not hang.
+- Test-only client connections may use `TcpStream::connect` to exercise accepting behavior.
+
+Bad:
+
+- Calling backend `connect` from listener code.
+- Adding byte forwarding or protocol parsing to `sql-lens-proxy` listener tests.
+- Importing `sql-lens-app`, `sql-lens-config`, protocol crates, storage crates, or API crates into `sql-lens-proxy` for listener work.
+- Using fixed ports in tests except when intentionally testing a second-bind failure against an already-bound local address.
+
+### 6. Tests Required
+
+For TCP listener changes:
+
+- Successful bind test using `127.0.0.1:0`.
+- Structured bind failure test using a second bind to an already-bound address.
+- Accept-loop delivery test that connects a local client and receives an `AcceptedClient`.
+- Shutdown test that stops the accept loop without a client connection.
+- Run socket-binding tests outside sandboxes that deny local TCP binds.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub async fn run_proxy(listen: &str, backend: &str) -> std::io::Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    let (client, _) = listener.accept().await?;
+    let backend = TcpStream::connect(backend).await?;
+    tokio::io::copy_bidirectional(&mut client, &mut backend).await?;
+    Ok(())
+}
+```
+
+#### Correct
+
+```rust
+let listener = TcpProxyListener::bind(ProxyListenerConfig::new("127.0.0.1:0")).await?;
+let stats = listener.run_accept_loop(accepted_tx, shutdown_rx).await?;
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.
