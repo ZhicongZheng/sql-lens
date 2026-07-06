@@ -44,22 +44,22 @@ SQL Lens must keep packet forwarding independent from storage and UI work. A bou
 
 ## Acceptance Criteria
 
-- [ ] `sql-lens-capture` exists as a workspace crate.
-- [ ] Capture channel accepts `SqlEvent`.
-- [ ] Channel capacity is configurable.
-- [ ] Overload policy is explicit.
-- [ ] Full channel with drop-newest policy drops the incoming event and increments the dropped counter.
-- [ ] Full channel with reject-new policy returns the event and increments the dropped counter.
-- [ ] Closed receiver produces a structured publish error.
-- [ ] Publish path does not await.
-- [ ] Unit tests cover enqueue/receive.
-- [ ] Unit tests cover drop-newest overload.
-- [ ] Unit tests cover reject-new overload.
-- [ ] Unit tests cover closed receiver.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `sql-lens-capture` exists as a workspace crate.
+- [x] Capture channel accepts `SqlEvent`.
+- [x] Channel capacity is configurable.
+- [x] Overload policy is explicit.
+- [x] Full channel with drop-newest policy drops the incoming event and increments the dropped counter.
+- [x] Full channel with reject-new policy returns the event and increments the dropped counter.
+- [x] Closed receiver produces a structured publish error.
+- [x] Publish path does not await.
+- [x] Unit tests cover enqueue/receive.
+- [x] Unit tests cover drop-newest overload.
+- [x] Unit tests cover reject-new overload.
+- [x] Unit tests cover closed receiver.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Open Questions
 

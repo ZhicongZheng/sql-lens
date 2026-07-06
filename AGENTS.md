@@ -20,6 +20,7 @@ At bootstrap, the repository is documentation-first. Business code may not exist
 sql-lens/
   crates/
     sql-lens-core/
+    sql-lens-capture/
     sql-lens-config/
     sql-lens-proxy/
     sql-lens-protocol/
@@ -68,6 +69,18 @@ Owns runtime configuration contracts:
 - Serde-compatible configuration shape.
 
 Do not load files, read environment variables, validate runtime constraints, or start services here.
+
+### `sql-lens-capture`
+
+Owns capture pipeline primitives:
+
+- Bounded capture event channel.
+- Non-blocking event publisher.
+- Capture event receiver for future storage and broadcast fan-out.
+- Capture overload policy.
+- Dropped-event counters.
+
+Do not parse protocols, write storage, broadcast WebSocket messages, or block packet forwarding here.
 
 ### `sql-lens-proxy`
 
@@ -176,6 +189,7 @@ Be careful when modifying:
 - `SqlEvent`.
 - `SqlParameter`.
 - `ConnectionInfo`.
+- Capture pipeline publish outcomes and overload policy.
 - REST response schemas.
 - WebSocket message types.
 - Plugin hook payloads.

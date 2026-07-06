@@ -11,6 +11,7 @@ SQL Lens backend is Rust-first and organized as a Cargo workspace. Each crate ow
 ```text
 crates/
 ├── sql-lens-core/
+├── sql-lens-capture/
 ├── sql-lens-config/
 ├── sql-lens-proxy/
 ├── sql-lens-protocol/
@@ -39,6 +40,7 @@ Member packages inherit shared package metadata instead of repeating it.
 ## Module Ownership
 
 - `sql-lens-core`: protocol-neutral domain models such as SQL events, connections, parameters, timings, result summaries, error summaries, and protocol metadata containers.
+- `sql-lens-capture`: bounded capture event channel, non-blocking event publisher, capture receiver for future storage/broadcast fan-out, overload policy, and dropped-event counters.
 - `sql-lens-config`: startup configuration structs, configuration enums, defaults, and serde-compatible configuration shape.
 - `sql-lens-proxy`: TCP listener, backend dialing, session lifecycle, bidirectional forwarding, shutdown, and backpressure coordination.
 - `sql-lens-protocol`: protocol adapter traits, adapter registry, and shared adapter contracts.
@@ -51,6 +53,7 @@ Member packages inherit shared package metadata instead of repeating it.
 ## Dependency Rules
 
 - Core must not depend on protocol-specific crates.
+- Capture must not depend on proxy, protocol, storage, API, plugin, app, database, HTTP, or exporter crates.
 - Proxy must not contain SQL rendering logic.
 - API must not parse protocol packets.
 - Storage must not depend on UI or API handlers.
@@ -69,5 +72,6 @@ Member packages inherit shared package metadata instead of repeating it.
 
 - Do not add MySQL-specific fields directly to shared event structs.
 - Do not block TCP forwarding on storage, UI, exporters, or plugin hooks.
+- Do not put capture channel primitives inside proxy, protocol, storage, or API crates.
 - Do not introduce generic multi-protocol abstractions before a second real adapter needs them.
 - Do not treat SQLite as a TCP proxy target; it requires a separate tracing or driver integration design.

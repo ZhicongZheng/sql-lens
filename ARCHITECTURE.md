@@ -140,6 +140,18 @@ Startup configuration contract:
 
 Config file loading, environment overrides, validation, and runtime apply logic belong outside this crate.
 
+### `sql-lens-capture`
+
+Capture pipeline primitives:
+
+- Bounded capture event channel.
+- Non-blocking event publisher.
+- Capture event receiver for future fan-out.
+- Overload policy.
+- Dropped-event counters.
+
+This crate should not parse protocol packets, persist events, broadcast WebSocket messages, or block packet forwarding.
+
 ### `sql-lens-proxy`
 
 Network proxy:

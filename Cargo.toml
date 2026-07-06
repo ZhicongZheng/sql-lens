@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/sql-lens-config",
     "crates/sql-lens-core",
+    "crates/sql-lens-capture",
     "crates/sql-lens-proxy",
     "crates/sql-lens-protocol",
     "crates/sql-lens-protocol-mysql",

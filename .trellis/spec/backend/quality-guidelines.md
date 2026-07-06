@@ -943,6 +943,125 @@ let mut lifecycle = ConnectionLifecycleRecord::accepted(
 lifecycle.mark_backend_connected(backend_connected_at);
 ```
 
+## Scenario: Capture Pipeline Channel Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-capture` owns the bounded handoff channel for normalized `SqlEvent` values.
+- The capture channel sits between proxy/protocol capture producers and future storage/WebSocket/statistics consumers.
+- This layer must keep packet forwarding non-blocking and protocol-neutral.
+
+### 2. Signatures
+
+Public capture types live in `crates/sql-lens-capture/src/lib.rs`:
+
+```rust
+pub struct CapturePipelineConfig {
+    pub capacity: std::num::NonZeroUsize,
+    pub overload_policy: CaptureOverloadPolicy,
+}
+
+pub enum CaptureOverloadPolicy {
+    DropNewest,
+    RejectNew,
+}
+
+pub struct CapturePipeline;
+
+impl CapturePipeline {
+    pub fn channel(config: CapturePipelineConfig) -> (CaptureEventPublisher, CaptureEventReceiver);
+}
+
+impl CaptureEventPublisher {
+    pub fn publish(&self, event: sql_lens_core::SqlEvent) -> Result<CapturePublishOutcome, CapturePublishError>;
+    pub fn stats(&self) -> CapturePipelineStats;
+}
+
+impl CaptureEventReceiver {
+    pub async fn recv(&mut self) -> Option<sql_lens_core::SqlEvent>;
+    pub fn stats(&self) -> CapturePipelineStats;
+}
+```
+
+Allowed dependencies:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+tokio = { version = "1", features = ["sync"] }
+```
+
+Do not add proxy, protocol, storage, API, plugin, app, database client, HTTP, exporter, `tokio-util`, `thiserror`, `anyhow`, UUID, or time/chrono dependencies for this layer.
+
+### 3. Contracts
+
+- `CapturePipelineConfig.capacity` uses `NonZeroUsize`; zero-capacity channels are unrepresentable.
+- `CapturePipeline::channel` returns one cloneable publisher and one receiver.
+- `CaptureEventPublisher::publish` must use `tokio::sync::mpsc::Sender::try_send`; it must not await.
+- `CaptureOverloadPolicy::DropNewest` drops the incoming event when the channel is full, increments `dropped_events`, and returns `CapturePublishOutcome::Dropped`.
+- `CaptureOverloadPolicy::RejectNew` returns `CapturePublishError::Full { event }`, increments `dropped_events`, and leaves the queued event unchanged.
+- Closed receivers return `CapturePublishError::Closed { event }` and do not increment the overload dropped counter.
+- `CapturePipelineStats.dropped_events` is shared between publisher and receiver handles.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Channel has capacity | `publish` returns `Enqueued` and receiver can read the same `SqlEvent` |
+| Channel is full and policy is `DropNewest` | Incoming event is dropped, return `Dropped`, increment `dropped_events` |
+| Channel is full and policy is `RejectNew` | Return `Full { event }`, increment `dropped_events`, keep queued event |
+| Receiver is dropped | Return `Closed { event }`, do not increment `dropped_events` |
+| Future storage fan-out is needed | Add a consumer task later; do not write storage inside publisher |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Protocol observers emit already-normalized `SqlEvent` values into `CaptureEventPublisher`.
+- A later fan-out task owns the receiver and dispatches to storage, WebSocket, and counters.
+
+Base:
+
+- Tests use synthetic `SqlEvent` values from `sql-lens-core`.
+- Backpressure behavior is verified by creating a capacity-one channel and publishing two events.
+
+Bad:
+
+- Calling `send().await` from the packet-forwarding path.
+- Adding storage writes or WebSocket broadcast loops to `sql-lens-capture`.
+- Dropping events without incrementing `dropped_events`.
+- Using a zero-capacity mpsc channel and letting Tokio panic.
+
+### 6. Tests Required
+
+For capture pipeline changes:
+
+- Enqueue/receive test that asserts the exact `SqlEvent` survives the channel.
+- Drop-newest overload test that asserts only the first event is received and dropped count increments.
+- Reject-new overload test that asserts the rejected event is returned and dropped count increments.
+- Closed receiver test that asserts structured closed error and no overload count change.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+storage.append(event).await?;
+publisher.send(event).await?;
+```
+
+#### Correct
+
+```rust
+match publisher.publish(event)? {
+    CapturePublishOutcome::Enqueued => {}
+    CapturePublishOutcome::Dropped => {}
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

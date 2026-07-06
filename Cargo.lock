@@ -300,6 +300,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sql-lens-capture"
+version = "0.1.0"
+dependencies = [
+ "sql-lens-core",
+ "tokio",
+]
+
+[[package]]
 name = "sql-lens-config"
 version = "0.1.0"
 dependencies = [
