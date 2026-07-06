@@ -337,6 +337,113 @@ if config.proxy.listen.is_empty() {
 config.validate()?;
 ```
 
+## Scenario: CLI Entry Point Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` owns the user-facing `sql-lens` binary.
+- The first CLI layer is a startup contract for local development, CI smoke tests, and future runtime composition.
+- Keep this layer synchronous until a runtime startup task explicitly adds async services.
+
+### 2. Signatures
+
+The initial command surface is:
+
+```text
+sql-lens [--config <FILE>]
+sql-lens --version
+sql-lens --help
+```
+
+The Rust entry point shape should stay small:
+
+```rust
+fn main() -> std::process::ExitCode;
+fn run(cli: Cli) -> Result<(), AppError>;
+```
+
+Allowed first-layer dependencies in `sql-lens-app`:
+
+```toml
+clap = { version = "4", features = ["derive"] }
+sql-lens-config = { path = "../sql-lens-config" }
+```
+
+### 3. Contracts
+
+- `--config <FILE>` loads the selected TOML file through `SqlLensConfig::from_path`.
+- The default config path is `sql-lens.toml`.
+- The loaded config is validated through `SqlLensConfig::validate`.
+- `--version` is handled by clap and exits successfully without loading config.
+- Successful load and validation exit with `ExitCode::SUCCESS`.
+- Config load or validation failure prints a human-readable message to stderr and exits with `ExitCode::FAILURE`.
+- Do not start proxy, API, storage, logging, signal handling, hot reload, or async runtime services in this layer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `--version` is passed | Print version and exit zero before config loading |
+| `--config <FILE>` points to a valid config | Load, validate, exit zero |
+| Config file cannot be read | Include config load context and the path in stderr; exit non-zero |
+| TOML cannot be parsed | Include config load context and parse error in stderr; exit non-zero |
+| Config validation fails | Include validation context and violation details in stderr; exit non-zero |
+| Running without `--config` | Attempt to load `sql-lens.toml` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- CLI code delegates parsing to clap and delegates config semantics to `sql-lens-config`.
+- App-level errors wrap config errors only to add startup context.
+
+Base:
+
+- Integration tests run the compiled `sql-lens` binary with standard library `Command`.
+- Test configs use temporary files and explicit `--config` paths.
+
+Bad:
+
+- Duplicating config validation rules in `sql-lens-app`.
+- Calling `unwrap` or `expect` on user-provided config load/validation paths.
+- Adding async runtime, HTTP, storage, watcher, or logging dependencies to satisfy the first CLI task.
+
+### 6. Tests Required
+
+For CLI entry point changes:
+
+- `--version` exits successfully and includes the package version.
+- `--config <valid-file>` exits successfully.
+- Missing config path exits non-zero and stderr includes load/read context.
+- Invalid config exits non-zero and stderr includes validation context and violation fields.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+fn main() {
+    let config = SqlLensConfig::from_path("sql-lens.toml").unwrap();
+    if config.proxy.listen.is_empty() {
+        panic!("missing proxy listen");
+    }
+}
+```
+
+#### Correct
+
+```rust
+fn run(cli: Cli) -> Result<(), AppError> {
+    let config = SqlLensConfig::from_path(&cli.config)?;
+    config.validate()?;
+    Ok(())
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.
