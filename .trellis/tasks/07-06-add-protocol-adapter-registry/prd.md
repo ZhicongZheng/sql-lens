@@ -35,19 +35,19 @@ SQL Lens needs a single adapter selection boundary before runtime composition an
 
 ## Acceptance Criteria
 
-- [ ] Registry can register adapters.
-- [ ] Registry can resolve adapters by protocol name.
-- [ ] Resolved adapters are object-safe trait objects.
-- [ ] Registry lookup can check whether an adapter exists.
-- [ ] Unknown adapter names return structured `UnknownAdapter` error.
-- [ ] Duplicate adapter names return structured `DuplicateAdapter` error.
-- [ ] Tests cover adapter registration and lookup.
-- [ ] Tests cover unknown adapter lookup.
-- [ ] Tests cover duplicate registration.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] Registry can register adapters.
+- [x] Registry can resolve adapters by protocol name.
+- [x] Resolved adapters are object-safe trait objects.
+- [x] Registry lookup can check whether an adapter exists.
+- [x] Unknown adapter names return structured `UnknownAdapter` error.
+- [x] Duplicate adapter names return structured `DuplicateAdapter` error.
+- [x] Tests cover adapter registration and lookup.
+- [x] Tests cover unknown adapter lookup.
+- [x] Tests cover duplicate registration.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Open Questions
 

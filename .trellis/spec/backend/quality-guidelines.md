@@ -1100,6 +1100,20 @@ pub trait ProtocolConnectionState: std::any::Any + std::fmt::Debug + Send {
 pub trait CaptureEventEmitter {
     fn emit(&mut self, event: sql_lens_core::SqlEvent);
 }
+
+pub struct ProtocolAdapterRegistry;
+
+impl ProtocolAdapterRegistry {
+    pub fn new() -> Self;
+    pub fn register<A>(&mut self, adapter: A) -> Result<(), ProtocolAdapterRegistryError>
+    where
+        A: ProtocolAdapter + 'static;
+    pub fn register_shared(&mut self, adapter: std::sync::Arc<dyn ProtocolAdapter>) -> Result<(), ProtocolAdapterRegistryError>;
+    pub fn resolve(&self, protocol: &sql_lens_core::ProtocolName) -> Result<std::sync::Arc<dyn ProtocolAdapter>, ProtocolAdapterRegistryError>;
+    pub fn contains(&self, protocol: &sql_lens_core::ProtocolName) -> bool;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
 ```
 
 Allowed dependency:
@@ -1121,6 +1135,11 @@ Do not add `tokio`, `async-trait`, `sql-lens-capture`, proxy, storage, API, app,
 - Capture channel overload policy is outside this crate; adapter parsing should not depend on runtime channel behavior.
 - `ProtocolObservation.bytes_observed` records input bytes seen by the adapter.
 - `ProtocolObservation.events_emitted` records events emitted through the emitter.
+- `ProtocolAdapterRegistry` stores adapters keyed by `ProtocolName`.
+- Registry storage uses `Arc<dyn ProtocolAdapter>` so resolved adapters can be shared by runtime tasks.
+- Unknown adapter names return `ProtocolAdapterRegistryError::UnknownAdapter`.
+- Duplicate adapter names return `ProtocolAdapterRegistryError::DuplicateAdapter`.
+- Config validation mapping is a later composition task; do not make `sql-lens-config` depend on `sql-lens-protocol`.
 
 ### 4. Validation & Error Matrix
 
@@ -1133,6 +1152,9 @@ Do not add `tokio`, `async-trait`, `sql-lens-capture`, proxy, storage, API, app,
 | Backend bytes are observed | Return observed byte count and emitted event count |
 | Adapter emits SQL event | Call `CaptureEventEmitter::emit(SqlEvent)` |
 | Registry needs trait objects | `Box<dyn ProtocolAdapter>` compiles and can observe bytes |
+| Adapter is registered | Registry resolves the same protocol name to an `Arc<dyn ProtocolAdapter>` |
+| Adapter protocol name is duplicated | Return `DuplicateAdapter` |
+| Adapter protocol name is unknown | Return `UnknownAdapter` |
 
 ### 5. Good/Base/Bad Cases
 
@@ -1145,11 +1167,13 @@ Base:
 
 - Unit tests use dummy bytes and synthetic `SqlEvent` values.
 - Invalid state errors are structured without adding third-party error crates.
+- Registry errors are structured in protocol crate and mapped to user-facing config errors later.
 
 Bad:
 
 - Defining `trait ProtocolAdapter<State>` or an associated `type State`, which prevents a heterogeneous registry without another erasure layer.
 - Importing `sql-lens-capture` and making parsers depend on channel overload behavior.
+- Importing `sql-lens-protocol` from `sql-lens-config` just to validate startup protocol names.
 - Adding async trait methods before parser work proves it is needed.
 - Putting MySQL-specific packet fields in protocol-neutral contracts.
 
@@ -1162,6 +1186,9 @@ For protocol adapter contract changes:
 - Backend byte observation test.
 - Event emission test.
 - Protocol-specific state downcast test.
+- Registry register/resolve test.
+- Registry unknown adapter test.
+- Registry duplicate adapter test.
 - Structured error display/source test.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.

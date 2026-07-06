@@ -1,7 +1,7 @@
 //! Protocol adapter contracts for SQL Lens.
 
 use sql_lens_core::{ConnectionInfo, ProtocolName, SqlEvent};
-use std::{any::Any, error::Error, fmt};
+use std::{any::Any, collections::HashMap, error::Error, fmt, sync::Arc};
 
 pub trait ProtocolAdapter: fmt::Debug + Send + Sync {
     fn protocol_name(&self) -> ProtocolName;
@@ -24,6 +24,62 @@ pub trait ProtocolAdapter: fmt::Debug + Send + Sync {
         bytes: &[u8],
         events: &mut dyn CaptureEventEmitter,
     ) -> Result<ProtocolObservation, ProtocolAdapterError>;
+}
+
+#[derive(Debug, Default)]
+pub struct ProtocolAdapterRegistry {
+    adapters: HashMap<ProtocolName, Arc<dyn ProtocolAdapter>>,
+}
+
+impl ProtocolAdapterRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register<A>(&mut self, adapter: A) -> Result<(), ProtocolAdapterRegistryError>
+    where
+        A: ProtocolAdapter + 'static,
+    {
+        self.register_shared(Arc::new(adapter))
+    }
+
+    pub fn register_shared(
+        &mut self,
+        adapter: Arc<dyn ProtocolAdapter>,
+    ) -> Result<(), ProtocolAdapterRegistryError> {
+        let protocol = adapter.protocol_name();
+
+        if self.adapters.contains_key(&protocol) {
+            return Err(ProtocolAdapterRegistryError::DuplicateAdapter { protocol });
+        }
+
+        self.adapters.insert(protocol, adapter);
+
+        Ok(())
+    }
+
+    pub fn resolve(
+        &self,
+        protocol: &ProtocolName,
+    ) -> Result<Arc<dyn ProtocolAdapter>, ProtocolAdapterRegistryError> {
+        self.adapters.get(protocol).cloned().ok_or_else(|| {
+            ProtocolAdapterRegistryError::UnknownAdapter {
+                protocol: protocol.clone(),
+            }
+        })
+    }
+
+    pub fn contains(&self, protocol: &ProtocolName) -> bool {
+        self.adapters.contains_key(protocol)
+    }
+
+    pub fn len(&self) -> usize {
+        self.adapters.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.adapters.is_empty()
+    }
 }
 
 pub trait ProtocolConnectionState: Any + fmt::Debug + Send {
@@ -95,6 +151,27 @@ impl fmt::Display for ProtocolAdapterError {
 
 impl Error for ProtocolAdapterError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolAdapterRegistryError {
+    DuplicateAdapter { protocol: ProtocolName },
+    UnknownAdapter { protocol: ProtocolName },
+}
+
+impl fmt::Display for ProtocolAdapterRegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateAdapter { protocol } => {
+                write!(f, "protocol adapter already registered: {}", protocol.0)
+            }
+            Self::UnknownAdapter { protocol } => {
+                write!(f, "unknown protocol adapter: {}", protocol.0)
+            }
+        }
+    }
+}
+
+impl Error for ProtocolAdapterRegistryError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,9 +181,15 @@ mod tests {
     };
 
     #[derive(Debug)]
-    struct DummyAdapter;
+    struct DummyAdapter {
+        protocol: &'static str,
+    }
 
     impl DummyAdapter {
+        fn new(protocol: &'static str) -> Self {
+            Self { protocol }
+        }
+
         fn state_mut<'a>(
             &self,
             state: &'a mut dyn ProtocolConnectionState,
@@ -121,7 +204,7 @@ mod tests {
 
     impl ProtocolAdapter for DummyAdapter {
         fn protocol_name(&self) -> ProtocolName {
-            ProtocolName("dummy".to_owned())
+            ProtocolName(self.protocol.to_owned())
         }
 
         fn create_connection_state(
@@ -234,7 +317,7 @@ mod tests {
 
     #[test]
     fn adapter_observes_client_bytes() {
-        let adapter = DummyAdapter;
+        let adapter = DummyAdapter::new("dummy");
         let context = test_context();
         let mut state = adapter.create_connection_state(&context);
         let mut events = VecCaptureEventEmitter::default();
@@ -255,7 +338,7 @@ mod tests {
 
     #[test]
     fn adapter_observes_backend_bytes() {
-        let adapter = DummyAdapter;
+        let adapter = DummyAdapter::new("dummy");
         let context = test_context();
         let mut state = adapter.create_connection_state(&context);
         let mut events = VecCaptureEventEmitter::default();
@@ -276,7 +359,7 @@ mod tests {
 
     #[test]
     fn adapter_emits_capture_events() {
-        let adapter = DummyAdapter;
+        let adapter = DummyAdapter::new("dummy");
         let context = test_context();
         let mut state = adapter.create_connection_state(&context);
         let mut events = VecCaptureEventEmitter::default();
@@ -291,7 +374,7 @@ mod tests {
 
     #[test]
     fn adapter_supports_protocol_specific_state_downcast() {
-        let adapter = DummyAdapter;
+        let adapter = DummyAdapter::new("dummy");
         let context = test_context();
         let state = adapter.create_connection_state(&context);
 
@@ -300,7 +383,7 @@ mod tests {
 
     #[test]
     fn protocol_adapter_is_object_safe() {
-        let adapter: Box<dyn ProtocolAdapter> = Box::new(DummyAdapter);
+        let adapter: Box<dyn ProtocolAdapter> = Box::new(DummyAdapter::new("dummy"));
         let context = test_context();
         let mut state = adapter.create_connection_state(&context);
         let mut events = VecCaptureEventEmitter::default();
@@ -311,6 +394,73 @@ mod tests {
 
         assert_eq!(adapter.protocol_name(), ProtocolName("dummy".to_owned()));
         assert_eq!(observation, ProtocolObservation::new(3, 1));
+    }
+
+    #[test]
+    fn registry_registers_and_resolves_adapter() {
+        let mut registry = ProtocolAdapterRegistry::new();
+
+        registry
+            .register(DummyAdapter::new("dummy"))
+            .expect("adapter should register");
+
+        let adapter = registry
+            .resolve(&ProtocolName("dummy".to_owned()))
+            .expect("adapter should resolve");
+
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.is_empty());
+        assert_eq!(adapter.protocol_name(), ProtocolName("dummy".to_owned()));
+    }
+
+    #[test]
+    fn registry_reports_adapter_presence() {
+        let mut registry = ProtocolAdapterRegistry::new();
+
+        assert!(!registry.contains(&ProtocolName("dummy".to_owned())));
+
+        registry
+            .register(DummyAdapter::new("dummy"))
+            .expect("adapter should register");
+
+        assert!(registry.contains(&ProtocolName("dummy".to_owned())));
+        assert!(!registry.contains(&ProtocolName("missing".to_owned())));
+    }
+
+    #[test]
+    fn registry_returns_unknown_adapter_error() {
+        let registry = ProtocolAdapterRegistry::new();
+
+        let error = registry
+            .resolve(&ProtocolName("missing".to_owned()))
+            .expect_err("missing adapter should fail");
+
+        assert_eq!(
+            error,
+            ProtocolAdapterRegistryError::UnknownAdapter {
+                protocol: ProtocolName("missing".to_owned()),
+            }
+        );
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_adapter_names() {
+        let mut registry = ProtocolAdapterRegistry::new();
+
+        registry
+            .register(DummyAdapter::new("dummy"))
+            .expect("first adapter should register");
+        let error = registry
+            .register(DummyAdapter::new("dummy"))
+            .expect_err("duplicate adapter should fail");
+
+        assert_eq!(
+            error,
+            ProtocolAdapterRegistryError::DuplicateAdapter {
+                protocol: ProtocolName("dummy".to_owned()),
+            }
+        );
     }
 
     #[test]
