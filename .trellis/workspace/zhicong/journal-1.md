@@ -505,3 +505,37 @@ Started and completed Issue 019 by defining the object-safe protocol adapter tra
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Add protocol adapter registry
+
+**Date**: 2026-07-06
+**Task**: Add protocol adapter registry
+**Branch**: `main`
+
+### Summary
+
+Started and completed Issue 020 by adding ProtocolAdapterRegistry, shared Arc-backed adapter resolution, structured unknown and duplicate adapter errors, registry tests, and protocol registry spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `89c06f1` | (see git log) |
+| `5637f35` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
