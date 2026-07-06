@@ -687,6 +687,130 @@ let dial_config = BackendDialConfig::from_config(&config.proxy, &config.backend)
 let proxied = BackendDialer::dial(accepted, &dial_config).await?;
 ```
 
+## Scenario: Bidirectional TCP Forwarding Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-proxy` owns raw byte forwarding between paired client and backend TCP streams.
+- Forwarding is the hot path for transparent proxy behavior. It must move bytes and report counters without waiting for storage, UI, protocol parsing, plugins, or exporters.
+- This layer must not parse SQL protocols, emit capture events, allocate connection IDs, persist lifecycle records, or start the application runtime.
+
+### 2. Signatures
+
+Public forwarding types live in `crates/sql-lens-proxy/src/lib.rs`:
+
+```rust
+pub struct TcpForwarder;
+
+impl TcpForwarder {
+    pub async fn forward(
+        connection: ProxiedConnection,
+    ) -> Result<ForwardingSummary, ForwardingError>;
+}
+
+pub struct ForwardingSummary {
+    pub client_peer_addr: std::net::SocketAddr,
+    pub backend_address: String,
+    pub client_to_backend_bytes: u64,
+    pub backend_to_client_bytes: u64,
+}
+
+pub struct ForwardingFailure {
+    pub client_peer_addr: std::net::SocketAddr,
+    pub backend_address: String,
+    pub client_to_backend_bytes: Option<u64>,
+    pub backend_to_client_bytes: Option<u64>,
+}
+
+pub enum ForwardingError {
+    Io {
+        failure: ForwardingFailure,
+        source: std::io::Error,
+    },
+}
+```
+
+Allowed forwarding dependencies:
+
+```toml
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros", "io-util"] }
+tracing = "0.1"
+```
+
+Do not add `tokio-util`, `thiserror`, `anyhow`, protocol crates, app crates, storage crates, database clients, retry libraries, or TLS libraries for this layer.
+
+### 3. Contracts
+
+- `TcpForwarder::forward` consumes a `ProxiedConnection`.
+- Client stream must be passed as the first argument to `tokio::io::copy_bidirectional`.
+- Backend stream must be passed as the second argument to `tokio::io::copy_bidirectional`.
+- Successful forwarding returns `ForwardingSummary`.
+- `client_to_backend_bytes` maps to the first `copy_bidirectional` return value.
+- `backend_to_client_bytes` maps to the second `copy_bidirectional` return value.
+- A clean EOF from either side relies on Tokio's close behavior: shutdown the opposite writer and finish when both directions close.
+- IO failures preserve the source `std::io::Error` and proxy-local connection context.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Client writes bytes | Backend receives the same bytes |
+| Backend writes bytes | Client receives the same bytes |
+| `copy_bidirectional` returns `Ok((a_to_b, b_to_a))` | Return `ForwardingSummary` with `a_to_b` as client-to-backend and `b_to_a` as backend-to-client |
+| One side cleanly shuts down | Forwarding completes cleanly after both directions close |
+| `copy_bidirectional` returns an IO error | Return `ForwardingError::Io { failure, source }` |
+| Later protocol capture is needed | Add a protocol-aware observation layer in a later task; do not parse in `TcpForwarder` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Use real loopback TCP streams in tests and assert exact bytes on the opposite side.
+- Test byte counts in both directions so tuple order cannot silently flip.
+- Use `tokio::time::timeout` around forwarding tests to catch hangs.
+
+Base:
+
+- Future session orchestration calls listener -> backend dialer -> forwarder.
+- Future lifecycle work maps `ForwardingSummary` and `ForwardingFailure` into durable records.
+
+Bad:
+
+- Hand-rolling two copy loops before Tokio's behavior proves insufficient.
+- Blocking forwarding on storage, WebSocket, plugin hooks, or metrics exporters.
+- Logging raw SQL text or packet payloads from forwarding code.
+- Adding protocol-specific conditions to forwarding.
+
+### 6. Tests Required
+
+For TCP forwarding changes:
+
+- Client-to-backend copy test.
+- Backend-to-client copy test.
+- Bidirectional byte counter test.
+- Clean close completion test.
+- Run socket-binding tests outside sandboxes that deny local TCP binds.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let sql = parse_mysql_packet(&buffer)?;
+storage.insert(sql).await?;
+backend.write_all(&buffer).await?;
+```
+
+#### Correct
+
+```rust
+let summary = TcpForwarder::forward(proxied).await?;
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

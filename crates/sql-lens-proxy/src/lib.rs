@@ -3,6 +3,7 @@
 use sql_lens_config::{BackendConfig, ProxyConfig};
 use std::{error::Error, fmt, future::Future, io, net::SocketAddr, time::Duration};
 use tokio::{
+    io::copy_bidirectional,
     net::{TcpListener, TcpStream},
     sync::{mpsc, watch},
     time::timeout,
@@ -335,6 +336,105 @@ impl Error for BackendDialError {
     }
 }
 
+#[derive(Debug)]
+pub struct TcpForwarder;
+
+impl TcpForwarder {
+    pub async fn forward(
+        connection: ProxiedConnection,
+    ) -> Result<ForwardingSummary, ForwardingError> {
+        let (mut client_stream, mut backend_stream, client_peer_addr, backend_address) =
+            connection.into_parts();
+
+        tracing::debug!(
+            %client_peer_addr,
+            backend_address = %backend_address,
+            "TCP forwarding started"
+        );
+
+        match copy_bidirectional(&mut client_stream, &mut backend_stream).await {
+            Ok((client_to_backend_bytes, backend_to_client_bytes)) => {
+                tracing::debug!(
+                    %client_peer_addr,
+                    backend_address = %backend_address,
+                    client_to_backend_bytes,
+                    backend_to_client_bytes,
+                    "TCP forwarding finished"
+                );
+
+                Ok(ForwardingSummary {
+                    client_peer_addr,
+                    backend_address,
+                    client_to_backend_bytes,
+                    backend_to_client_bytes,
+                })
+            }
+            Err(source) => {
+                let failure = ForwardingFailure {
+                    client_peer_addr,
+                    backend_address,
+                    client_to_backend_bytes: None,
+                    backend_to_client_bytes: None,
+                };
+
+                Err(ForwardingError::Io { failure, source })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardingSummary {
+    pub client_peer_addr: SocketAddr,
+    pub backend_address: String,
+    pub client_to_backend_bytes: u64,
+    pub backend_to_client_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardingFailure {
+    pub client_peer_addr: SocketAddr,
+    pub backend_address: String,
+    pub client_to_backend_bytes: Option<u64>,
+    pub backend_to_client_bytes: Option<u64>,
+}
+
+#[derive(Debug)]
+pub enum ForwardingError {
+    Io {
+        failure: ForwardingFailure,
+        source: io::Error,
+    },
+}
+
+impl ForwardingError {
+    pub fn failure(&self) -> &ForwardingFailure {
+        match self {
+            Self::Io { failure, .. } => failure,
+        }
+    }
+}
+
+impl fmt::Display for ForwardingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io { failure, source } => write!(
+                f,
+                "failed to forward TCP between client {} and backend {}: {}",
+                failure.client_peer_addr, failure.backend_address, source
+            ),
+        }
+    }
+}
+
+impl Error for ForwardingError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AcceptLoopStats {
     pub accepted_connections: u64,
@@ -384,6 +484,7 @@ impl Error for ProxyListenerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::{Duration, timeout};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
@@ -400,6 +501,161 @@ mod tests {
         let accepted = listener.accept().await.expect("client should be accepted");
 
         (accepted, client)
+    }
+
+    async fn create_test_proxied_connection() -> (ProxiedConnection, TcpStream, TcpStream) {
+        let backend_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("backend listener should bind");
+        let backend_addr = backend_listener
+            .local_addr()
+            .expect("backend local address should exist");
+        let backend_accept = tokio::spawn(async move { backend_listener.accept().await });
+
+        let (accepted, client) = accept_test_client().await;
+        let config = BackendDialConfig::new(backend_addr.to_string(), TEST_TIMEOUT);
+        let proxied = timeout(TEST_TIMEOUT, BackendDialer::dial(accepted, &config))
+            .await
+            .expect("backend dial should complete before timeout")
+            .expect("backend dial should succeed");
+        let (backend, _backend_peer_addr) = timeout(TEST_TIMEOUT, backend_accept)
+            .await
+            .expect("backend accept task should complete before timeout")
+            .expect("backend accept task should join")
+            .expect("backend should accept the dialed connection");
+
+        (proxied, client, backend)
+    }
+
+    async fn finish_forwarding(
+        forward: tokio::task::JoinHandle<Result<ForwardingSummary, ForwardingError>>,
+    ) -> ForwardingSummary {
+        timeout(TEST_TIMEOUT, forward)
+            .await
+            .expect("forwarding should finish before timeout")
+            .expect("forwarding task should join")
+            .expect("forwarding should finish cleanly")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_copies_client_to_backend() {
+        let (proxied, mut client, mut backend) = create_test_proxied_connection().await;
+        let client_peer_addr = proxied.client_peer_addr();
+        let backend_address = proxied.backend_address().to_owned();
+        let forward = tokio::spawn(TcpForwarder::forward(proxied));
+        let payload = b"client says hello";
+        let mut received = vec![0; payload.len()];
+
+        client
+            .write_all(payload)
+            .await
+            .expect("client should write payload");
+        client.shutdown().await.expect("client should shutdown");
+        backend
+            .read_exact(&mut received)
+            .await
+            .expect("backend should read forwarded payload");
+        backend.shutdown().await.expect("backend should shutdown");
+
+        let summary = finish_forwarding(forward).await;
+
+        assert_eq!(received, payload);
+        assert_eq!(summary.client_peer_addr, client_peer_addr);
+        assert_eq!(summary.backend_address, backend_address);
+        assert_eq!(summary.client_to_backend_bytes, payload.len() as u64);
+        assert_eq!(summary.backend_to_client_bytes, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_copies_backend_to_client() {
+        let (proxied, mut client, mut backend) = create_test_proxied_connection().await;
+        let client_peer_addr = proxied.client_peer_addr();
+        let backend_address = proxied.backend_address().to_owned();
+        let forward = tokio::spawn(TcpForwarder::forward(proxied));
+        let payload = b"backend says hello";
+        let mut received = vec![0; payload.len()];
+
+        backend
+            .write_all(payload)
+            .await
+            .expect("backend should write payload");
+        backend.shutdown().await.expect("backend should shutdown");
+        client
+            .read_exact(&mut received)
+            .await
+            .expect("client should read forwarded payload");
+        client.shutdown().await.expect("client should shutdown");
+
+        let summary = finish_forwarding(forward).await;
+
+        assert_eq!(received, payload);
+        assert_eq!(summary.client_peer_addr, client_peer_addr);
+        assert_eq!(summary.backend_address, backend_address);
+        assert_eq!(summary.client_to_backend_bytes, 0);
+        assert_eq!(summary.backend_to_client_bytes, payload.len() as u64);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_reports_bidirectional_byte_counts() {
+        let (proxied, mut client, mut backend) = create_test_proxied_connection().await;
+        let forward = tokio::spawn(TcpForwarder::forward(proxied));
+        let client_payload = b"select 1";
+        let backend_payload = b"ok";
+        let mut backend_received = vec![0; client_payload.len()];
+        let mut client_received = vec![0; backend_payload.len()];
+
+        client
+            .write_all(client_payload)
+            .await
+            .expect("client should write payload");
+        backend
+            .write_all(backend_payload)
+            .await
+            .expect("backend should write payload");
+
+        backend
+            .read_exact(&mut backend_received)
+            .await
+            .expect("backend should read forwarded client payload");
+        client
+            .read_exact(&mut client_received)
+            .await
+            .expect("client should read forwarded backend payload");
+
+        client.shutdown().await.expect("client should shutdown");
+        backend.shutdown().await.expect("backend should shutdown");
+
+        let summary = finish_forwarding(forward).await;
+
+        assert_eq!(backend_received, client_payload);
+        assert_eq!(client_received, backend_payload);
+        assert_eq!(summary.client_to_backend_bytes, client_payload.len() as u64);
+        assert_eq!(
+            summary.backend_to_client_bytes,
+            backend_payload.len() as u64
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarding_propagates_close_and_finishes_cleanly() {
+        let (proxied, mut client, mut backend) = create_test_proxied_connection().await;
+        let forward = tokio::spawn(TcpForwarder::forward(proxied));
+        let mut eof_probe = [0_u8; 1];
+
+        client.shutdown().await.expect("client should shutdown");
+
+        let read = timeout(TEST_TIMEOUT, backend.read(&mut eof_probe))
+            .await
+            .expect("backend should observe propagated close before timeout")
+            .expect("backend read should succeed");
+
+        backend.shutdown().await.expect("backend should shutdown");
+
+        let summary = finish_forwarding(forward).await;
+
+        assert_eq!(read, 0);
+        assert_eq!(summary.client_to_backend_bytes, 0);
+        assert_eq!(summary.backend_to_client_bytes, 0);
     }
 
     #[test]

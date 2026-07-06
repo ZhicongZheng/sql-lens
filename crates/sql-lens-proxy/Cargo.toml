@@ -7,5 +7,5 @@ license.workspace = true
 
 [dependencies]
 sql-lens-config = { path = "../sql-lens-config" }
-tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros", "io-util"] }
 tracing = "0.1"
