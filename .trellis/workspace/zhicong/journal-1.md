@@ -539,3 +539,37 @@ Started and completed Issue 020 by adding ProtocolAdapterRegistry, shared Arc-ba
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: Implement ring buffer append
+
+**Date**: 2026-07-06
+**Task**: Implement ring buffer append
+**Branch**: `main`
+
+### Summary
+
+Started and completed Issue 021 by adding RingBufferStore, fixed-capacity append, oldest-first eviction, append outcomes, stats, tests, and storage contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9ea0943` | (see git log) |
+| `61abb7f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

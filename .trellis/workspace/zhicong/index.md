@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 16
+- **Total Sessions**: 17
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~541 | Active |
+| `journal-1.md` | ~575 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 17 | 2026-07-06 | Implement ring buffer append | `9ea0943`, `61abb7f` | `main` |
 | 16 | 2026-07-06 | Add protocol adapter registry | `89c06f1`, `5637f35` | `main` |
 | 15 | 2026-07-06 | Define protocol adapter trait | `58c1850`, `0f64eaa` | `main` |
 | 14 | 2026-07-06 | Add capture pipeline channel | `7c81cd8`, `67c456e` | `main` |
