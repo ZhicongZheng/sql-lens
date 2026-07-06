@@ -171,3 +171,36 @@ Implemented TOML loading for sql-lens-config with from_path, from_toml_str, stru
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Add config validation
+
+**Date**: 2026-07-06
+**Task**: Add config validation
+**Branch**: `main`
+
+### Summary
+
+Implemented SqlLensConfig validation with structured validation errors, deterministic multi-violation collection, MySQL-only startup protocol enforcement, focused tests, and backend spec documentation for validation contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `faeec55` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

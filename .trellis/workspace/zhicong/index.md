@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~173 | Active |
+| `journal-1.md` | ~206 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-07-06 | Add config validation | `faeec55` | `main` |
 | 5 | 2026-07-06 | Add TOML config loading | `a1ff857` | `main` |
 | 4 | 2026-07-06 | Add configuration model crate | `0a37535` | `main` |
 | 3 | 2026-07-06 | Add core domain models | `74722f3` | `main` |
