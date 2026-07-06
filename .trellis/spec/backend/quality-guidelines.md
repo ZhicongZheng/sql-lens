@@ -1062,6 +1062,134 @@ match publisher.publish(event)? {
 }
 ```
 
+## Scenario: Protocol Adapter Trait Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol` defines shared contracts for protocol-specific adapters.
+- The contract is consumed by future MySQL/PostgreSQL/ClickHouse adapters and by the adapter registry.
+- This layer must stay protocol-neutral and object-safe.
+
+### 2. Signatures
+
+Public protocol adapter types live in `crates/sql-lens-protocol/src/lib.rs`:
+
+```rust
+pub trait ProtocolAdapter: std::fmt::Debug + Send + Sync {
+    fn protocol_name(&self) -> sql_lens_core::ProtocolName;
+    fn create_connection_state(&self, context: &ProtocolConnectionContext) -> Box<dyn ProtocolConnectionState>;
+    fn observe_client_bytes(
+        &self,
+        state: &mut dyn ProtocolConnectionState,
+        bytes: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+    ) -> Result<ProtocolObservation, ProtocolAdapterError>;
+    fn observe_backend_bytes(
+        &self,
+        state: &mut dyn ProtocolConnectionState,
+        bytes: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+    ) -> Result<ProtocolObservation, ProtocolAdapterError>;
+}
+
+pub trait ProtocolConnectionState: std::any::Any + std::fmt::Debug + Send {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+pub trait CaptureEventEmitter {
+    fn emit(&mut self, event: sql_lens_core::SqlEvent);
+}
+```
+
+Allowed dependency:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+```
+
+Do not add `tokio`, `async-trait`, `sql-lens-capture`, proxy, storage, API, app, `thiserror`, `anyhow`, or protocol-specific crates for this contract layer.
+
+### 3. Contracts
+
+- `ProtocolAdapter` must be object-safe. Do not add generic methods or associated types.
+- Per-connection parser state is represented as `Box<dyn ProtocolConnectionState>` so heterogeneous adapters can be stored in one registry later.
+- Concrete adapters downcast state through `as_any_mut().downcast_mut::<AdapterState>()`.
+- `observe_client_bytes` observes client-to-backend bytes.
+- `observe_backend_bytes` observes backend-to-client bytes.
+- Adapters emit normalized `SqlEvent` values through `CaptureEventEmitter`.
+- Capture channel overload policy is outside this crate; adapter parsing should not depend on runtime channel behavior.
+- `ProtocolObservation.bytes_observed` records input bytes seen by the adapter.
+- `ProtocolObservation.events_emitted` records events emitted through the emitter.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Adapter needs connection state | `create_connection_state` returns `Box<dyn ProtocolConnectionState>` |
+| Adapter receives expected state type | Downcast succeeds and observation updates state |
+| Adapter receives wrong state type | Return `ProtocolAdapterError::InvalidConnectionState` |
+| Client bytes are observed | Return observed byte count and emitted event count |
+| Backend bytes are observed | Return observed byte count and emitted event count |
+| Adapter emits SQL event | Call `CaptureEventEmitter::emit(SqlEvent)` |
+| Registry needs trait objects | `Box<dyn ProtocolAdapter>` compiles and can observe bytes |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A MySQL adapter owns a MySQL-specific state struct but exposes it as `Box<dyn ProtocolConnectionState>`.
+- A test adapter proves `Box<dyn ProtocolAdapter>` works before the registry task starts.
+
+Base:
+
+- Unit tests use dummy bytes and synthetic `SqlEvent` values.
+- Invalid state errors are structured without adding third-party error crates.
+
+Bad:
+
+- Defining `trait ProtocolAdapter<State>` or an associated `type State`, which prevents a heterogeneous registry without another erasure layer.
+- Importing `sql-lens-capture` and making parsers depend on channel overload behavior.
+- Adding async trait methods before parser work proves it is needed.
+- Putting MySQL-specific packet fields in protocol-neutral contracts.
+
+### 6. Tests Required
+
+For protocol adapter contract changes:
+
+- Trait object usage test with `Box<dyn ProtocolAdapter>`.
+- Client byte observation test.
+- Backend byte observation test.
+- Event emission test.
+- Protocol-specific state downcast test.
+- Structured error display/source test.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub trait ProtocolAdapter {
+    type State;
+    fn observe(&self, state: &mut Self::State, bytes: &[u8]);
+}
+```
+
+#### Correct
+
+```rust
+pub trait ProtocolAdapter {
+    fn create_connection_state(&self, context: &ProtocolConnectionContext) -> Box<dyn ProtocolConnectionState>;
+    fn observe_client_bytes(&self, state: &mut dyn ProtocolConnectionState, bytes: &[u8], events: &mut dyn CaptureEventEmitter) -> Result<ProtocolObservation, ProtocolAdapterError>;
+}
+```
+
+> Gotcha: when downcasting a boxed state in callers or tests, use `state.as_ref().as_any()` or `state.as_mut().as_any_mut()`. Calling `state.as_any()` directly on `Box<dyn ProtocolConnectionState>` can target the box's blanket implementation instead of the inner state.
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

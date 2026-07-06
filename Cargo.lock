@@ -329,6 +329,9 @@ version = "0.1.0"
 [[package]]
 name = "sql-lens-protocol"
 version = "0.1.0"
+dependencies = [
+ "sql-lens-core",
+]
 
 [[package]]
 name = "sql-lens-protocol-mysql"

@@ -170,9 +170,11 @@ This crate should not contain SQL rendering logic.
 Protocol adapter traits:
 
 - Adapter registry.
-- Packet observer trait.
-- Connection state trait.
+- Object-safe packet observer trait.
+- Type-erased connection state trait.
 - Event emission contract.
+
+The protocol adapter contract emits normalized `SqlEvent` values into an abstract event sink. Runtime capture channel publishing is composed outside this crate so protocol parsing stays independent from channel overload policy.
 
 ### `sql-lens-protocol-mysql`
 

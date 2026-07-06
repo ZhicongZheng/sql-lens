@@ -37,22 +37,22 @@ SQL Lens needs a stable adapter boundary before implementing MySQL-compatible pa
 
 ## Acceptance Criteria
 
-- [ ] `sql-lens-protocol` depends only on `sql-lens-core`.
-- [ ] `ProtocolAdapter` is object-safe.
-- [ ] Adapter can create protocol-specific connection state.
-- [ ] Adapter can observe client bytes.
-- [ ] Adapter can observe backend bytes.
-- [ ] Adapter can emit `SqlEvent` values through a capture event emitter trait.
-- [ ] Observation result reports bytes observed and event count.
-- [ ] Structured adapter errors exist without adding `thiserror` or `anyhow`.
-- [ ] Unit tests cover client byte observation.
-- [ ] Unit tests cover backend byte observation.
-- [ ] Unit tests cover event emission.
-- [ ] Unit tests cover protocol-specific state downcast.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `sql-lens-protocol` depends only on `sql-lens-core`.
+- [x] `ProtocolAdapter` is object-safe.
+- [x] Adapter can create protocol-specific connection state.
+- [x] Adapter can observe client bytes.
+- [x] Adapter can observe backend bytes.
+- [x] Adapter can emit `SqlEvent` values through a capture event emitter trait.
+- [x] Observation result reports bytes observed and event count.
+- [x] Structured adapter errors exist without adding `thiserror` or `anyhow`.
+- [x] Unit tests cover client byte observation.
+- [x] Unit tests cover backend byte observation.
+- [x] Unit tests cover event emission.
+- [x] Unit tests cover protocol-specific state downcast.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Open Questions
 

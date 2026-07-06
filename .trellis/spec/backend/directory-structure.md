@@ -54,6 +54,7 @@ Member packages inherit shared package metadata instead of repeating it.
 
 - Core must not depend on protocol-specific crates.
 - Capture must not depend on proxy, protocol, storage, API, plugin, app, database, HTTP, or exporter crates.
+- Protocol contracts should depend on core only until a task explicitly wires registry or runtime composition.
 - Proxy must not contain SQL rendering logic.
 - API must not parse protocol packets.
 - Storage must not depend on UI or API handlers.

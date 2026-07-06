@@ -101,6 +101,8 @@ Owns protocol adapter traits and registry.
 
 Protocol adapters emit shared capture events and attach protocol-specific metadata.
 
+The shared adapter trait must stay object-safe so the registry can store heterogeneous adapters. Protocol-specific connection state is type-erased behind the protocol state trait and downcast only inside concrete adapters.
+
 ### `sql-lens-protocol-mysql`
 
 Owns MySQL-compatible protocol parsing:
