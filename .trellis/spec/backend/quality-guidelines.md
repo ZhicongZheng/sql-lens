@@ -811,6 +811,138 @@ backend.write_all(&buffer).await?;
 let summary = TcpForwarder::forward(proxied).await?;
 ```
 
+## Scenario: Proxy Connection Lifecycle Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-proxy` records proxy-local connection lifecycle state for accepted client sessions.
+- Lifecycle tracking bridges listener, backend dialing, and forwarding summaries.
+- This layer must remain protocol-neutral and in-memory until storage/API/runtime orchestration tasks explicitly consume it.
+
+### 2. Signatures
+
+Public lifecycle types live in `crates/sql-lens-proxy/src/lib.rs`:
+
+```rust
+pub struct ConnectionLifecycleIdGenerator;
+
+impl ConnectionLifecycleIdGenerator {
+    pub fn new() -> Self;
+    pub fn next_id(&self) -> sql_lens_core::ConnectionId;
+}
+
+pub struct ConnectionLifecycleRecord;
+
+impl ConnectionLifecycleRecord {
+    pub fn accepted(
+        id: sql_lens_core::ConnectionId,
+        protocol: sql_lens_core::ProtocolName,
+        database_type: sql_lens_core::DatabaseType,
+        client_addr: impl Into<String>,
+        backend_addr: impl Into<String>,
+        accepted_at: sql_lens_core::Timestamp,
+    ) -> Self;
+
+    pub fn info(&self) -> &sql_lens_core::ConnectionInfo;
+    pub fn transitions(&self) -> &[ConnectionLifecycleTransition];
+    pub fn failure(&self) -> Option<&ConnectionLifecycleFailure>;
+    pub fn into_info(self) -> sql_lens_core::ConnectionInfo;
+    pub fn mark_backend_connected(&mut self, connected_at: sql_lens_core::Timestamp);
+    pub fn mark_forwarding_closed(&mut self, summary: &ForwardingSummary, closed_at: sql_lens_core::Timestamp);
+    pub fn mark_backend_dial_failed(&mut self, failure: &BackendDialFailure, failed_at: sql_lens_core::Timestamp);
+    pub fn mark_forwarding_failed(&mut self, failure: &ForwardingFailure, failed_at: sql_lens_core::Timestamp);
+}
+```
+
+Allowed lifecycle dependency addition:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+```
+
+Do not add UUID, time/chrono, storage, API, app runtime, protocol adapter, capture pipeline, or database client dependencies for this layer.
+
+### 3. Contracts
+
+- `ConnectionLifecycleIdGenerator` produces stable process-local `ConnectionId` values.
+- `ConnectionLifecycleRecord::accepted` creates a `ConnectionInfo` with `ConnectionState::Created`, client address, backend address, protocol, database type, zero byte counters, zero query count, and no user/database.
+- State transitions are recorded in `ConnectionLifecycleTransition` so intermediate states such as `Closing` are observable even when final state is `Closed`.
+- `mark_backend_connected` transitions to `ConnectionState::BackendConnected`.
+- `mark_forwarding_closed` updates `bytes_in` from `ForwardingSummary.client_to_backend_bytes`, updates `bytes_out` from `ForwardingSummary.backend_to_client_bytes`, records `Closing`, then records `Closed`.
+- `mark_backend_dial_failed` maps `BackendDialFailureKind` into `ConnectionLifecycleFailureKind` and transitions to `Failed`.
+- `mark_forwarding_failed` preserves any available byte counters from `ForwardingFailure`, records forwarding failure context, and transitions to `Failed`.
+- Timestamps are supplied by callers as core-owned `Timestamp` values; this layer does not create wall-clock timestamps.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Accepted client creates a record | State is `Created`, byte counters are zero, transition history contains `Created` |
+| Backend dial succeeds | State becomes `BackendConnected` and transition history records it |
+| Forwarding completes cleanly | Byte counters are copied, `closed_at` is set, transition history records `Closing` then `Closed` |
+| Backend dial times out | State becomes `Failed`, `closed_at` is set, failure kind is `BackendDialTimeout` |
+| Backend dial returns connect error | State becomes `Failed`, `closed_at` is set, failure kind is `BackendDialConnect` |
+| Forwarding fails with byte counters | Known counters are copied before state becomes `Failed` |
+| Future storage/API exposure is needed | Consume `ConnectionInfo` and transition data from a later task; do not add storage/API here |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A session orchestrator later creates one lifecycle record immediately after accept and updates it after backend dial and forwarding.
+- Protocol-specific data stays outside lifecycle records unless represented as protocol-neutral core metadata in a later design.
+
+Base:
+
+- Tests construct synthetic `ForwardingSummary` and `BackendDialFailure` values and assert state transitions without opening sockets.
+- The lifecycle record can be converted into `ConnectionInfo` for future storage or API layers.
+
+Bad:
+
+- Generating UUIDs or wall-clock timestamps inside `sql-lens-proxy` lifecycle code.
+- Writing lifecycle records to SQLite from proxy hot-path primitives.
+- Adding MySQL-only fields to `ConnectionLifecycleRecord` or `ConnectionInfo`.
+- Blocking forwarding on lifecycle persistence, exporters, WebSocket, or plugin hooks.
+
+### 6. Tests Required
+
+For proxy lifecycle changes:
+
+- ID generation test for deterministic process-local IDs.
+- Accepted record construction test or normal-close test that asserts initial `Created` state.
+- Backend-connected transition assertion.
+- Normal forwarding close test that asserts byte counters, `Closing`, and `Closed`.
+- Backend dial failure test that asserts `Failed`, `closed_at`, and failure-kind mapping.
+- Forwarding failure test when byte-counter behavior changes.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let id = uuid::Uuid::new_v4();
+sqlite.insert_connection(connection).await?;
+```
+
+#### Correct
+
+```rust
+let id = lifecycle_ids.next_id();
+let mut lifecycle = ConnectionLifecycleRecord::accepted(
+    id,
+    ProtocolName("mysql".to_owned()),
+    DatabaseType("mysql".to_owned()),
+    client_addr,
+    backend_addr,
+    accepted_at,
+);
+lifecycle.mark_backend_connected(backend_connected_at);
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

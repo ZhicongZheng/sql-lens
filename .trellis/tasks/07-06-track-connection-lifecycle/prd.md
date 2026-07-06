@@ -53,21 +53,21 @@ SQL Lens needs a connection timeline before SQL capture exists. Developers shoul
 
 ## Acceptance Criteria
 
-- [ ] A connection ID is generated for each lifecycle record.
-- [ ] Lifecycle records use protocol-neutral core types.
-- [ ] Created/accepted state is represented.
-- [ ] Backend connected state is represented.
-- [ ] Normal forwarding close transitions to closed.
-- [ ] Backend dial failure transitions to failed.
-- [ ] Byte counters update from `ForwardingSummary`.
-- [ ] Backend dial failure context maps into lifecycle failure state.
-- [ ] Unit tests cover normal close.
-- [ ] Unit tests cover backend dial failure.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
-- [ ] No storage, API, app runtime, protocol parsing, UUID/time dependency, or capture pipeline is introduced.
+- [x] A connection ID is generated for each lifecycle record.
+- [x] Lifecycle records use protocol-neutral core types.
+- [x] Created/accepted state is represented.
+- [x] Backend connected state is represented.
+- [x] Normal forwarding close transitions to closed.
+- [x] Backend dial failure transitions to failed.
+- [x] Byte counters update from `ForwardingSummary`.
+- [x] Backend dial failure context maps into lifecycle failure state.
+- [x] Unit tests cover normal close.
+- [x] Unit tests cover backend dial failure.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] No storage, API, app runtime, protocol parsing, UUID/time dependency, or capture pipeline is introduced.
 
 ## Open Questions
 

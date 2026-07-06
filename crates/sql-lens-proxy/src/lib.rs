@@ -1,7 +1,18 @@
 //! TCP proxy runtime for SQL Lens.
 
 use sql_lens_config::{BackendConfig, ProxyConfig};
-use std::{error::Error, fmt, future::Future, io, net::SocketAddr, time::Duration};
+use sql_lens_core::{
+    ConnectionId, ConnectionInfo, ConnectionState, DatabaseType, ProtocolName, Timestamp,
+};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    io,
+    net::SocketAddr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
@@ -142,6 +153,169 @@ impl AcceptedClient {
     pub fn into_stream(self) -> TcpStream {
         self.stream
     }
+}
+
+#[derive(Debug, Default)]
+pub struct ConnectionLifecycleIdGenerator {
+    next_sequence: AtomicU64,
+}
+
+impl ConnectionLifecycleIdGenerator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn next_id(&self) -> ConnectionId {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+
+        ConnectionId(format!("conn_{sequence}"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionLifecycleRecord {
+    info: ConnectionInfo,
+    transitions: Vec<ConnectionLifecycleTransition>,
+    failure: Option<ConnectionLifecycleFailure>,
+}
+
+impl ConnectionLifecycleRecord {
+    pub fn accepted(
+        id: ConnectionId,
+        protocol: ProtocolName,
+        database_type: DatabaseType,
+        client_addr: impl Into<String>,
+        backend_addr: impl Into<String>,
+        accepted_at: Timestamp,
+    ) -> Self {
+        let info = ConnectionInfo {
+            id,
+            protocol,
+            database_type,
+            client_addr: client_addr.into(),
+            backend_addr: backend_addr.into(),
+            user: None,
+            database: None,
+            state: ConnectionState::Created,
+            connected_at: accepted_at.clone(),
+            closed_at: None,
+            last_activity_at: Some(accepted_at.clone()),
+            bytes_in: 0,
+            bytes_out: 0,
+            query_count: 0,
+        };
+
+        Self {
+            info,
+            transitions: vec![ConnectionLifecycleTransition {
+                state: ConnectionState::Created,
+                at: accepted_at,
+            }],
+            failure: None,
+        }
+    }
+
+    pub fn info(&self) -> &ConnectionInfo {
+        &self.info
+    }
+
+    pub fn transitions(&self) -> &[ConnectionLifecycleTransition] {
+        &self.transitions
+    }
+
+    pub fn failure(&self) -> Option<&ConnectionLifecycleFailure> {
+        self.failure.as_ref()
+    }
+
+    pub fn into_info(self) -> ConnectionInfo {
+        self.info
+    }
+
+    pub fn mark_backend_connected(&mut self, connected_at: Timestamp) {
+        self.transition_to(ConnectionState::BackendConnected, connected_at);
+    }
+
+    pub fn mark_forwarding_closed(&mut self, summary: &ForwardingSummary, closed_at: Timestamp) {
+        self.info.bytes_in = summary.client_to_backend_bytes;
+        self.info.bytes_out = summary.backend_to_client_bytes;
+        self.info.closed_at = Some(closed_at.clone());
+        self.transition_to(ConnectionState::Closing, closed_at.clone());
+        self.transition_to(ConnectionState::Closed, closed_at);
+    }
+
+    pub fn mark_backend_dial_failed(&mut self, failure: &BackendDialFailure, failed_at: Timestamp) {
+        self.failure = Some(ConnectionLifecycleFailure::from_backend_dial_failure(
+            failure,
+        ));
+        self.info.closed_at = Some(failed_at.clone());
+        self.transition_to(ConnectionState::Failed, failed_at);
+    }
+
+    pub fn mark_forwarding_failed(&mut self, failure: &ForwardingFailure, failed_at: Timestamp) {
+        if let Some(bytes_in) = failure.client_to_backend_bytes {
+            self.info.bytes_in = bytes_in;
+        }
+
+        if let Some(bytes_out) = failure.backend_to_client_bytes {
+            self.info.bytes_out = bytes_out;
+        }
+
+        self.failure = Some(ConnectionLifecycleFailure::from_forwarding_failure(failure));
+        self.info.closed_at = Some(failed_at.clone());
+        self.transition_to(ConnectionState::Failed, failed_at);
+    }
+
+    fn transition_to(&mut self, state: ConnectionState, at: Timestamp) {
+        self.info.state = state;
+        self.info.last_activity_at = Some(at.clone());
+        self.transitions
+            .push(ConnectionLifecycleTransition { state, at });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionLifecycleTransition {
+    pub state: ConnectionState,
+    pub at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionLifecycleFailure {
+    pub client_addr: String,
+    pub backend_addr: String,
+    pub kind: ConnectionLifecycleFailureKind,
+}
+
+impl ConnectionLifecycleFailure {
+    pub fn from_backend_dial_failure(failure: &BackendDialFailure) -> Self {
+        let kind = match failure.kind {
+            BackendDialFailureKind::Timeout { timeout } => {
+                ConnectionLifecycleFailureKind::BackendDialTimeout { timeout }
+            }
+            BackendDialFailureKind::Connect => ConnectionLifecycleFailureKind::BackendDialConnect,
+        };
+
+        Self {
+            client_addr: failure.client_peer_addr.to_string(),
+            backend_addr: failure.backend_address.clone(),
+            kind,
+        }
+    }
+
+    pub fn from_forwarding_failure(failure: &ForwardingFailure) -> Self {
+        Self {
+            client_addr: failure.client_peer_addr.to_string(),
+            backend_addr: failure.backend_address.clone(),
+            kind: ConnectionLifecycleFailureKind::ForwardingIo,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionLifecycleFailureKind {
+    BackendDialTimeout { timeout: Duration },
+    BackendDialConnect,
+    ForwardingIo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +866,124 @@ mod tests {
         fn drop(&mut self) {
             self.dropped.store(true, Ordering::SeqCst);
         }
+    }
+
+    fn test_timestamp(value: &str) -> Timestamp {
+        Timestamp(value.to_owned())
+    }
+
+    fn test_lifecycle_record() -> ConnectionLifecycleRecord {
+        ConnectionLifecycleRecord::accepted(
+            ConnectionId("conn_test".to_owned()),
+            ProtocolName("mysql".to_owned()),
+            DatabaseType("mysql".to_owned()),
+            "127.0.0.1:51000",
+            "127.0.0.1:3306",
+            test_timestamp("accepted"),
+        )
+    }
+
+    #[test]
+    fn lifecycle_id_generator_produces_sequential_connection_ids() {
+        let generator = ConnectionLifecycleIdGenerator::new();
+
+        let first = generator.next_id();
+        let second = generator.next_id();
+        let third = generator.next_id();
+
+        assert_eq!(first, ConnectionId("conn_1".to_owned()));
+        assert_eq!(second, ConnectionId("conn_2".to_owned()));
+        assert_eq!(third, ConnectionId("conn_3".to_owned()));
+    }
+
+    #[test]
+    fn lifecycle_record_tracks_normal_forwarding_close() {
+        let mut record = test_lifecycle_record();
+        let summary = ForwardingSummary {
+            client_peer_addr: "127.0.0.1:51000"
+                .parse()
+                .expect("client address should parse"),
+            backend_address: "127.0.0.1:3306".to_owned(),
+            client_to_backend_bytes: 128,
+            backend_to_client_bytes: 256,
+        };
+
+        assert_eq!(record.info().state, ConnectionState::Created);
+
+        record.mark_backend_connected(test_timestamp("backend-connected"));
+        record.mark_forwarding_closed(&summary, test_timestamp("closed"));
+
+        assert_eq!(record.info().state, ConnectionState::Closed);
+        assert_eq!(record.info().bytes_in, 128);
+        assert_eq!(record.info().bytes_out, 256);
+        assert_eq!(record.info().closed_at, Some(test_timestamp("closed")));
+        assert_eq!(
+            record.info().last_activity_at,
+            Some(test_timestamp("closed"))
+        );
+        assert_eq!(record.failure(), None);
+
+        let states = record
+            .transitions()
+            .iter()
+            .map(|transition| transition.state)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            states,
+            vec![
+                ConnectionState::Created,
+                ConnectionState::BackendConnected,
+                ConnectionState::Closing,
+                ConnectionState::Closed,
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_record_tracks_backend_dial_failure() {
+        let mut record = test_lifecycle_record();
+        let failure = BackendDialFailure {
+            client_peer_addr: "127.0.0.1:51000"
+                .parse()
+                .expect("client address should parse"),
+            backend_address: "127.0.0.1:3306".to_owned(),
+            kind: BackendDialFailureKind::Timeout {
+                timeout: Duration::from_millis(50),
+            },
+        };
+
+        record.mark_backend_dial_failed(&failure, test_timestamp("failed"));
+
+        assert_eq!(record.info().state, ConnectionState::Failed);
+        assert_eq!(record.info().closed_at, Some(test_timestamp("failed")));
+        assert_eq!(
+            record.info().last_activity_at,
+            Some(test_timestamp("failed"))
+        );
+        assert_eq!(record.info().bytes_in, 0);
+        assert_eq!(record.info().bytes_out, 0);
+        assert_eq!(
+            record.failure(),
+            Some(&ConnectionLifecycleFailure {
+                client_addr: "127.0.0.1:51000".to_owned(),
+                backend_addr: "127.0.0.1:3306".to_owned(),
+                kind: ConnectionLifecycleFailureKind::BackendDialTimeout {
+                    timeout: Duration::from_millis(50),
+                },
+            })
+        );
+
+        let states = record
+            .transitions()
+            .iter()
+            .map(|transition| transition.state)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            states,
+            vec![ConnectionState::Created, ConnectionState::Failed]
+        );
     }
 
     #[test]
