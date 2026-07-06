@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 9
+- **Total Sessions**: 10
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~305 | Active |
+| `journal-1.md` | ~339 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 10 | 2026-07-06 | Implement backend dialing | `31780b2`, `c2c1e5d` | `main` |
 | 9 | 2026-07-06 | Add TCP proxy listener | `fc52f34` | `main` |
 | 8 | 2026-07-06 | Initialize structured logging | `54aa819` | `main` |
 | 7 | 2026-07-06 | Add CLI entry point | `82f46b6` | `main` |

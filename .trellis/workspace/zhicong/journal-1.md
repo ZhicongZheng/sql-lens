@@ -303,3 +303,37 @@ Implemented sql-lens-proxy TCP listener bind/accept/shutdown boundary with struc
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: Implement backend dialing
+
+**Date**: 2026-07-06
+**Task**: Implement backend dialing
+**Branch**: `main`
+
+### Summary
+
+Ignored local codegraph index, added backend dialing from accepted proxy clients to configured backend addresses with timeout handling, structured dial failures, async tests, and backend spec contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `31780b2` | (see git log) |
+| `c2c1e5d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
