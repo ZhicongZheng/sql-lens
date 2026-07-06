@@ -138,6 +138,109 @@ pub struct ProtocolMetadata {
 }
 ```
 
+## Scenario: Config Loading Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-config` owns startup configuration structs, serde-compatible config shape, default values, and startup TOML parsing.
+- Config loading is a boundary contract for CLI startup, validation, logging setup, runtime startup, and future hot reload.
+- Config parsing must stay separate from semantic validation and runtime apply logic.
+
+### 2. Signatures
+
+Public TOML loading APIs live on `SqlLensConfig`:
+
+```rust
+impl SqlLensConfig {
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigLoadError>;
+    pub fn from_toml_str(input: &str) -> Result<Self, ConfigLoadError>;
+}
+```
+
+Structured load errors use:
+
+```rust
+pub enum ConfigLoadError {
+    Read {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: Option<std::path::PathBuf>,
+        source: toml::de::Error,
+    },
+}
+```
+
+### 3. Contracts
+
+- `from_path` reads a file and parses it as TOML.
+- `from_toml_str` parses already-loaded TOML content.
+- Missing sections and fields use the existing `Default` implementations.
+- Unknown sections and fields are rejected with `#[serde(deny_unknown_fields)]`.
+- The config crate may depend on `serde` and `toml` for this layer.
+- The config crate must not depend on CLI, async runtime, HTTP, database, watcher, or proxy crates for loading.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Config file cannot be read | Return `ConfigLoadError::Read` with the path and IO source |
+| TOML from a path cannot be parsed | Return `ConfigLoadError::Parse` with `Some(path)` |
+| TOML from a string cannot be parsed | Return `ConfigLoadError::Parse` with `None` |
+| Section or field is missing | Use the section or field default |
+| Section or field is unknown | Return a parse/deserialization error |
+| Required semantic value is empty or unsupported at runtime | Leave to the later config validation layer |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A local config file contains only `[proxy] listen = "127.0.0.1:3308"` and the rest comes from defaults.
+- A misspelled field like `lissten` fails during TOML deserialization.
+- A missing file reports `ConfigLoadError::Read`.
+
+Base:
+
+- A caller uses `SqlLensConfig::from_toml_str` in tests and `SqlLensConfig::from_path` in CLI code.
+- Validation later rejects semantically invalid values after TOML parsing succeeds.
+
+Bad:
+
+- Silently ignoring unknown config fields.
+- Starting services from `sql-lens-config`.
+- Adding environment overrides, hot reload, or CLI argument parsing inside `sql-lens-config`.
+
+### 6. Tests Required
+
+For config loading changes:
+
+- Valid TOML file loads from a path.
+- TOML string parsing works.
+- Partial TOML falls back to defaults.
+- Unknown top-level sections and nested fields fail.
+- Invalid TOML returns `ConfigLoadError::Parse`.
+- Missing files return `ConfigLoadError::Read`.
+- `ConfigLoadError` implements `Display` and `std::error::Error`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub fn load_config(path: &str) -> SqlLensConfig {
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+```
+
+#### Correct
+
+```rust
+pub fn load_config(path: impl AsRef<std::path::Path>) -> Result<SqlLensConfig, ConfigLoadError> {
+    SqlLensConfig::from_path(path)
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.
