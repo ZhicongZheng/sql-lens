@@ -573,3 +573,37 @@ Started and completed Issue 021 by adding RingBufferStore, fixed-capacity append
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: Implement ring buffer event lookup
+
+**Date**: 2026-07-06
+**Task**: Implement ring buffer event lookup
+**Branch**: `main`
+
+### Summary
+
+Started and completed Issue 022 by adding RingBufferStore::get for borrowed SqlEvent lookup by ID, retained and evicted lookup tests, and storage lookup contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ab466e9` | (see git log) |
+| `7846e76` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
