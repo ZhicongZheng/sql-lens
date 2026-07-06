@@ -607,3 +607,36 @@ Started and completed Issue 022 by adding RingBufferStore::get for borrowed SqlE
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: Implement ring buffer timeline query
+
+**Date**: 2026-07-06
+**Task**: Implement ring buffer timeline query
+**Branch**: `main`
+
+### Summary
+
+Added stable newest-first ring buffer timeline queries with cursor pagination, tests, and backend storage contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c0e56da` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
