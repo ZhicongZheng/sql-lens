@@ -1281,6 +1281,140 @@ if self.events.len() == self.capacity.get() {
 self.events.push_back(event);
 ```
 
+## Scenario: Live Statistics Counter Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-storage` owns lightweight in-memory live statistics helpers for dashboard-ready metrics.
+- Live statistics are incremental counters fed by retained or captured `SqlEvent` values.
+- This layer is not a historical analytics engine and must not start API, WebSocket, async runtime, or persistence work.
+
+### 2. Signatures
+
+Public live statistics types live in `crates/sql-lens-storage/src/live_statistics.rs` and are re-exported from `crates/sql-lens-storage/src/lib.rs`:
+
+```rust
+pub struct LiveStatistics;
+
+impl LiveStatistics {
+    pub fn new() -> Self;
+    pub fn record_sql_event(&mut self, event: &sql_lens_core::SqlEvent);
+    pub fn record_sql_event_at(&mut self, event: &sql_lens_core::SqlEvent, recorded_at: std::time::Instant);
+    pub fn record_connection_opened(&mut self, connection_id: sql_lens_core::ConnectionId);
+    pub fn record_connection_closed(&mut self, connection_id: &sql_lens_core::ConnectionId);
+    pub fn snapshot(&mut self) -> LiveStatisticsSnapshot;
+    pub fn snapshot_at(&mut self, now: std::time::Instant) -> LiveStatisticsSnapshot;
+}
+
+pub struct LiveStatisticsSnapshot {
+    pub total_events: u64,
+    pub error_events: u64,
+    pub slow_events: u64,
+    pub qps_window_secs: u64,
+    pub qps: f64,
+    pub latency_buckets: Vec<LatencyBucketCount>,
+    pub active_connections: usize,
+}
+
+pub struct LatencyBucketCount {
+    pub upper_bound: Option<sql_lens_core::DurationMillis>,
+    pub count: u64,
+}
+```
+
+Allowed dependency remains:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+```
+
+Do not add async runtime, API, WebSocket, storage persistence, metrics library, `time`, `uuid`, or concurrency dependencies for this counter layer.
+
+### 3. Contracts
+
+- `LiveStatistics::default()` must be equivalent to `LiveStatistics::new()`.
+- `record_sql_event` uses ingestion time from `Instant::now()`.
+- `record_sql_event_at` exists for deterministic tests and controlled fan-out code.
+- `total_events` increments for every SQL event.
+- `error_events` increments only when `SqlEvent.status == CaptureStatus::Error`.
+- `slow_events` increments only when `SqlEvent.status == CaptureStatus::Slow`.
+- `CaptureStatus::Ok` and `CaptureStatus::Unknown` increment total and latency buckets only.
+- QPS uses a fixed 60-second live window based on ingestion `Instant`, not `SqlEvent.timestamp`.
+- QPS is `recent_events_in_window / 60.0`.
+- Recent event timestamps are pruned on record and snapshot calls.
+- Latency buckets are fixed: `<=1ms`, `<=5ms`, `<=10ms`, `<=50ms`, `<=100ms`, `<=500ms`, `<=1000ms`, `<=5000ms`, and `>5000ms`.
+- The overflow latency bucket uses `upper_bound = None`.
+- Active connections are explicit lifecycle updates through open/close methods, not inferred from SQL events.
+- Repeated opens for the same `ConnectionId` are idempotent.
+- Closing a missing connection is a no-op.
+- Percentiles, top fingerprints, top users, top databases, persistent statistics, API statistics endpoints, and WebSocket statistics streams belong to later tasks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| OK event is recorded | Increment total and one latency bucket only |
+| Slow event is recorded | Increment total, slow count, and one latency bucket |
+| Error event is recorded | Increment total, error count, and one latency bucket |
+| Unknown event is recorded | Increment total and one latency bucket only |
+| Event duration is exactly a bucket upper bound | Count it in that upper-bound bucket |
+| Event duration is greater than 5000ms | Count it in the overflow bucket |
+| Snapshot is requested after more than 60 seconds | Prune older recent event timestamps before QPS calculation |
+| Same connection opens twice | Active connection count remains one for that ID |
+| Missing connection closes | Active connection count is unchanged |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A future capture fan-out task calls `record_sql_event_at` once per accepted `SqlEvent`.
+- A future proxy lifecycle fan-out calls connection open/close methods when sessions start and finish.
+- API code reads a snapshot and serializes it without recalculating live counters.
+
+Base:
+
+- Tests use deterministic `Instant` values and synthetic `SqlEvent` values.
+- Historical dashboard queries later use storage queries, not these live counters.
+
+Bad:
+
+- Inferring active connections from `SqlEvent.connection_id`.
+- Parsing `SqlEvent.timestamp` for live QPS.
+- Adding percentile or top-N ranking logic to this first counter helper.
+- Blocking packet forwarding on live statistics updates.
+
+### 6. Tests Required
+
+For live statistics changes:
+
+- OK, slow, and error event counter test.
+- Latency bucket boundary and overflow test.
+- Fixed 60-second QPS window test using deterministic `Instant` values.
+- Active connection open/close idempotency test.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let active_connections = events
+    .iter()
+    .map(|event| event.connection_id.clone())
+    .collect::<HashSet<_>>()
+    .len();
+```
+
+#### Correct
+
+```rust
+statistics.record_connection_opened(connection_id.clone());
+statistics.record_connection_closed(&connection_id);
+```
+
 ## Scenario: Protocol Adapter Trait Contracts
 
 ### 1. Scope / Trigger

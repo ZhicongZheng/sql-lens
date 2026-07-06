@@ -50,6 +50,34 @@ Member packages inherit shared package metadata instead of repeating it.
 - `sql-lens-plugin`: hook traits, exporter traits, plugin lifecycle, and plugin safety boundaries.
 - `sql-lens-app`: CLI, config loading, logging setup, runtime startup, and graceful shutdown.
 
+## Crate Root Convention
+
+`src/lib.rs` should stay thin once a crate has more than one real responsibility. Prefer:
+
+```rust
+mod domain_module;
+mod second_domain_module;
+
+pub use domain_module::{PublicType, PublicTrait};
+pub use second_domain_module::OtherPublicType;
+```
+
+Rules:
+
+- Keep protocol-neutral public contracts re-exported from `lib.rs`.
+- Move implementation into domain-named modules once the crate has clear subdomains.
+- Keep tests next to the module they exercise or in `src/tests.rs` when they span multiple crate modules.
+- Do not split placeholder crates that only contain crate-level documentation.
+- Do not create empty module files just to mirror future architecture.
+
+Current module boundaries:
+
+- `sql-lens-config`: `model`, `loading`, `validation`, `error`, and tests.
+- `sql-lens-capture`: `pipeline`.
+- `sql-lens-protocol`: `adapter`, `registry`, and tests.
+- `sql-lens-proxy`: `listener`, `dialer`, `forwarding`, `lifecycle`, `shutdown`, and cross-module tests.
+- `sql-lens-storage`: `ring_buffer`, `live_statistics`, and crate-level re-exports.
+
 ## Dependency Rules
 
 - Core must not depend on protocol-specific crates.
