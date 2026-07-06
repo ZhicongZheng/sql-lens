@@ -1062,6 +1062,128 @@ match publisher.publish(event)? {
 }
 ```
 
+## Scenario: Ring Buffer Append Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-storage` owns the default in-memory storage backend for retained SQL events.
+- Ring buffer append is the first storage primitive and must stay append-oriented.
+- This layer bounds memory by capacity and evicts oldest events first.
+
+### 2. Signatures
+
+Public ring buffer types live in `crates/sql-lens-storage/src/lib.rs`:
+
+```rust
+pub struct RingBufferStore;
+
+impl RingBufferStore {
+    pub fn new(capacity: std::num::NonZeroUsize) -> Self;
+    pub fn append(&mut self, event: sql_lens_core::SqlEvent) -> RingBufferAppendOutcome;
+    pub fn snapshot(&self) -> Vec<sql_lens_core::SqlEvent>;
+    pub fn stats(&self) -> RingBufferStats;
+    pub fn len(&self) -> usize;
+    pub fn capacity(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct RingBufferAppendOutcome {
+    pub stored_event_id: sql_lens_core::SqlEventId,
+    pub evicted_event_id: Option<sql_lens_core::SqlEventId>,
+}
+
+pub struct RingBufferStats {
+    pub capacity: usize,
+    pub len: usize,
+    pub total_appended: u64,
+    pub total_evicted: u64,
+}
+```
+
+Allowed dependency:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+```
+
+Do not add async runtime, database, API, protocol, app, HTTP, serialization, or concurrency dependencies for the basic ring buffer append layer.
+
+### 3. Contracts
+
+- Capacity is represented by `NonZeroUsize`; zero-capacity stores are unrepresentable.
+- Events are stored in insertion order.
+- `append` stores the incoming `SqlEvent` without mutating it.
+- If the buffer is full, `append` evicts exactly one oldest event with `pop_front` semantics.
+- `RingBufferAppendOutcome.stored_event_id` is the incoming event ID.
+- `RingBufferAppendOutcome.evicted_event_id` is the evicted oldest event ID, if any.
+- `RingBufferStats.total_appended` increments once per append.
+- `RingBufferStats.total_evicted` increments once per evicted event.
+- `snapshot` returns retained events in oldest-to-newest order.
+- Lookup by ID, timeline pagination, filters, retention, and secondary indexes belong to later storage tasks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Store is empty and append occurs | Store length becomes 1, no eviction is reported |
+| Store has room and append occurs | Store length grows by 1, no eviction is reported |
+| Store is full and append occurs | Oldest event is evicted, incoming event is appended |
+| Capacity is 1 and two events append | Only second event remains |
+| Capacity is zero | Cannot construct through `NonZeroUsize` |
+| Snapshot is requested | Return cloned retained events in insertion order |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Ring buffer append stays synchronous and in-memory.
+- Tests use synthetic `SqlEvent` values from `sql-lens-core`.
+
+Base:
+
+- Future lookup work may add an ID index while preserving append and eviction semantics.
+- Future retention work may add age/byte eviction after this oldest-first baseline.
+
+Bad:
+
+- Adding lookup indexes during the append-only task.
+- Blocking append on SQLite, API, WebSocket, or async runtime work.
+- Allowing capacity zero and relying on runtime panics or special cases.
+- Mutating `SqlEvent` during storage append.
+
+### 6. Tests Required
+
+For ring buffer append changes:
+
+- Append test for an empty store.
+- Capacity enforcement test.
+- Oldest eviction test.
+- Stats test for appended and evicted counters.
+- Non-zero capacity test.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub fn append(&mut self, event: SqlEvent) {
+    self.events.push(event);
+}
+```
+
+#### Correct
+
+```rust
+if self.events.len() == self.capacity.get() {
+    self.events.pop_front();
+}
+self.events.push_back(event);
+```
+
 ## Scenario: Protocol Adapter Trait Contracts
 
 ### 1. Scope / Trigger

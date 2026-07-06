@@ -350,6 +350,9 @@ dependencies = [
 [[package]]
 name = "sql-lens-storage"
 version = "0.1.0"
+dependencies = [
+ "sql-lens-core",
+]
 
 [[package]]
 name = "strsim"

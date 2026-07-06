@@ -43,21 +43,21 @@ SQL Lens needs a default local storage backend before timeline, lookup, statisti
 
 ## Acceptance Criteria
 
-- [ ] `sql-lens-storage` depends on `sql-lens-core`.
-- [ ] Events can be appended.
-- [ ] Capacity is enforced.
-- [ ] Oldest events are evicted by default.
-- [ ] Append outcome reports whether an event was evicted.
-- [ ] Stats track capacity, current length, total appended, and total evicted.
-- [ ] Zero capacity cannot construct a ring buffer.
-- [ ] Tests cover append.
-- [ ] Tests cover capacity enforcement.
-- [ ] Tests cover oldest eviction.
-- [ ] Tests cover stats.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `sql-lens-storage` depends on `sql-lens-core`.
+- [x] Events can be appended.
+- [x] Capacity is enforced.
+- [x] Oldest events are evicted by default.
+- [x] Append outcome reports whether an event was evicted.
+- [x] Stats track capacity, current length, total appended, and total evicted.
+- [x] Zero capacity cannot construct a ring buffer.
+- [x] Tests cover append.
+- [x] Tests cover capacity enforcement.
+- [x] Tests cover oldest eviction.
+- [x] Tests cover stats.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Open Questions
 
