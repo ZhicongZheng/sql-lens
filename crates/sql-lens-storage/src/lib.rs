@@ -6,9 +6,16 @@ use std::{collections::VecDeque, num::NonZeroUsize};
 #[derive(Debug, Clone)]
 pub struct RingBufferStore {
     capacity: NonZeroUsize,
-    events: VecDeque<SqlEvent>,
+    events: VecDeque<RingBufferEntry>,
+    next_sequence: u64,
     total_appended: u64,
     total_evicted: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RingBufferEntry {
+    sequence: u64,
+    event: SqlEvent,
 }
 
 impl RingBufferStore {
@@ -16,6 +23,7 @@ impl RingBufferStore {
         Self {
             capacity,
             events: VecDeque::with_capacity(capacity.get()),
+            next_sequence: 0,
             total_appended: 0,
             total_evicted: 0,
         }
@@ -30,12 +38,14 @@ impl RingBufferStore {
                 self.total_evicted += 1;
             }
 
-            evicted.map(|event| event.id)
+            evicted.map(|entry| entry.event.id)
         } else {
             None
         };
 
-        self.events.push_back(event);
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        self.events.push_back(RingBufferEntry { sequence, event });
         self.total_appended += 1;
 
         RingBufferAppendOutcome {
@@ -45,11 +55,53 @@ impl RingBufferStore {
     }
 
     pub fn snapshot(&self) -> Vec<SqlEvent> {
-        self.events.iter().cloned().collect()
+        self.events
+            .iter()
+            .map(|entry| entry.event.clone())
+            .collect()
     }
 
     pub fn get(&self, id: &SqlEventId) -> Option<&SqlEvent> {
-        self.events.iter().find(|event| &event.id == id)
+        self.events
+            .iter()
+            .find(|entry| &entry.event.id == id)
+            .map(|entry| &entry.event)
+    }
+
+    pub fn query_timeline(&self, query: RingBufferTimelineQuery) -> RingBufferTimelinePage {
+        let before_sequence = query
+            .cursor
+            .map_or(u64::MAX, |cursor| cursor.before_sequence);
+        let limit = query.limit.get();
+        let mut events = Vec::with_capacity(limit);
+        let mut oldest_returned_sequence = None;
+        let mut has_more_older_events = false;
+
+        for entry in self.events.iter().rev() {
+            if entry.sequence >= before_sequence {
+                continue;
+            }
+
+            if events.len() == limit {
+                has_more_older_events = true;
+                break;
+            }
+
+            oldest_returned_sequence = Some(entry.sequence);
+            events.push(entry.event.clone());
+        }
+
+        let next_cursor = if has_more_older_events {
+            oldest_returned_sequence
+                .map(|before_sequence| RingBufferTimelineCursor { before_sequence })
+        } else {
+            None
+        };
+
+        RingBufferTimelinePage {
+            events,
+            next_cursor,
+        }
     }
 
     pub fn stats(&self) -> RingBufferStats {
@@ -78,6 +130,23 @@ impl RingBufferStore {
 pub struct RingBufferAppendOutcome {
     pub stored_event_id: SqlEventId,
     pub evicted_event_id: Option<SqlEventId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RingBufferTimelineQuery {
+    pub limit: NonZeroUsize,
+    pub cursor: Option<RingBufferTimelineCursor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RingBufferTimelineCursor {
+    pub before_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RingBufferTimelinePage {
+    pub events: Vec<SqlEvent>,
+    pub next_cursor: Option<RingBufferTimelineCursor>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -135,6 +204,16 @@ mod tests {
 
     fn event_ids(events: &[SqlEvent]) -> Vec<SqlEventId> {
         events.iter().map(|event| event.id.clone()).collect()
+    }
+
+    fn timeline_query(
+        limit: usize,
+        cursor: Option<RingBufferTimelineCursor>,
+    ) -> RingBufferTimelineQuery {
+        RingBufferTimelineQuery {
+            limit: capacity(limit),
+            cursor,
+        }
     }
 
     #[test]
@@ -273,5 +352,131 @@ mod tests {
         let _ = store.get(&SqlEventId("missing".to_owned()));
 
         assert_eq!(store.stats(), stats_before);
+    }
+
+    #[test]
+    fn ring_buffer_timeline_returns_newest_events_first() {
+        let mut store = RingBufferStore::new(capacity(3));
+
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        store.append(test_event("evt_3"));
+
+        let page = store.query_timeline(timeline_query(3, None));
+
+        assert_eq!(
+            event_ids(&page.events),
+            vec![
+                SqlEventId("evt_3".to_owned()),
+                SqlEventId("evt_2".to_owned()),
+                SqlEventId("evt_1".to_owned())
+            ]
+        );
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn ring_buffer_timeline_limit_truncates_results() {
+        let mut store = RingBufferStore::new(capacity(3));
+
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        store.append(test_event("evt_3"));
+
+        let page = store.query_timeline(timeline_query(2, None));
+
+        assert_eq!(
+            event_ids(&page.events),
+            vec![
+                SqlEventId("evt_3".to_owned()),
+                SqlEventId("evt_2".to_owned())
+            ]
+        );
+        assert!(page.next_cursor.is_some());
+    }
+
+    #[test]
+    fn ring_buffer_timeline_cursor_pages_older_events_without_duplicates() {
+        let mut store = RingBufferStore::new(capacity(5));
+
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        store.append(test_event("evt_3"));
+        store.append(test_event("evt_4"));
+        store.append(test_event("evt_5"));
+
+        let first_page = store.query_timeline(timeline_query(2, None));
+        let second_page = store.query_timeline(timeline_query(2, first_page.next_cursor));
+        let third_page = store.query_timeline(timeline_query(2, second_page.next_cursor));
+
+        assert_eq!(
+            event_ids(&first_page.events),
+            vec![
+                SqlEventId("evt_5".to_owned()),
+                SqlEventId("evt_4".to_owned())
+            ]
+        );
+        assert_eq!(
+            event_ids(&second_page.events),
+            vec![
+                SqlEventId("evt_3".to_owned()),
+                SqlEventId("evt_2".to_owned())
+            ]
+        );
+        assert_eq!(
+            event_ids(&third_page.events),
+            vec![SqlEventId("evt_1".to_owned())]
+        );
+        assert!(first_page.next_cursor.is_some());
+        assert!(second_page.next_cursor.is_some());
+        assert_eq!(third_page.next_cursor, None);
+    }
+
+    #[test]
+    fn ring_buffer_timeline_cursor_is_stable_after_newer_append() {
+        let mut store = RingBufferStore::new(capacity(5));
+
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        store.append(test_event("evt_3"));
+        store.append(test_event("evt_4"));
+
+        let first_page = store.query_timeline(timeline_query(2, None));
+        store.append(test_event("evt_5"));
+        let second_page = store.query_timeline(timeline_query(2, first_page.next_cursor));
+
+        assert_eq!(
+            event_ids(&first_page.events),
+            vec![
+                SqlEventId("evt_4".to_owned()),
+                SqlEventId("evt_3".to_owned())
+            ]
+        );
+        assert_eq!(
+            event_ids(&second_page.events),
+            vec![
+                SqlEventId("evt_2".to_owned()),
+                SqlEventId("evt_1".to_owned())
+            ]
+        );
+        assert_eq!(second_page.next_cursor, None);
+    }
+
+    #[test]
+    fn ring_buffer_snapshot_remains_oldest_to_newest() {
+        let mut store = RingBufferStore::new(capacity(3));
+
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        store.append(test_event("evt_3"));
+
+        assert_eq!(
+            event_ids(&store.snapshot()),
+            vec![
+                SqlEventId("evt_1".to_owned()),
+                SqlEventId("evt_2".to_owned()),
+                SqlEventId("evt_3".to_owned())
+            ]
+        );
     }
 }

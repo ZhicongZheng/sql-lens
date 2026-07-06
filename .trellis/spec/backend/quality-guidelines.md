@@ -1062,12 +1062,12 @@ match publisher.publish(event)? {
 }
 ```
 
-## Scenario: Ring Buffer Append Contracts
+## Scenario: Ring Buffer Storage Contracts
 
 ### 1. Scope / Trigger
 
 - Trigger: `sql-lens-storage` owns the default in-memory storage backend for retained SQL events.
-- Ring buffer append is the first storage primitive and must stay append-oriented.
+- Ring buffer append and timeline query are the first storage primitives and must stay append-oriented.
 - This layer bounds memory by capacity and evicts oldest events first.
 
 ### 2. Signatures
@@ -1081,6 +1081,7 @@ impl RingBufferStore {
     pub fn new(capacity: std::num::NonZeroUsize) -> Self;
     pub fn append(&mut self, event: sql_lens_core::SqlEvent) -> RingBufferAppendOutcome;
     pub fn get(&self, id: &sql_lens_core::SqlEventId) -> Option<&sql_lens_core::SqlEvent>;
+    pub fn query_timeline(&self, query: RingBufferTimelineQuery) -> RingBufferTimelinePage;
     pub fn snapshot(&self) -> Vec<sql_lens_core::SqlEvent>;
     pub fn stats(&self) -> RingBufferStats;
     pub fn len(&self) -> usize;
@@ -1091,6 +1092,20 @@ impl RingBufferStore {
 pub struct RingBufferAppendOutcome {
     pub stored_event_id: sql_lens_core::SqlEventId,
     pub evicted_event_id: Option<sql_lens_core::SqlEventId>,
+}
+
+pub struct RingBufferTimelineQuery {
+    pub limit: std::num::NonZeroUsize,
+    pub cursor: Option<RingBufferTimelineCursor>,
+}
+
+pub struct RingBufferTimelineCursor {
+    pub before_sequence: u64,
+}
+
+pub struct RingBufferTimelinePage {
+    pub events: Vec<sql_lens_core::SqlEvent>,
+    pub next_cursor: Option<RingBufferTimelineCursor>,
 }
 
 pub struct RingBufferStats {
@@ -1123,7 +1138,16 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 - `get` returns a borrowed retained event by ID.
 - `get` returns `None` for evicted or missing events.
 - `get` must not mutate store state or stats.
-- Timeline pagination, filters, retention, and secondary indexes belong to later storage tasks.
+- Each appended event receives an internal monotonically increasing sequence.
+- `query_timeline` returns cloned retained events in newest-to-oldest order.
+- `RingBufferTimelineQuery.limit` is non-zero and bounds the returned page size.
+- A missing timeline cursor means query from the newest retained event.
+- `RingBufferTimelineCursor.before_sequence = N` means return retained events with sequence `< N`.
+- `RingBufferTimelinePage.next_cursor` is returned only when older retained events are available.
+- `next_cursor.before_sequence` points to the oldest returned event sequence.
+- A cursor remains stable across newer appends because newer events have larger sequences and are excluded from older-page queries.
+- Evicted events may naturally disappear from later cursor pages.
+- Filters, retention, persistent cursor serialization, and secondary indexes belong to later storage tasks.
 
 ### 4. Validation & Error Matrix
 
@@ -1138,12 +1162,18 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 | Evicted event is looked up by ID | Return `None` |
 | Missing event is looked up by ID | Return `None` |
 | Snapshot is requested | Return cloned retained events in insertion order |
+| Timeline query has no cursor | Return newest retained events first, up to the non-zero limit |
+| Timeline query limit is smaller than retained events | Return `next_cursor` for the next older page |
+| Timeline query uses `before_sequence = N` | Return only retained events with internal sequence `< N` |
+| New events append after a cursor is issued | The cursor still returns the older page, excluding newer events |
+| Older cursor-targeted events were evicted | Return the remaining retained older events without error |
 
 ### 5. Good/Base/Bad Cases
 
 Good:
 
 - Ring buffer append stays synchronous and in-memory.
+- Timeline query scans retained entries directly; no index is needed until filters or scale require it.
 - Tests use synthetic `SqlEvent` values from `sql-lens-core`.
 
 Base:
@@ -1154,6 +1184,8 @@ Base:
 Bad:
 
 - Adding secondary indexes before query behavior proves they are needed.
+- Exposing internal sequence on `SqlEvent`.
+- Treating ring buffer timeline cursors as durable API tokens before API pagination is designed.
 - Blocking append on SQLite, API, WebSocket, or async runtime work.
 - Allowing capacity zero and relying on runtime panics or special cases.
 - Mutating `SqlEvent` during storage append.
@@ -1169,6 +1201,10 @@ For ring buffer append changes:
 - Existing event lookup test.
 - Evicted event lookup test.
 - Non-zero capacity test.
+- Timeline newest-first ordering test.
+- Timeline limit and next-cursor test.
+- Timeline cursor paging test with no duplicate events across pages.
+- Timeline cursor stability test after newer append.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.
 - Run `cargo test --workspace`.

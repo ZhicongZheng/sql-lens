@@ -30,20 +30,20 @@ The SQL timeline page and API need a storage primitive that can return recent ev
 
 ## Acceptance Criteria
 
-- [ ] Query supports limit.
-- [ ] Query returns reverse chronological order.
-- [ ] Query returns stable cursors.
-- [ ] Cursor pagination returns older events without duplicates.
-- [ ] Cursor stays stable when newer events are appended after the first page.
-- [ ] Existing append/get/snapshot behavior remains unchanged.
-- [ ] Tests cover ordering.
-- [ ] Tests cover limit.
-- [ ] Tests cover cursor pagination.
-- [ ] Tests cover cursor stability across append.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] Query supports limit.
+- [x] Query returns reverse chronological order.
+- [x] Query returns stable cursors.
+- [x] Cursor pagination returns older events without duplicates.
+- [x] Cursor stays stable when newer events are appended after the first page.
+- [x] Existing append/get/snapshot behavior remains unchanged.
+- [x] Tests cover ordering.
+- [x] Tests cover limit.
+- [x] Tests cover cursor pagination.
+- [x] Tests cover cursor stability across append.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Open Questions
 
