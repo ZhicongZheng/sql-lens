@@ -1848,6 +1848,118 @@ let local_addr = server.local_addr();
 server.serve_with_shutdown(shutdown_future).await?;
 ```
 
+## Scenario: Health Endpoint Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` defines the first REST endpoint contract: `GET /api/v1/health`.
+- The endpoint is a lightweight local readiness signal for development tools, smoke tests, and future UI/runtime composition.
+- It must not become a deep dependency readiness check until storage/proxy runtime composition exists.
+
+### 2. Signatures
+
+Health endpoint contract:
+
+```http
+GET /api/v1/health
+```
+
+Public API types:
+
+```rust
+pub const HEALTH_PATH: &str = "/api/v1/health";
+
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
+    pub uptime_ms: u64,
+}
+
+pub struct HealthState;
+```
+
+Response body:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "uptime_ms": 120000
+}
+```
+
+### 3. Contracts
+
+- `router()` registers `GET /api/v1/health`.
+- Successful health responses return HTTP 200.
+- `status` is `"ok"` for the first implementation.
+- `version` comes from the API crate package version through `env!("CARGO_PKG_VERSION")`.
+- `uptime_ms` is computed from `std::time::Instant`, not wall-clock time.
+- `uptime_ms` is saturated to `u64::MAX` if elapsed milliseconds ever exceed `u64`.
+- The endpoint works without storage, proxy, capture, protocol adapter, plugin, frontend, or database state.
+- Request ID middleware applies to health responses.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `GET /api/v1/health` | Return HTTP 200 and JSON `HealthResponse` |
+| storage is unavailable or uninitialized | Health endpoint still returns basic process health |
+| request omits `x-request-id` | Response still includes generated `x-request-id` |
+| uptime cannot fit in `u64` | Return `u64::MAX` |
+| deep component readiness is needed | Add a separate readiness task and response contract |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Health schema tests deserialize the response into `HealthResponse`.
+- The endpoint can be called through `tower::ServiceExt::oneshot` without starting a TCP listener.
+
+Base:
+
+- A newly created router immediately reports `"ok"` with a small `uptime_ms`.
+
+Bad:
+
+- Querying storage or proxy state from the health handler before runtime composition exists.
+- Returning ad hoc JSON fields that do not match `API.md`.
+- Changing `sql-lens-app` into a long-running server just to test the handler.
+
+### 6. Tests Required
+
+For health endpoint changes:
+
+- HTTP 200 test.
+- Response deserializes into `HealthResponse`.
+- `status == "ok"`.
+- `version == env!("CARGO_PKG_VERSION")`.
+- `uptime_ms` is numeric.
+- Response includes `x-request-id`.
+- Existing request ID and server foundation tests still pass.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+async fn health(storage: Storage) -> Json<serde_json::Value> {
+    Json(json!({ "database": storage.ping().await }))
+}
+```
+
+#### Correct
+
+```rust
+async fn health(Extension(state): Extension<HealthState>) -> Json<HealthResponse> {
+    Json(state.snapshot())
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

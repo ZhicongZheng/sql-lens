@@ -4,7 +4,7 @@ use axum::{Router, middleware};
 use sql_lens_config::WebConfig;
 use tokio::net::TcpListener;
 
-use crate::request_id::attach_request_id;
+use crate::{health, request_id::attach_request_id};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpServerConfig {
@@ -64,7 +64,9 @@ pub async fn bind_http_server(
 }
 
 pub fn router() -> Router {
-    Router::new().layer(middleware::from_fn(attach_request_id))
+    Router::new()
+        .merge(health::routes())
+        .layer(middleware::from_fn(attach_request_id))
 }
 
 #[derive(Debug)]

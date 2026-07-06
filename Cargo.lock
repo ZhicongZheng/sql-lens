@@ -523,6 +523,8 @@ name = "sql-lens-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "serde",
+ "serde_json",
  "sql-lens-config",
  "tokio",
  "tower",
