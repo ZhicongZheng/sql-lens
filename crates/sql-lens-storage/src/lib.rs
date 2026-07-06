@@ -48,6 +48,10 @@ impl RingBufferStore {
         self.events.iter().cloned().collect()
     }
 
+    pub fn get(&self, id: &SqlEventId) -> Option<&SqlEvent> {
+        self.events.iter().find(|event| &event.id == id)
+    }
+
     pub fn stats(&self) -> RingBufferStats {
         RingBufferStats {
             capacity: self.capacity(),
@@ -225,5 +229,49 @@ mod tests {
     fn ring_buffer_requires_non_zero_capacity() {
         assert!(NonZeroUsize::new(0).is_none());
         assert_eq!(RingBufferStore::new(capacity(1)).capacity(), 1);
+    }
+
+    #[test]
+    fn ring_buffer_gets_existing_event_by_id() {
+        let mut store = RingBufferStore::new(capacity(2));
+        let first = test_event("evt_1");
+        let second = test_event("evt_2");
+
+        store.append(first.clone());
+        store.append(second);
+
+        let found = store
+            .get(&SqlEventId("evt_1".to_owned()))
+            .expect("retained event should be found");
+
+        assert_eq!(found, &first);
+    }
+
+    #[test]
+    fn ring_buffer_get_returns_none_for_evicted_event() {
+        let mut store = RingBufferStore::new(capacity(1));
+
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+
+        assert_eq!(store.get(&SqlEventId("evt_1".to_owned())), None);
+        assert_eq!(
+            store
+                .get(&SqlEventId("evt_2".to_owned()))
+                .map(|event| event.id.clone()),
+            Some(SqlEventId("evt_2".to_owned()))
+        );
+    }
+
+    #[test]
+    fn ring_buffer_get_does_not_mutate_stats() {
+        let mut store = RingBufferStore::new(capacity(1));
+        store.append(test_event("evt_1"));
+        let stats_before = store.stats();
+
+        let _ = store.get(&SqlEventId("evt_1".to_owned()));
+        let _ = store.get(&SqlEventId("missing".to_owned()));
+
+        assert_eq!(store.stats(), stats_before);
     }
 }

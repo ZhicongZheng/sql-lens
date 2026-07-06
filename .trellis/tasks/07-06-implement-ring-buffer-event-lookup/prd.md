@@ -23,13 +23,13 @@ Issue 022: support lookup of retained SQL events by `SqlEventId` in the in-memor
 
 ## Acceptance Criteria
 
-- [ ] Existing events can be retrieved.
-- [ ] Evicted events return not found.
-- [ ] Lookup returns a borrowed `SqlEvent`.
-- [ ] Lookup does not mutate stats.
-- [ ] Tests cover existing event lookup.
-- [ ] Tests cover evicted event lookup.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo check --workspace` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] Existing events can be retrieved.
+- [x] Evicted events return not found.
+- [x] Lookup returns a borrowed `SqlEvent`.
+- [x] Lookup does not mutate stats.
+- [x] Tests cover existing event lookup.
+- [x] Tests cover evicted event lookup.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo check --workspace` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.

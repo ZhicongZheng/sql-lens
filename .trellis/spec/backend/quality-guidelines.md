@@ -1080,6 +1080,7 @@ pub struct RingBufferStore;
 impl RingBufferStore {
     pub fn new(capacity: std::num::NonZeroUsize) -> Self;
     pub fn append(&mut self, event: sql_lens_core::SqlEvent) -> RingBufferAppendOutcome;
+    pub fn get(&self, id: &sql_lens_core::SqlEventId) -> Option<&sql_lens_core::SqlEvent>;
     pub fn snapshot(&self) -> Vec<sql_lens_core::SqlEvent>;
     pub fn stats(&self) -> RingBufferStats;
     pub fn len(&self) -> usize;
@@ -1119,7 +1120,10 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 - `RingBufferStats.total_appended` increments once per append.
 - `RingBufferStats.total_evicted` increments once per evicted event.
 - `snapshot` returns retained events in oldest-to-newest order.
-- Lookup by ID, timeline pagination, filters, retention, and secondary indexes belong to later storage tasks.
+- `get` returns a borrowed retained event by ID.
+- `get` returns `None` for evicted or missing events.
+- `get` must not mutate store state or stats.
+- Timeline pagination, filters, retention, and secondary indexes belong to later storage tasks.
 
 ### 4. Validation & Error Matrix
 
@@ -1130,6 +1134,9 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 | Store is full and append occurs | Oldest event is evicted, incoming event is appended |
 | Capacity is 1 and two events append | Only second event remains |
 | Capacity is zero | Cannot construct through `NonZeroUsize` |
+| Retained event is looked up by ID | Return `Some(&SqlEvent)` |
+| Evicted event is looked up by ID | Return `None` |
+| Missing event is looked up by ID | Return `None` |
 | Snapshot is requested | Return cloned retained events in insertion order |
 
 ### 5. Good/Base/Bad Cases
@@ -1141,12 +1148,12 @@ Good:
 
 Base:
 
-- Future lookup work may add an ID index while preserving append and eviction semantics.
+- Future performance work may add an ID index while preserving append and eviction semantics.
 - Future retention work may add age/byte eviction after this oldest-first baseline.
 
 Bad:
 
-- Adding lookup indexes during the append-only task.
+- Adding secondary indexes before query behavior proves they are needed.
 - Blocking append on SQLite, API, WebSocket, or async runtime work.
 - Allowing capacity zero and relying on runtime panics or special cases.
 - Mutating `SqlEvent` during storage append.
@@ -1159,6 +1166,8 @@ For ring buffer append changes:
 - Capacity enforcement test.
 - Oldest eviction test.
 - Stats test for appended and evicted counters.
+- Existing event lookup test.
+- Evicted event lookup test.
 - Non-zero capacity test.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.
