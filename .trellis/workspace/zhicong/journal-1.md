@@ -673,3 +673,36 @@ Added strongly typed ring buffer timeline filters, validation errors, tests, and
 ### Next Steps
 
 - None - task complete
+
+
+## Session 21: Add live statistics counters
+
+**Date**: 2026-07-06
+**Task**: Add live statistics counters
+**Branch**: `main`
+
+### Summary
+
+Added live statistics counters in sql-lens-storage, split large crate roots into domain modules, added focused tests, and documented module boundaries and statistics contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0eb53b5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
