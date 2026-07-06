@@ -370,3 +370,36 @@ Added TcpForwarder over ProxiedConnection with Tokio bidirectional copy, forward
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Add proxy graceful shutdown
+
+**Date**: 2026-07-06
+**Task**: Add proxy graceful shutdown
+**Branch**: `main`
+
+### Summary
+
+Added proxy shutdown timeout config, ProxyShutdownSignal, ActiveSessionDrain with timeout/abort summaries, config docs, tests for notification and drain behavior, and backend shutdown code-spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `16ed045` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
