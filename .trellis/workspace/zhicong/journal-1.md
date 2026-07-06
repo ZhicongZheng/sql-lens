@@ -237,3 +237,36 @@ Implemented the initial sql-lens CLI entry point with clap, config loading and v
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: Initialize structured logging
+
+**Date**: 2026-07-06
+**Task**: Initialize structured logging
+**Branch**: `main`
+
+### Summary
+
+Initialized tracing-based structured logging from config, added JSON/pretty/level CLI smoke tests, and documented backend logging contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `54aa819` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
