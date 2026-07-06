@@ -72,3 +72,36 @@ Created the minimal Cargo workspace skeleton for SQL Lens with eight documented 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Add core domain models
+
+**Date**: 2026-07-06
+**Task**: Add core domain models
+**Branch**: `main`
+
+### Summary
+
+Implemented protocol-neutral sql-lens-core domain models with serde derives, typed metadata, ID/time newtypes, API error contracts, lightweight unit tests, validation checks, and backend quality spec updates.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `74722f3` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
