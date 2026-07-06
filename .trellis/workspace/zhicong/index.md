@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 12
+- **Total Sessions**: 13
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~405 | Active |
+| `journal-1.md` | ~439 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 13 | 2026-07-06 | Track proxy connection lifecycle | `942a382`, `bd435b6` | `main` |
 | 12 | 2026-07-06 | Add proxy graceful shutdown | `16ed045` | `main` |
 | 11 | 2026-07-06 | Implement bidirectional TCP forwarding | `1048c99` | `main` |
 | 10 | 2026-07-06 | Implement backend dialing | `31780b2`, `c2c1e5d` | `main` |

@@ -403,3 +403,37 @@ Added proxy shutdown timeout config, ProxyShutdownSignal, ActiveSessionDrain wit
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Track proxy connection lifecycle
+
+**Date**: 2026-07-06
+**Task**: Track proxy connection lifecycle
+**Branch**: `main`
+
+### Summary
+
+Started and completed Issue 017 by adding proxy-local connection lifecycle ID generation, lifecycle records, state transitions, failure mapping, byte counter updates, unit tests, and backend spec guidance.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `942a382` | (see git log) |
+| `bd435b6` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
