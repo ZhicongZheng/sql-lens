@@ -270,3 +270,36 @@ Initialized tracing-based structured logging from config, added JSON/pretty/leve
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Add TCP proxy listener
+
+**Date**: 2026-07-06
+**Task**: Add TCP proxy listener
+**Branch**: `main`
+
+### Summary
+
+Implemented sql-lens-proxy TCP listener bind/accept/shutdown boundary with structured errors, socket tests, and backend listener contract spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fc52f34` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
