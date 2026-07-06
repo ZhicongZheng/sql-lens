@@ -324,6 +324,7 @@ version = "0.1.0"
 name = "sql-lens-proxy"
 version = "0.1.0"
 dependencies = [
+ "sql-lens-config",
  "tokio",
  "tracing",
 ]

@@ -567,6 +567,126 @@ let listener = TcpProxyListener::bind(ProxyListenerConfig::new("127.0.0.1:0")).a
 let stats = listener.run_accept_loop(accepted_tx, shutdown_rx).await?;
 ```
 
+## Scenario: Backend Dialing Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-proxy` owns the second TCP leg from an accepted client connection to the configured backend database address.
+- Backend dialing is a proxy runtime boundary. It must preserve client/backend context for later forwarding and lifecycle recording.
+- This layer must not forward bytes, parse SQL protocols, emit capture events, allocate connection IDs, or start the application runtime.
+
+### 2. Signatures
+
+Public backend dialing types live in `crates/sql-lens-proxy/src/lib.rs`:
+
+```rust
+pub struct BackendDialConfig {
+    pub address: String,
+    pub connect_timeout: std::time::Duration,
+}
+
+impl BackendDialConfig {
+    pub fn new(address: impl Into<String>, connect_timeout: std::time::Duration) -> Self;
+    pub fn from_config(
+        proxy: &sql_lens_config::ProxyConfig,
+        backend: &sql_lens_config::BackendConfig,
+    ) -> Self;
+}
+
+pub struct BackendDialer;
+
+impl BackendDialer {
+    pub async fn dial(
+        accepted: AcceptedClient,
+        config: &BackendDialConfig,
+    ) -> Result<ProxiedConnection, BackendDialError>;
+}
+```
+
+Allowed backend dialing dependencies:
+
+```toml
+sql-lens-config = { path = "../sql-lens-config" }
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros"] }
+tracing = "0.1"
+```
+
+Do not add `thiserror`, `anyhow`, `tokio-util`, protocol crates, app crates, storage crates, database clients, retry libraries, or TLS libraries for this layer.
+
+### 3. Contracts
+
+- `BackendDialConfig.address` is copied from `BackendConfig.address`.
+- `BackendDialConfig.connect_timeout` is `Duration::from_millis(ProxyConfig.connect_timeout_ms)`.
+- `BackendDialer::dial` consumes an `AcceptedClient`.
+- Successful dial returns `ProxiedConnection` with the client stream, backend stream, client peer address, and backend address string.
+- Failed dial drops the accepted client stream by ownership and returns `BackendDialError`.
+- Timeout wraps the whole `TcpStream::connect` future with `tokio::time::timeout`.
+- Connect failures preserve the source `std::io::Error`.
+- Dial failure records are lightweight proxy-local records, not durable lifecycle records.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Backend dial succeeds | Return `ProxiedConnection` |
+| Backend dial future exceeds `connect_timeout` | Return `BackendDialError::Timeout { failure }` |
+| Backend TCP connect returns an IO error | Return `BackendDialError::Connect { failure, source }` |
+| Timeout failure is returned | `failure.kind` is `BackendDialFailureKind::Timeout { timeout }` |
+| Connect failure is returned | `failure.kind` is `BackendDialFailureKind::Connect` |
+| Runtime config is converted | Use `BackendConfig.address` and `ProxyConfig.connect_timeout_ms` only |
+| Later forwarding is needed | Add it in the forwarding task using `ProxiedConnection`; do not extend dialing to copy bytes |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Dial a backend listener bound to `127.0.0.1:0` in tests and assert `ProxiedConnection` preserves addresses.
+- Use a private pending future helper in tests to make timeout behavior deterministic without relying on OS TCP timing.
+- Keep low-sensitivity logs to lifecycle addresses and timeout durations.
+
+Base:
+
+- A refused loopback port returns a structured connect failure.
+- Future lifecycle work maps `BackendDialFailure` into a durable connection record.
+
+Bad:
+
+- Calling `tokio::io::copy_bidirectional` inside backend dialing.
+- Importing protocol adapters to decide how to dial TCP.
+- Creating connection IDs or writing storage records in `sql-lens-proxy`.
+- Retrying backend dials without a dedicated retry-policy task.
+
+### 6. Tests Required
+
+For backend dialing changes:
+
+- Config conversion test for backend address and connect timeout.
+- Successful dial test using a local backend listener.
+- Structured connect failure test using an unused loopback port.
+- Deterministic timeout test; prefer a pending connect future over OS-specific unreachable addresses.
+- Run socket-binding tests outside sandboxes that deny local TCP binds.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let mut client = accepted.into_stream();
+let mut backend = TcpStream::connect(backend_addr).await?;
+tokio::io::copy_bidirectional(&mut client, &mut backend).await?;
+```
+
+#### Correct
+
+```rust
+let dial_config = BackendDialConfig::from_config(&config.proxy, &config.backend);
+let proxied = BackendDialer::dial(accepted, &dial_config).await?;
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.
