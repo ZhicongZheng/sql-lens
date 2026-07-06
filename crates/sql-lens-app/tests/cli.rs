@@ -6,6 +6,7 @@ use std::{
 };
 
 static TEMP_DIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+const STARTUP_CHECK_LOG_MESSAGE: &str = "SQL Lens startup checks completed";
 
 struct TempDir {
     path: PathBuf,
@@ -47,6 +48,27 @@ fn run_sql_lens(args: &[&str]) -> Output {
         .expect("run sql-lens binary")
 }
 
+fn valid_config(level: &str, format: &str) -> String {
+    format!(
+        r#"
+[proxy]
+listen = "127.0.0.1:4407"
+protocol = "mysql"
+
+[backend]
+address = "127.0.0.1:3306"
+
+[logging]
+level = "{level}"
+format = "{format}"
+"#
+    )
+}
+
+fn output_stderr(output: &Output) -> String {
+    String::from_utf8(output.stderr.clone()).expect("stderr should be UTF-8")
+}
+
 #[test]
 fn version_output_succeeds() {
     let output = run_sql_lens(&["--version"]);
@@ -60,17 +82,7 @@ fn version_output_succeeds() {
 #[test]
 fn valid_config_path_succeeds() {
     let temp_dir = TempDir::new();
-    let config_path = temp_dir.write_config(
-        "valid.toml",
-        r#"
-[proxy]
-listen = "127.0.0.1:4407"
-protocol = "mysql"
-
-[backend]
-address = "127.0.0.1:3306"
-"#,
-    );
+    let config_path = temp_dir.write_config("valid.toml", &valid_config("info", "json"));
 
     let output = run_sql_lens(&[
         "--config",
@@ -78,7 +90,48 @@ address = "127.0.0.1:3306"
     ]);
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert!(output.stdout.is_empty());
+
+    let stderr = output_stderr(&output);
+    assert!(stderr.trim_start().starts_with('{'));
+    assert!(stderr.contains("\"level\""));
+    assert!(stderr.contains("\"fields\""));
+    assert!(stderr.contains(STARTUP_CHECK_LOG_MESSAGE));
+}
+
+#[test]
+fn pretty_logging_format_emits_human_readable_startup_log() {
+    let temp_dir = TempDir::new();
+    let config_path = temp_dir.write_config("pretty.toml", &valid_config("info", "pretty"));
+
+    let output = run_sql_lens(&[
+        "--config",
+        config_path.to_str().expect("path should be UTF-8"),
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+
+    let stderr = output_stderr(&output);
+    assert!(!stderr.trim_start().starts_with('{'));
+    assert!(stderr.contains(STARTUP_CHECK_LOG_MESSAGE));
+}
+
+#[test]
+fn logging_level_filters_startup_info_event() {
+    let temp_dir = TempDir::new();
+    let config_path = temp_dir.write_config("error-level.toml", &valid_config("error", "json"));
+
+    let output = run_sql_lens(&[
+        "--config",
+        config_path.to_str().expect("path should be UTF-8"),
+    ]);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+
+    let stderr = output_stderr(&output);
+    assert!(!stderr.contains(STARTUP_CHECK_LOG_MESSAGE));
 }
 
 #[test]
@@ -93,7 +146,7 @@ fn missing_config_path_fails() {
 
     assert!(!output.status.success());
 
-    let stderr = String::from_utf8(output.stderr).expect("error stderr should be UTF-8");
+    let stderr = output_stderr(&output);
     assert!(stderr.contains("failed to load SQL Lens config"));
     assert!(stderr.contains("failed to read config file"));
     assert!(stderr.contains("missing.toml"));
@@ -121,7 +174,7 @@ address = ""
 
     assert!(!output.status.success());
 
-    let stderr = String::from_utf8(output.stderr).expect("error stderr should be UTF-8");
+    let stderr = output_stderr(&output);
     assert!(stderr.contains("failed to validate SQL Lens config"));
     assert!(stderr.contains("proxy.listen"));
     assert!(stderr.contains("backend.address"));

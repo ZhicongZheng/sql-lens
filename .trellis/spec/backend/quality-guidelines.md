@@ -362,11 +362,13 @@ fn main() -> std::process::ExitCode;
 fn run(cli: Cli) -> Result<(), AppError>;
 ```
 
-Allowed first-layer dependencies in `sql-lens-app`:
+Allowed application startup dependencies in `sql-lens-app` at this stage:
 
 ```toml
 clap = { version = "4", features = ["derive"] }
 sql-lens-config = { path = "../sql-lens-config" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
 ```
 
 ### 3. Contracts
@@ -375,16 +377,17 @@ sql-lens-config = { path = "../sql-lens-config" }
 - The default config path is `sql-lens.toml`.
 - The loaded config is validated through `SqlLensConfig::validate`.
 - `--version` is handled by clap and exits successfully without loading config.
-- Successful load and validation exit with `ExitCode::SUCCESS`.
+- Successful load, validation, and logging initialization exit with `ExitCode::SUCCESS`.
 - Config load or validation failure prints a human-readable message to stderr and exits with `ExitCode::FAILURE`.
-- Do not start proxy, API, storage, logging, signal handling, hot reload, or async runtime services in this layer.
+- Logging initialization happens after config validation; follow `logging-guidelines.md`.
+- Do not start proxy, API, storage, signal handling, hot reload, or async runtime services in this layer.
 
 ### 4. Validation & Error Matrix
 
 | Condition | Required behavior |
 | --- | --- |
 | `--version` is passed | Print version and exit zero before config loading |
-| `--config <FILE>` points to a valid config | Load, validate, exit zero |
+| `--config <FILE>` points to a valid config | Load, validate, initialize logging, emit startup-check log, exit zero |
 | Config file cannot be read | Include config load context and the path in stderr; exit non-zero |
 | TOML cannot be parsed | Include config load context and parse error in stderr; exit non-zero |
 | Config validation fails | Include validation context and violation details in stderr; exit non-zero |
@@ -406,7 +409,7 @@ Bad:
 
 - Duplicating config validation rules in `sql-lens-app`.
 - Calling `unwrap` or `expect` on user-provided config load/validation paths.
-- Adding async runtime, HTTP, storage, watcher, or logging dependencies to satisfy the first CLI task.
+- Adding async runtime, HTTP, storage, watcher, or service startup dependencies to satisfy CLI or logging startup tasks.
 
 ### 6. Tests Required
 
