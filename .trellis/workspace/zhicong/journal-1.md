@@ -706,3 +706,36 @@ Added live statistics counters in sql-lens-storage, split large crate roots into
 ### Next Steps
 
 - None - task complete
+
+
+## Session 22: Add HTTP server foundation
+
+**Date**: 2026-07-06
+**Task**: Add HTTP server foundation
+**Branch**: `main`
+
+### Summary
+
+Added sql-lens-api HTTP server primitives with Axum binding, graceful shutdown, request ID middleware, tests, and backend spec coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d2b1e13` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
