@@ -166,6 +166,7 @@ pub struct ProxyConfig {
     pub max_connections: u32,
     pub connect_timeout_ms: u64,
     pub idle_timeout_ms: u64,
+    pub shutdown_timeout_ms: u64,
 }
 
 impl Default for ProxyConfig {
@@ -177,6 +178,7 @@ impl Default for ProxyConfig {
             max_connections: 512,
             connect_timeout_ms: 5_000,
             idle_timeout_ms: 300_000,
+            shutdown_timeout_ms: 10_000,
         }
     }
 }
@@ -540,6 +542,7 @@ mod tests {
         assert_eq!(config.proxy.max_connections, 512);
         assert_eq!(config.proxy.connect_timeout_ms, 5_000);
         assert_eq!(config.proxy.idle_timeout_ms, 300_000);
+        assert_eq!(config.proxy.shutdown_timeout_ms, 10_000);
         assert_eq!(config.backend.address, "127.0.0.1:3306");
         assert_eq!(config.backend.database_type, DatabaseType::MySql);
         assert_eq!(config.tls.mode, TlsMode::Passthrough);
@@ -744,6 +747,7 @@ capture_mode = "observe"
 max_connections = 32
 connect_timeout_ms = 1000
 idle_timeout_ms = 2000
+shutdown_timeout_ms = 3000
 
 [backend]
 address = "127.0.0.1:13306"
@@ -806,6 +810,7 @@ timeout_ms = 200
 
         assert_eq!(config.proxy.listen, "127.0.0.1:4407");
         assert_eq!(config.proxy.max_connections, 32);
+        assert_eq!(config.proxy.shutdown_timeout_ms, 3_000);
         assert_eq!(config.backend.database_type, DatabaseType::TiDb);
         assert_eq!(config.backend.tls_server_name.as_deref(), Some("db.local"));
         assert_eq!(config.tls.mode, TlsMode::Disabled);
@@ -838,6 +843,7 @@ level = "debug"
         assert_eq!(config.proxy.listen, "127.0.0.1:4408");
         assert_eq!(config.proxy.protocol, Protocol::MySql);
         assert_eq!(config.proxy.capture_mode, CaptureMode::Observe);
+        assert_eq!(config.proxy.shutdown_timeout_ms, 10_000);
         assert_eq!(config.backend.address, "127.0.0.1:3306");
         assert_eq!(config.storage.capacity, 100_000);
         assert_eq!(config.logging.level, LoggingLevel::Debug);

@@ -28,6 +28,7 @@ capture_mode = "observe"
 max_connections = 512
 connect_timeout_ms = 5000
 idle_timeout_ms = 300000
+shutdown_timeout_ms = 10000
 
 [backend]
 address = "127.0.0.1:3306"
@@ -92,6 +93,7 @@ Fields:
 - `max_connections`: connection limit.
 - `connect_timeout_ms`: backend dial timeout.
 - `idle_timeout_ms`: idle connection timeout.
+- `shutdown_timeout_ms`: maximum time to drain active proxy sessions during shutdown.
 
 ### `backend`
 
@@ -198,4 +200,3 @@ SQL_LENS_LOGGING_LEVEL=debug
 - `storage.capacity` must be positive for ring buffer.
 - TLS certificate paths are required for TLS termination.
 - `auth.enabled=true` requires a configured auth mode.
-

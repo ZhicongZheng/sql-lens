@@ -811,6 +811,147 @@ backend.write_all(&buffer).await?;
 let summary = TcpForwarder::forward(proxied).await?;
 ```
 
+## Scenario: Proxy Graceful Shutdown Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-config` and `sql-lens-proxy` define the first shutdown coordination contract for the proxy runtime.
+- Shutdown coordination stops accepts, notifies active sessions, and drains active session tasks within a bounded timeout.
+- This layer must not install OS signal handlers, start the application runtime, parse protocols, emit capture events, persist lifecycle records, or allocate connection IDs.
+
+### 2. Signatures
+
+Config field:
+
+```rust
+pub struct ProxyConfig {
+    pub shutdown_timeout_ms: u64,
+}
+```
+
+Proxy shutdown types live in `crates/sql-lens-proxy/src/lib.rs`:
+
+```rust
+pub struct ProxyShutdownConfig {
+    pub drain_timeout: std::time::Duration,
+}
+
+impl ProxyShutdownConfig {
+    pub fn new(drain_timeout: std::time::Duration) -> Self;
+    pub fn from_config(proxy: &sql_lens_config::ProxyConfig) -> Self;
+}
+
+pub struct ProxyShutdownSignal;
+
+impl ProxyShutdownSignal {
+    pub fn new() -> Self;
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<bool>;
+    pub fn request_shutdown(&self) -> Result<(), ProxyShutdownError>;
+}
+
+pub struct ActiveSessionDrain;
+
+impl ActiveSessionDrain {
+    pub async fn drain<T>(
+        sessions: Vec<tokio::task::JoinHandle<T>>,
+        config: &ProxyShutdownConfig,
+    ) -> ShutdownDrainSummary
+    where
+        T: Send + 'static;
+}
+```
+
+Allowed dependencies remain:
+
+```toml
+sql-lens-config = { path = "../sql-lens-config" }
+tokio = { version = "1", features = ["net", "sync", "time", "rt", "macros", "io-util"] }
+tracing = "0.1"
+```
+
+Do not add `tokio-util`, signal handling crates, app crates, storage crates, protocol crates, or lifecycle ID dependencies for this layer.
+
+### 3. Contracts
+
+- `ProxyConfig.shutdown_timeout_ms` defaults to `10_000`.
+- `ProxyShutdownConfig::from_config` maps `shutdown_timeout_ms` to `Duration::from_millis`.
+- `ProxyShutdownSignal` uses `watch<bool>` where `false` means running and `true` means shutdown requested.
+- Listener shutdown should continue to use `watch::Receiver<bool>`; no second listener shutdown mechanism.
+- `ActiveSessionDrain::drain` waits for active session `JoinHandle`s until the configured drain timeout.
+- A joined task with `Ok(_)` counts as completed.
+- A joined task with `Err(_)` counts as failed.
+- On timeout, remaining tasks are aborted and counted as timed out.
+- Drain timeout is represented in `ShutdownDrainSummary`, not as an exception.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Missing `proxy.shutdown_timeout_ms` in TOML | Use default `10_000` |
+| TOML sets `proxy.shutdown_timeout_ms` | Parse the configured value |
+| Shutdown signal has active receivers | `request_shutdown` sends `true` |
+| Shutdown signal has no receivers | Return `ProxyShutdownError::NoReceivers` |
+| Session task completes before timeout | Increment `completed_sessions` |
+| Session task joins with error before timeout | Increment `failed_sessions` |
+| Drain timeout elapses | Abort remaining tasks, set `timed_out = true`, increment `timed_out_sessions` |
+| Later OS signal support is needed | Implement in `sql-lens-app`, not in proxy primitives |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- One `ProxyShutdownSignal` fans out receivers to listener and active sessions.
+- Tests use short drain timeouts and pending tasks to prove abort-on-timeout.
+- Runtime composition later calls listener shutdown and `ActiveSessionDrain` without changing the primitive contracts.
+
+Base:
+
+- A clean local shutdown drains all completed forwarding sessions and reports counts.
+- A stuck session is aborted only after the configured drain timeout.
+
+Bad:
+
+- Calling `tokio::signal::ctrl_c` inside `sql-lens-proxy`.
+- Blocking shutdown drain on storage, capture, plugin hooks, or WebSocket clients.
+- Treating shutdown timeout as idle timeout.
+- Creating connection lifecycle records from the shutdown primitive.
+
+### 6. Tests Required
+
+For proxy graceful shutdown changes:
+
+- Config default test for `shutdown_timeout_ms`.
+- TOML override test for `proxy.shutdown_timeout_ms`.
+- `ProxyShutdownConfig::from_config` test.
+- Shutdown signal notification test.
+- Listener stop test using `ProxyShutdownSignal`.
+- Successful active-session drain test.
+- Failed active-session drain test.
+- Drain timeout and abort test.
+- Run socket-binding tests outside sandboxes that deny local TCP binds.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+tokio::signal::ctrl_c().await?;
+storage.write_connection_closed(id).await?;
+```
+
+#### Correct
+
+```rust
+let shutdown = ProxyShutdownSignal::new();
+let listener_shutdown = shutdown.subscribe();
+shutdown.request_shutdown()?;
+let summary = ActiveSessionDrain::drain(session_handles, &shutdown_config).await;
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

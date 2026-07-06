@@ -6,7 +6,8 @@ use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
     sync::{mpsc, watch},
-    time::timeout,
+    task::JoinHandle,
+    time::{Instant, timeout, timeout_at},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,6 +436,148 @@ impl Error for ForwardingError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyShutdownConfig {
+    pub drain_timeout: Duration,
+}
+
+impl ProxyShutdownConfig {
+    pub fn new(drain_timeout: Duration) -> Self {
+        Self { drain_timeout }
+    }
+
+    pub fn from_config(proxy: &ProxyConfig) -> Self {
+        Self::new(Duration::from_millis(proxy.shutdown_timeout_ms))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyShutdownSignal {
+    sender: watch::Sender<bool>,
+}
+
+impl ProxyShutdownSignal {
+    pub fn new() -> Self {
+        let (sender, _receiver) = watch::channel(false);
+
+        Self { sender }
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.sender.subscribe()
+    }
+
+    pub fn request_shutdown(&self) -> Result<(), ProxyShutdownError> {
+        self.sender
+            .send(true)
+            .map_err(|_| ProxyShutdownError::NoReceivers)
+    }
+}
+
+impl Default for ProxyShutdownSignal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub enum ProxyShutdownError {
+    NoReceivers,
+}
+
+impl fmt::Display for ProxyShutdownError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoReceivers => write!(f, "no proxy shutdown receivers are active"),
+        }
+    }
+}
+
+impl Error for ProxyShutdownError {}
+
+#[derive(Debug)]
+pub struct ActiveSessionDrain;
+
+impl ActiveSessionDrain {
+    pub async fn drain<T>(
+        sessions: Vec<JoinHandle<T>>,
+        config: &ProxyShutdownConfig,
+    ) -> ShutdownDrainSummary
+    where
+        T: Send + 'static,
+    {
+        let total_sessions = sessions.len();
+
+        if total_sessions == 0 {
+            return ShutdownDrainSummary::default();
+        }
+
+        let abort_handles = sessions
+            .iter()
+            .map(JoinHandle::abort_handle)
+            .collect::<Vec<_>>();
+        let (status_tx, mut status_rx) = mpsc::channel(total_sessions);
+
+        for session in sessions {
+            let status_tx = status_tx.clone();
+            tokio::spawn(async move {
+                let status = match session.await {
+                    Ok(_) => SessionDrainStatus::Completed,
+                    Err(_) => SessionDrainStatus::Failed,
+                };
+
+                let _ = status_tx.send(status).await;
+            });
+        }
+        drop(status_tx);
+
+        let deadline = Instant::now() + config.drain_timeout;
+        let mut summary = ShutdownDrainSummary::default();
+
+        while summary.observed_sessions() < total_sessions {
+            match timeout_at(deadline, status_rx.recv()).await {
+                Ok(Some(SessionDrainStatus::Completed)) => summary.completed_sessions += 1,
+                Ok(Some(SessionDrainStatus::Failed)) => summary.failed_sessions += 1,
+                Ok(None) => break,
+                Err(_) => {
+                    let timed_out_sessions =
+                        total_sessions.saturating_sub(summary.observed_sessions());
+
+                    for abort_handle in abort_handles {
+                        abort_handle.abort();
+                    }
+
+                    summary.timed_out_sessions = timed_out_sessions;
+                    summary.timed_out = true;
+                    return summary;
+                }
+            }
+        }
+
+        summary
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShutdownDrainSummary {
+    pub completed_sessions: usize,
+    pub failed_sessions: usize,
+    pub timed_out_sessions: usize,
+    pub timed_out: bool,
+}
+
+impl ShutdownDrainSummary {
+    pub fn observed_sessions(&self) -> usize {
+        self.completed_sessions + self.failed_sessions + self.timed_out_sessions
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionDrainStatus {
+    Completed,
+    Failed,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AcceptLoopStats {
     pub accepted_connections: u64,
@@ -484,6 +627,10 @@ impl Error for ProxyListenerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::{Duration, timeout};
 
@@ -535,6 +682,132 @@ mod tests {
             .expect("forwarding should finish before timeout")
             .expect("forwarding task should join")
             .expect("forwarding should finish cleanly")
+    }
+
+    struct DropFlag {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn proxy_shutdown_config_uses_runtime_config() {
+        let proxy = ProxyConfig {
+            shutdown_timeout_ms: 2_500,
+            ..ProxyConfig::default()
+        };
+
+        let config = ProxyShutdownConfig::from_config(&proxy);
+
+        assert_eq!(config.drain_timeout, Duration::from_millis(2_500));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_signal_notifies_subscribers() {
+        let signal = ProxyShutdownSignal::new();
+        let mut shutdown = signal.subscribe();
+
+        assert!(!*shutdown.borrow_and_update());
+
+        signal
+            .request_shutdown()
+            .expect("shutdown should notify active receivers");
+
+        shutdown
+            .changed()
+            .await
+            .expect("shutdown receiver should observe change");
+
+        assert!(*shutdown.borrow_and_update());
+    }
+
+    #[test]
+    fn shutdown_signal_reports_missing_receivers() {
+        let signal = ProxyShutdownSignal::new();
+
+        let error = signal
+            .request_shutdown()
+            .expect_err("shutdown without receivers should fail");
+
+        assert!(matches!(error, ProxyShutdownError::NoReceivers));
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_session_drain_reports_completed_sessions() {
+        let config = ProxyShutdownConfig::new(TEST_TIMEOUT);
+        let sessions = vec![tokio::spawn(async { 1_u8 }), tokio::spawn(async { 2_u8 })];
+
+        let summary = ActiveSessionDrain::drain(sessions, &config).await;
+
+        assert_eq!(
+            summary,
+            ShutdownDrainSummary {
+                completed_sessions: 2,
+                failed_sessions: 0,
+                timed_out_sessions: 0,
+                timed_out: false,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_session_drain_reports_failed_sessions() {
+        let config = ProxyShutdownConfig::new(TEST_TIMEOUT);
+        let session = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        session.abort();
+        let sessions = vec![session];
+
+        let summary = ActiveSessionDrain::drain(sessions, &config).await;
+
+        assert_eq!(
+            summary,
+            ShutdownDrainSummary {
+                completed_sessions: 0,
+                failed_sessions: 1,
+                timed_out_sessions: 0,
+                timed_out: false,
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_session_drain_times_out_and_aborts_unfinished_sessions() {
+        let config = ProxyShutdownConfig::new(Duration::from_millis(10));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_in_task = Arc::clone(&dropped);
+        let sessions = vec![tokio::spawn(async move {
+            let _drop_flag = DropFlag {
+                dropped: dropped_in_task,
+            };
+            std::future::pending::<()>().await;
+        })];
+
+        let summary = ActiveSessionDrain::drain(sessions, &config).await;
+
+        for _ in 0..10 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            summary,
+            ShutdownDrainSummary {
+                completed_sessions: 0,
+                failed_sessions: 0,
+                timed_out_sessions: 1,
+                timed_out: true,
+            }
+        );
+        assert!(dropped.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -866,6 +1139,33 @@ mod tests {
         let accept_loop = tokio::spawn(listener.run_accept_loop(accepted_tx, shutdown_rx));
 
         shutdown_tx.send(true).expect("shutdown should send");
+
+        let stats = timeout(TEST_TIMEOUT, accept_loop)
+            .await
+            .expect("accept loop should stop before timeout")
+            .expect("accept loop task should join")
+            .expect("accept loop should stop cleanly");
+
+        assert_eq!(
+            stats,
+            AcceptLoopStats {
+                accepted_connections: 0
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn accept_loop_stops_with_proxy_shutdown_signal() {
+        let listener = TcpProxyListener::bind(ProxyListenerConfig::new("127.0.0.1:0"))
+            .await
+            .expect("listener should bind");
+        let (accepted_tx, _accepted_rx) = mpsc::channel(1);
+        let shutdown = ProxyShutdownSignal::new();
+        let accept_loop = tokio::spawn(listener.run_accept_loop(accepted_tx, shutdown.subscribe()));
+
+        shutdown
+            .request_shutdown()
+            .expect("shutdown should notify listener");
 
         let stats = timeout(TEST_TIMEOUT, accept_loop)
             .await
