@@ -190,6 +190,7 @@ Recommended Rust workspace:
 ```text
 crates/
   sql-lens-core/
+  sql-lens-config/
   sql-lens-proxy/
   sql-lens-protocol/
   sql-lens-protocol-mysql/
@@ -233,6 +234,7 @@ sql-lens/
 ### Rust Crate Split
 
 - `sql-lens-core`: protocol-neutral domain models.
+- `sql-lens-config`: configuration model, option enums, and defaults.
 - `sql-lens-proxy`: TCP proxy, sessions, forwarding, shutdown.
 - `sql-lens-protocol`: protocol adapter traits and registry.
 - `sql-lens-protocol-mysql`: MySQL-compatible protocol adapter.

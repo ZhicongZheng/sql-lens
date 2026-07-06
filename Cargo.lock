@@ -59,6 +59,13 @@ name = "sql-lens-app"
 version = "0.1.0"
 
 [[package]]
+name = "sql-lens-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "sql-lens-core"
 version = "0.1.0"
 dependencies = [

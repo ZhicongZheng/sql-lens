@@ -129,6 +129,17 @@ Shared domain model:
 
 This crate must not depend on protocol-specific crates.
 
+### `sql-lens-config`
+
+Startup configuration contract:
+
+- Top-level configuration model.
+- Section-specific configuration structs.
+- Configuration option enums.
+- Default values.
+
+Config file loading, environment overrides, validation, and runtime apply logic belong outside this crate.
+
 ### `sql-lens-proxy`
 
 Network proxy:
@@ -324,4 +335,3 @@ SQL Lens should be safe and predictable for local development. It should not cla
 - Long-term retention.
 - Multi-user access control.
 - Resource isolation.
-

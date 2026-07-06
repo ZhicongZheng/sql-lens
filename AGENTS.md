@@ -20,6 +20,7 @@ At bootstrap, the repository is documentation-first. Business code may not exist
 sql-lens/
   crates/
     sql-lens-core/
+    sql-lens-config/
     sql-lens-proxy/
     sql-lens-protocol/
     sql-lens-protocol-mysql/
@@ -56,6 +57,17 @@ Owns protocol-neutral domain types:
 - Protocol metadata container.
 
 Do not depend on protocol-specific crates from core.
+
+### `sql-lens-config`
+
+Owns runtime configuration contracts:
+
+- Startup configuration structs.
+- Configuration enums.
+- Default values.
+- Serde-compatible configuration shape.
+
+Do not load files, read environment variables, validate runtime constraints, or start services here.
 
 ### `sql-lens-proxy`
 

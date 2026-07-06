@@ -11,6 +11,7 @@ SQL Lens backend is Rust-first and organized as a Cargo workspace. Each crate ow
 ```text
 crates/
 ├── sql-lens-core/
+├── sql-lens-config/
 ├── sql-lens-proxy/
 ├── sql-lens-protocol/
 ├── sql-lens-protocol-mysql/
@@ -38,6 +39,7 @@ Member packages inherit shared package metadata instead of repeating it.
 ## Module Ownership
 
 - `sql-lens-core`: protocol-neutral domain models such as SQL events, connections, parameters, timings, result summaries, error summaries, and protocol metadata containers.
+- `sql-lens-config`: startup configuration structs, configuration enums, defaults, and serde-compatible configuration shape.
 - `sql-lens-proxy`: TCP listener, backend dialing, session lifecycle, bidirectional forwarding, shutdown, and backpressure coordination.
 - `sql-lens-protocol`: protocol adapter traits, adapter registry, and shared adapter contracts.
 - `sql-lens-protocol-mysql`: MySQL-compatible packet framing, handshake observation, command parsing, prepared statement lifecycle, parameter decoding, and error packet mapping.
