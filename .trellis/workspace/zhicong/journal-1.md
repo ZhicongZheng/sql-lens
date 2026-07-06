@@ -105,3 +105,36 @@ Implemented protocol-neutral sql-lens-core domain models with serde derives, typ
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Add configuration model crate
+
+**Date**: 2026-07-06
+**Task**: Add configuration model crate
+**Branch**: `main`
+
+### Summary
+
+Implemented the standalone sql-lens-config crate with typed startup configuration sections, config-owned enums, defaults, serde support, lightweight tests, and synchronized crate responsibility docs.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0a37535` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
