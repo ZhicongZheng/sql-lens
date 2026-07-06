@@ -138,3 +138,36 @@ Implemented the standalone sql-lens-config crate with typed startup configuratio
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Add TOML config loading
+
+**Date**: 2026-07-06
+**Task**: Add TOML config loading
+**Branch**: `main`
+
+### Summary
+
+Implemented TOML loading for sql-lens-config with from_path, from_toml_str, structured ConfigLoadError, serde defaults, unknown-field rejection, focused tests, and backend spec documentation for config loading contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a1ff857` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
