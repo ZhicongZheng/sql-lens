@@ -1081,7 +1081,10 @@ impl RingBufferStore {
     pub fn new(capacity: std::num::NonZeroUsize) -> Self;
     pub fn append(&mut self, event: sql_lens_core::SqlEvent) -> RingBufferAppendOutcome;
     pub fn get(&self, id: &sql_lens_core::SqlEventId) -> Option<&sql_lens_core::SqlEvent>;
-    pub fn query_timeline(&self, query: RingBufferTimelineQuery) -> RingBufferTimelinePage;
+    pub fn query_timeline(
+        &self,
+        query: RingBufferTimelineQuery,
+    ) -> Result<RingBufferTimelinePage, SqlEventFilterError>;
     pub fn snapshot(&self) -> Vec<sql_lens_core::SqlEvent>;
     pub fn stats(&self) -> RingBufferStats;
     pub fn len(&self) -> usize;
@@ -1097,6 +1100,7 @@ pub struct RingBufferAppendOutcome {
 pub struct RingBufferTimelineQuery {
     pub limit: std::num::NonZeroUsize,
     pub cursor: Option<RingBufferTimelineCursor>,
+    pub filter: SqlEventFilter,
 }
 
 pub struct RingBufferTimelineCursor {
@@ -1106,6 +1110,30 @@ pub struct RingBufferTimelineCursor {
 pub struct RingBufferTimelinePage {
     pub events: Vec<sql_lens_core::SqlEvent>,
     pub next_cursor: Option<RingBufferTimelineCursor>,
+}
+
+pub struct SqlEventFilter {
+    pub protocol: Option<sql_lens_core::ProtocolName>,
+    pub database_type: Option<sql_lens_core::DatabaseType>,
+    pub database: Option<String>,
+    pub user: Option<String>,
+    pub status: Option<sql_lens_core::CaptureStatus>,
+    pub min_duration: Option<sql_lens_core::DurationMillis>,
+    pub max_duration: Option<sql_lens_core::DurationMillis>,
+    pub text: Option<String>,
+    pub from: Option<sql_lens_core::Timestamp>,
+    pub to: Option<sql_lens_core::Timestamp>,
+}
+
+pub enum SqlEventFilterError {
+    InvalidDurationRange {
+        min: sql_lens_core::DurationMillis,
+        max: sql_lens_core::DurationMillis,
+    },
+    InvalidTimestampRange {
+        from: sql_lens_core::Timestamp,
+        to: sql_lens_core::Timestamp,
+    },
 }
 
 pub struct RingBufferStats {
@@ -1147,7 +1175,16 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 - `next_cursor.before_sequence` points to the oldest returned event sequence.
 - A cursor remains stable across newer appends because newer events have larger sequences and are excluded from older-page queries.
 - Evicted events may naturally disappear from later cursor pages.
-- Filters, retention, persistent cursor serialization, and secondary indexes belong to later storage tasks.
+- `SqlEventFilter::default()` means no filtering.
+- Supported storage filters are strongly typed: protocol, database type, database, user, status, minimum duration, maximum duration, SQL text, start timestamp, and end timestamp.
+- Storage combines filter fields with logical AND.
+- SQL text filtering performs a case-sensitive substring match against `original_sql`, `normalized_sql`, and `expanded_sql`; storage must not parse SQL.
+- Time range filtering uses the current `Timestamp` string ordering and assumes sortable captured timestamp strings; storage must not add timestamp parsing in this layer.
+- `min_duration > max_duration` returns `SqlEventFilterError::InvalidDurationRange`.
+- `from > to` returns `SqlEventFilterError::InvalidTimestampRange`.
+- Filtered cursor pagination returns `next_cursor` only when an older retained event matching the same filter exists.
+- Unknown HTTP query parameters belong to the API layer and must not be modeled as loose string filters in storage.
+- Retention, persistent cursor serialization, SQLite/DuckDB filters, API query parsing, WebSocket filters, and secondary indexes belong to later tasks.
 
 ### 4. Validation & Error Matrix
 
@@ -1167,6 +1204,13 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 | Timeline query uses `before_sequence = N` | Return only retained events with internal sequence `< N` |
 | New events append after a cursor is issued | The cursor still returns the older page, excluding newer events |
 | Older cursor-targeted events were evicted | Return the remaining retained older events without error |
+| Timeline query has `SqlEventFilter::default()` | Behave like the unfiltered timeline query |
+| Multiple filter fields are set | Return only events matching all fields |
+| Text filter is set | Match stored SQL text fields by case-sensitive substring |
+| Time range filter is set | Compare `Timestamp` string values without parsing |
+| `min_duration > max_duration` | Return `SqlEventFilterError::InvalidDurationRange` before scanning |
+| `from > to` | Return `SqlEventFilterError::InvalidTimestampRange` before scanning |
+| Filtered query has older retained non-matching events only | Return no `next_cursor` |
 
 ### 5. Good/Base/Bad Cases
 
@@ -1174,18 +1218,22 @@ Good:
 
 - Ring buffer append stays synchronous and in-memory.
 - Timeline query scans retained entries directly; no index is needed until filters or scale require it.
+- Storage filters stay strongly typed and protocol-neutral.
 - Tests use synthetic `SqlEvent` values from `sql-lens-core`.
 
 Base:
 
 - Future performance work may add an ID index while preserving append and eviction semantics.
 - Future retention work may add age/byte eviction after this oldest-first baseline.
+- Future API work may map query parameters into `SqlEventFilter` and reject unknown parameters before storage.
 
 Bad:
 
 - Adding secondary indexes before query behavior proves they are needed.
 - Exposing internal sequence on `SqlEvent`.
 - Treating ring buffer timeline cursors as durable API tokens before API pagination is designed.
+- Accepting arbitrary string filter fields inside storage to mimic HTTP query parsing.
+- Parsing SQL or timestamps inside the ring buffer filter layer.
 - Blocking append on SQLite, API, WebSocket, or async runtime work.
 - Allowing capacity zero and relying on runtime panics or special cases.
 - Mutating `SqlEvent` during storage append.
@@ -1205,6 +1253,10 @@ For ring buffer append changes:
 - Timeline limit and next-cursor test.
 - Timeline cursor paging test with no duplicate events across pages.
 - Timeline cursor stability test after newer append.
+- At least five combined filter tests covering protocol, database type, database, user, status, duration, SQL text, and time range behavior.
+- Filtered cursor pagination test proving `next_cursor` is based on older matching events.
+- Invalid duration range test.
+- Invalid timestamp range test.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.
 - Run `cargo test --workspace`.
