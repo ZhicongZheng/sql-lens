@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
+- **Total Sessions**: 20
 - **Last Active**: 2026-07-06
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~642 | Active |
+| `journal-1.md` | ~675 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-07-06 | Implement storage filters | `da4a155` | `main` |
 | 19 | 2026-07-06 | Implement ring buffer timeline query | `c0e56da` | `main` |
 | 18 | 2026-07-06 | Implement ring buffer event lookup | `ab466e9`, `7846e76` | `main` |
 | 17 | 2026-07-06 | Implement ring buffer append | `9ea0943`, `61abb7f` | `main` |

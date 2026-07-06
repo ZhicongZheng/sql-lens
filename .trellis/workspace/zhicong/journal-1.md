@@ -640,3 +640,36 @@ Added stable newest-first ring buffer timeline queries with cursor pagination, t
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: Implement storage filters
+
+**Date**: 2026-07-06
+**Task**: Implement storage filters
+**Branch**: `main`
+
+### Summary
+
+Added strongly typed ring buffer timeline filters, validation errors, tests, and backend storage contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `da4a155` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
