@@ -165,6 +165,10 @@ mod tests {
         assert!(has_request_id);
         assert_eq!(json["error"]["code"], "BAD_REQUEST");
         assert_eq!(json["error"]["details"]["field"], "window");
+        assert!(
+            json["error"]["request_id"].is_string(),
+            "handler errors should include request IDs in the JSON body"
+        );
     }
 
     fn app_with_statistics(statistics: LiveStatistics) -> Router {

@@ -7,16 +7,34 @@ use axum::{
     response::Response,
 };
 
+use crate::api_error;
+
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestId(HeaderValue);
+pub struct RequestId {
+    header_value: HeaderValue,
+    value: String,
+}
 
 impl RequestId {
+    fn from_header_value(header_value: HeaderValue) -> Option<Self> {
+        let value = header_value.to_str().ok()?.to_owned();
+
+        Some(Self {
+            header_value,
+            value,
+        })
+    }
+
     pub fn as_header_value(&self) -> &HeaderValue {
-        &self.0
+        &self.header_value
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.value
     }
 }
 
@@ -25,23 +43,29 @@ pub(crate) async fn attach_request_id(mut request: Request, next: Next) -> Respo
         .headers()
         .get(REQUEST_ID_HEADER)
         .cloned()
+        .and_then(RequestId::from_header_value)
         .unwrap_or_else(next_request_id);
 
-    request
-        .extensions_mut()
-        .insert(RequestId(request_id.clone()));
+    request.extensions_mut().insert(request_id.clone());
 
-    let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(request_id_header_name(), request_id);
+    let mut response = api_error::with_request_id(next.run(request).await, &request_id);
+    response.headers_mut().insert(
+        request_id_header_name(),
+        request_id.as_header_value().clone(),
+    );
     response
 }
 
-fn next_request_id() -> HeaderValue {
+fn next_request_id() -> RequestId {
     let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    HeaderValue::from_str(&format!("sql-lens-{id:016x}"))
-        .expect("generated request IDs contain only valid header value bytes")
+    let value = format!("sql-lens-{id:016x}");
+    let header_value = HeaderValue::from_str(&value)
+        .expect("generated request IDs contain only valid header value bytes");
+
+    RequestId {
+        header_value,
+        value,
+    }
 }
 
 fn request_id_header_name() -> HeaderName {
@@ -52,9 +76,10 @@ fn request_id_header_name() -> HeaderName {
 mod tests {
     use axum::{
         Router,
-        body::Body,
-        http::{Request, StatusCode},
+        body::{Body, to_bytes},
+        http::{HeaderValue, Request, StatusCode},
     };
+    use serde_json::Value;
     use tower::ServiceExt;
 
     use super::REQUEST_ID_HEADER;
@@ -76,14 +101,16 @@ mod tests {
         let request_id = response
             .headers()
             .get(REQUEST_ID_HEADER)
-            .expect("response should contain request id");
+            .expect("response should contain request id")
+            .to_str()
+            .expect("generated request ID should be ASCII")
+            .to_owned();
 
-        assert!(
-            request_id
-                .to_str()
-                .expect("generated request ID should be ASCII")
-                .starts_with("sql-lens-")
-        );
+        assert!(request_id.starts_with("sql-lens-"));
+
+        let json = response_json(response).await;
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        assert_eq!(json["error"]["request_id"], request_id);
     }
 
     #[tokio::test]
@@ -99,10 +126,45 @@ mod tests {
             .await
             .expect("request should be handled");
 
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             response.headers().get(REQUEST_ID_HEADER),
             Some(&"client-request-42".parse().expect("valid header value"))
         );
+
+        let json = response_json(response).await;
+        assert_eq!(json["error"]["request_id"], "client-request-42");
+    }
+
+    #[tokio::test]
+    async fn invalid_incoming_request_id_is_replaced() {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .uri("/missing")
+                    .header(
+                        REQUEST_ID_HEADER,
+                        HeaderValue::from_bytes(b"\xff").expect("opaque header should build"),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should be handled");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let request_id = response
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .expect("response should contain request id")
+            .to_str()
+            .expect("generated request ID should be ASCII")
+            .to_owned();
+
+        assert!(request_id.starts_with("sql-lens-"));
+
+        let json = response_json(response).await;
+        assert_eq!(json["error"]["request_id"], request_id);
     }
 
     #[tokio::test]
@@ -138,5 +200,12 @@ mod tests {
             response.headers().get(REQUEST_ID_HEADER),
             Some(&"client-request-43".parse().expect("valid header value"))
         );
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("response body should be readable");
+        serde_json::from_slice(&body).expect("response should be JSON")
     }
 }

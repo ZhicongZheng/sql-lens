@@ -1982,6 +1982,120 @@ let local_addr = server.local_addr();
 server.serve_with_shutdown(shutdown_future).await?;
 ```
 
+## Scenario: REST Error Response Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` handlers return standardized REST API errors through `ApiEndpointError`.
+- REST error responses must match the `API.md` `ApiError` envelope.
+- Request ID behavior is shared by all API endpoints through the request ID middleware.
+- This layer does not implement auth, rate limiting, storage health, proxy readiness, panic recovery, or OpenAPI generation by itself.
+
+### 2. Signatures
+
+Public JSON shape:
+
+```json
+{
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "Invalid duration filter",
+    "request_id": "sql-lens-0000000000000001",
+    "details": {
+      "field": "min_duration_ms"
+    }
+  }
+}
+```
+
+Internal error type:
+
+```rust
+pub(crate) struct ApiEndpointError;
+
+impl ApiEndpointError {
+    pub(crate) fn bad_request(message: impl Into<String>, field: impl Into<String>) -> Self;
+    pub(crate) fn not_found(message: impl Into<String>, key: impl Into<String>, value: impl Into<String>) -> Self;
+}
+```
+
+Do not add unused future-facing constructors just to mirror `ApiErrorCode`; keep complete status/code-name mappings tested, and add constructors when runtime code first needs them.
+
+Request ID middleware contract:
+
+```rust
+pub struct RequestId;
+
+impl RequestId {
+    pub fn as_header_value(&self) -> &axum::http::HeaderValue;
+    pub(crate) fn as_str(&self) -> &str;
+}
+```
+
+### 3. Contracts
+
+- `BAD_REQUEST` maps to HTTP 400.
+- `UNAUTHORIZED` maps to HTTP 401.
+- `FORBIDDEN` maps to HTTP 403.
+- `NOT_FOUND` maps to HTTP 404.
+- `CONFLICT` maps to HTTP 409.
+- `RATE_LIMITED` maps to HTTP 429.
+- `INTERNAL` maps to HTTP 500.
+- `STORAGE_UNAVAILABLE` maps to HTTP 503.
+- `PROXY_NOT_READY` maps to HTTP 503.
+- Error responses include `x-request-id` response header.
+- Error response JSON includes the same request ID string in `error.request_id`.
+- Valid incoming `x-request-id` values are preserved in both response header and error body.
+- Invalid incoming `x-request-id` values are replaced with a generated `sql-lens-*` request ID.
+- `router_with_state` uses a fallback that returns a `NOT_FOUND` API envelope for unmatched routes.
+- `ApiEndpointError` marks its own responses through a typed response extension so request ID middleware can inject the body request ID without parsing JSON.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Handler returns `ApiEndpointError::bad_request` | HTTP 400, code `BAD_REQUEST`, request ID header and body present |
+| Each documented `ApiErrorCode` mapping is tested | HTTP status and string code match `API.md` |
+| Client sends valid `x-request-id` | Preserve that value in header and error body |
+| Client sends invalid `x-request-id` | Generate a replacement request ID used in header and error body |
+| Request path matches no route | Return HTTP 404 with code `NOT_FOUND` and `details.path` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Endpoint handlers continue returning `Result<Json<T>, ApiEndpointError>`.
+- Request ID injection stays centralized in request ID middleware.
+- Tests parse representative error JSON bodies instead of checking only headers.
+
+Base:
+
+- Unknown routes use the same error envelope as handler errors.
+- Constructors exist before auth/rate-limit/storage/proxy runtime code needs them.
+
+Bad:
+
+- Setting `request_id: None` in API error bodies routed through the app.
+- Duplicating request ID plumbing in every handler signature.
+- Parsing JSON response bodies in middleware when a typed response extension can carry the same information.
+- Adding a new public error code such as `METHOD_NOT_ALLOWED` without a product/API contract update.
+
+### 6. Tests Required
+
+For REST error response changes:
+
+- Mapping test for every documented `ApiErrorCode`.
+- Generated request ID appears in both header and error body.
+- Incoming valid request ID appears in both header and error body.
+- Invalid incoming request ID is replaced.
+- Unmatched route returns `NOT_FOUND` envelope.
+- Representative handler error, such as invalid query parameters, includes body request ID.
+- Existing success endpoint tests still pass.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Scenario: Health Endpoint Contracts
 
 ### 1. Scope / Trigger

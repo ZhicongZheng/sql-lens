@@ -1,11 +1,12 @@
 use std::{error::Error, fmt, future::Future, net::SocketAddr};
 
-use axum::{Router, middleware};
+use axum::{Router, extract::OriginalUri, middleware};
 use sql_lens_config::WebConfig;
 use tokio::net::TcpListener;
 
 use crate::{
-    ApiState, connections, health, protocols, request_id::attach_request_id, sql_events, statistics,
+    ApiState, api_error::ApiEndpointError, connections, health, protocols,
+    request_id::attach_request_id, sql_events, statistics,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,8 +77,13 @@ pub fn router_with_state(state: ApiState) -> Router {
         .merge(connections::routes())
         .merge(statistics::routes())
         .merge(protocols::routes())
+        .fallback(api_not_found)
         .layer(axum::Extension(state))
         .layer(middleware::from_fn(attach_request_id))
+}
+
+async fn api_not_found(OriginalUri(uri): OriginalUri) -> ApiEndpointError {
+    ApiEndpointError::not_found("Route not found", "path", uri.path().to_owned())
 }
 
 #[derive(Debug)]
