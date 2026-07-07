@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Crate/module ownership rules for MySQL-specific protocol parsing."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Existing MySQL handshake/client auth contracts and parser safety rules."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Authentication state affects later command parsing and connection projection."}
+{"file":"PROTOCOL.md","reason":"Project-level authentication state machine and secret-handling constraints."}

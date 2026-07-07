@@ -1,5 +1,6 @@
 //! MySQL-compatible protocol adapter for SQL Lens.
 
+mod authentication;
 mod handshake;
 mod packet;
 
@@ -9,6 +10,10 @@ use sql_lens_protocol::{
     ProtocolConnectionState, ProtocolObservation,
 };
 
+pub use authentication::{
+    MysqlAuthenticationResult, MysqlAuthenticationResultParseError, MysqlAuthenticationStatus,
+    parse_authentication_result,
+};
 pub use handshake::{
     MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
     MysqlInitialHandshake, parse_client_handshake_response, parse_initial_handshake,
@@ -75,6 +80,7 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
         let state = self.state_mut(state)?;
         state.backend_bytes_observed += bytes.len();
         state.observe_initial_handshake(bytes);
+        state.observe_authentication_result(bytes);
 
         Ok(ProtocolObservation::new(bytes.len(), 0))
     }
@@ -86,6 +92,8 @@ pub enum MysqlConnectionPhase {
     AwaitingInitialHandshake,
     InitialHandshakeSeen,
     ClientHandshakeSeen,
+    Authenticated,
+    AuthenticationFailed,
 }
 
 #[derive(Debug, Default)]
@@ -95,6 +103,7 @@ pub struct MysqlConnectionState {
     phase: MysqlConnectionPhase,
     initial_handshake: Option<MysqlInitialHandshake>,
     client_handshake: Option<MysqlClientHandshakeResponse>,
+    authentication_result: Option<MysqlAuthenticationResult>,
 }
 
 impl MysqlConnectionState {
@@ -116,6 +125,10 @@ impl MysqlConnectionState {
 
     pub fn client_handshake(&self) -> Option<&MysqlClientHandshakeResponse> {
         self.client_handshake.as_ref()
+    }
+
+    pub fn authentication_result(&self) -> Option<&MysqlAuthenticationResult> {
+        self.authentication_result.as_ref()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -158,6 +171,26 @@ impl MysqlConnectionState {
 
         self.client_handshake = Some(handshake);
         self.phase = MysqlConnectionPhase::ClientHandshakeSeen;
+    }
+
+    fn observe_authentication_result(&mut self, bytes: &[u8]) {
+        if self.phase != MysqlConnectionPhase::ClientHandshakeSeen {
+            return;
+        }
+
+        let Ok(packet) = parse_mysql_packet(bytes) else {
+            return;
+        };
+
+        let Ok(Some(result)) = parse_authentication_result(packet.payload) else {
+            return;
+        };
+
+        self.phase = match result.status {
+            MysqlAuthenticationStatus::Succeeded => MysqlConnectionPhase::Authenticated,
+            MysqlAuthenticationStatus::Failed => MysqlConnectionPhase::AuthenticationFailed,
+        };
+        self.authentication_result = Some(result);
     }
 }
 
@@ -231,6 +264,7 @@ mod tests {
         );
         assert!(state.initial_handshake().is_none());
         assert!(state.client_handshake().is_none());
+        assert!(state.authentication_result().is_none());
     }
 
     #[test]
@@ -435,6 +469,135 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_observes_successful_authentication_after_client_handshake() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake(&adapter, state.as_mut(), &mut events);
+        let packet = authentication_ok_packet();
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+            .expect("authentication result should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let result = state
+            .authentication_result()
+            .expect("authentication result should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(result.status, MysqlAuthenticationStatus::Succeeded);
+        assert_eq!(result.error_code, None);
+        assert_eq!(result.sql_state, None);
+        assert_eq!(result.message, None);
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_observes_failed_authentication_after_client_handshake() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake(&adapter, state.as_mut(), &mut events);
+        let packet = authentication_err_packet();
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+            .expect("authentication failure should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let result = state
+            .authentication_result()
+            .expect("authentication failure should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::AuthenticationFailed);
+        assert_eq!(result.status, MysqlAuthenticationStatus::Failed);
+        assert_eq!(result.error_code, Some(1045));
+        assert_eq!(result.sql_state, Some("28000".to_owned()));
+        assert_eq!(result.message, Some("Access denied".to_owned()));
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_does_not_observe_authentication_before_client_handshake() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        let packet = authentication_ok_packet();
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+            .expect("backend bytes should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(
+            state.phase(),
+            MysqlConnectionPhase::AwaitingInitialHandshake
+        );
+        assert!(state.authentication_result().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_client_handshake_phase_for_unsupported_auth_continuation() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake(&adapter, state.as_mut(), &mut events);
+        let packet = authentication_continuation_packet();
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+            .expect("unsupported auth continuation should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
+        assert!(state.authentication_result().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_client_handshake_phase_for_malformed_auth_result() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake(&adapter, state.as_mut(), &mut events);
+        let packet = packet_with_sequence_id(Vec::new(), 2);
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+            .expect("malformed auth result should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
+        assert!(state.authentication_result().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_rejects_wrong_connection_state() {
         let adapter = MysqlProtocolAdapter::new();
         let mut state = WrongState;
@@ -482,6 +645,37 @@ mod tests {
     fn client_handshake_response_packet() -> Vec<u8> {
         let payload = client_handshake_response_payload();
         packet_with_sequence_id(payload, 1)
+    }
+
+    fn authentication_ok_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0x00], 2)
+    }
+
+    fn authentication_err_packet() -> Vec<u8> {
+        let mut payload = vec![0xff];
+        payload.extend_from_slice(&1045u16.to_le_bytes());
+        payload.push(b'#');
+        payload.extend_from_slice(b"28000");
+        payload.extend_from_slice(b"Access denied");
+
+        packet_with_sequence_id(payload, 2)
+    }
+
+    fn authentication_continuation_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0xfe, b'a', b'u', b't', b'h'], 2)
+    }
+
+    fn observe_complete_handshake(
+        adapter: &MysqlProtocolAdapter,
+        state: &mut dyn ProtocolConnectionState,
+        events: &mut VecCaptureEventEmitter,
+    ) {
+        adapter
+            .observe_backend_bytes(state, &initial_handshake_packet(), events)
+            .expect("backend handshake should be observed");
+        adapter
+            .observe_client_bytes(state, &client_handshake_response_packet(), events)
+            .expect("client handshake response should be observed");
     }
 
     fn packet_with_sequence_id(payload: Vec<u8>, sequence_id: u8) -> Vec<u8> {

@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Verify implementation stays in protocol-mysql boundaries."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify auth result parser and state-transition contracts."}
+{"file":"PROTOCOL.md","reason":"Verify authentication result observation matches lifecycle and safety rules."}

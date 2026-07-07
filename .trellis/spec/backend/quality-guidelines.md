@@ -2146,6 +2146,145 @@ pub struct MysqlClientHandshakeResponse {
 }
 ```
 
+## Scenario: MySQL Authentication Result Observation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` observes backend-to-client authentication result packets after the client handshake response.
+- This layer records the MySQL-specific authentication outcome needed before later command parsing starts.
+- It must not parse SQL commands, implement auth switch flows, store raw authentication payloads, log backend auth packets, emit SQL events, or update protocol-neutral connection models.
+
+### 2. Signatures
+
+Public authentication result parser types live in `crates/sql-lens-protocol-mysql/src/authentication.rs` and are re-exported from the crate root:
+
+```rust
+pub enum MysqlAuthenticationStatus {
+    Succeeded,
+    Failed,
+}
+
+pub struct MysqlAuthenticationResult {
+    pub status: MysqlAuthenticationStatus,
+    pub error_code: Option<u16>,
+    pub sql_state: Option<String>,
+    pub message: Option<String>,
+}
+
+pub fn parse_authentication_result(
+    payload: &[u8],
+) -> Result<Option<MysqlAuthenticationResult>, MysqlAuthenticationResultParseError>;
+
+pub enum MysqlAuthenticationResultParseError {
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+    InvalidUtf8 { field: &'static str },
+}
+```
+
+`MysqlConnectionState` exposes safe authentication result metadata:
+
+```rust
+impl MysqlConnectionState {
+    pub fn authentication_result(&self) -> Option<&MysqlAuthenticationResult>;
+}
+```
+
+`MysqlConnectionPhase` includes post-authentication phases:
+
+```rust
+pub enum MysqlConnectionPhase {
+    AwaitingInitialHandshake,
+    InitialHandshakeSeen,
+    ClientHandshakeSeen,
+    Authenticated,
+    AuthenticationFailed,
+}
+```
+
+### 3. Contracts
+
+- Authentication result observation happens only when phase is `ClientHandshakeSeen`.
+- `observe_backend_bytes` always increments observed backend bytes and returns `ProtocolObservation::new(bytes.len(), 0)`.
+- A backend OK packet payload starting with `0x00` stores a success result and moves phase to `Authenticated`.
+- A backend ERR packet payload starting with `0xff` stores a failure result and moves phase to `AuthenticationFailed`.
+- Failure metadata may include MySQL vendor error code, SQL state, and a UTF-8 database error message.
+- Raw backend authentication payload bytes are never stored.
+- Unsupported authentication continuation packets return `Ok(None)` from the parser and keep phase `ClientHandshakeSeen`.
+- Incomplete or malformed authentication result packets remain non-fatal and keep phase `ClientHandshakeSeen`.
+- Authentication result observation emits zero SQL events.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty auth result payload | Return `IncompletePayload { field: "header" }` |
+| Payload starts with `0x00` | Return success result |
+| Payload starts with `0xff` and has ERR metadata | Return failure result with safe metadata |
+| ERR payload has invalid UTF-8 SQL state or message | Return `InvalidUtf8` |
+| Payload starts with any other byte | Return `Ok(None)` |
+| OK/ERR before `ClientHandshakeSeen` | Count bytes only; keep prior phase; emit zero events |
+| OK after `ClientHandshakeSeen` | Store success; set phase to `Authenticated`; emit zero events |
+| ERR after `ClientHandshakeSeen` | Store failure; set phase to `AuthenticationFailed`; emit zero events |
+| Unsupported auth continuation after `ClientHandshakeSeen` | Keep phase `ClientHandshakeSeen`; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover OK, ERR, unsupported packet headers, malformed payloads, and invalid UTF-8.
+- Adapter tests first observe server handshake and client response, then observe backend auth results.
+- Authentication failure debug data contains only structured safe fields, never raw packet bytes.
+
+Base:
+
+- Later command parsing can start only once the phase is `Authenticated`.
+- Later auth switch work can refine continuation handling without changing the safe result type.
+
+Bad:
+
+- Treating auth switch request packets as authenticated.
+- Storing raw OK/ERR packet bytes, auth plugin challenge data, or client auth response data.
+- Emitting SQL events from authentication observation.
+- Adding MySQL auth fields to protocol-neutral `ConnectionInfo`.
+
+### 6. Tests Required
+
+For MySQL authentication result changes:
+
+- Parser test for OK success result.
+- Parser test for ERR failure metadata.
+- Parser test for unsupported continuation packet returning `None`.
+- Parser tests for empty payload and invalid UTF-8.
+- Adapter test that backend OK after client handshake moves phase to `Authenticated`.
+- Adapter test that backend ERR after client handshake moves phase to `AuthenticationFailed`.
+- Adapter test proving auth-shaped backend bytes before client handshake do not transition.
+- Adapter test proving unsupported auth continuation stays non-fatal and non-transitioning.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct MysqlAuthenticationResult {
+    pub raw_payload: Vec<u8>,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlAuthenticationResult {
+    pub status: MysqlAuthenticationStatus,
+    pub error_code: Option<u16>,
+    pub sql_state: Option<String>,
+    pub message: Option<String>,
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger
