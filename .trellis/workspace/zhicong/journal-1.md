@@ -838,3 +838,36 @@ Added GET /api/v1/sql-events/{id} with full detail DTOs, parameter/timing/error 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 26: Implement connections endpoint
+
+**Date**: 2026-07-07
+**Task**: Implement connections endpoint
+**Branch**: `main`
+
+### Summary
+
+Added storage-backed connection store, API state connection storage, GET /api/v1/connections and detail endpoint, shared API error envelope, tests, and backend spec contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f1b0938` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
