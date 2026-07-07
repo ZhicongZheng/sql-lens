@@ -76,6 +76,21 @@ impl Error for MysqlPacketParseError {}
 mod tests {
     use super::*;
 
+    fn packet_fixture(path: &str, input: &str) -> Vec<u8> {
+        input
+            .lines()
+            .flat_map(|line| {
+                line.split_once('#')
+                    .map_or(line, |(bytes, _)| bytes)
+                    .split_whitespace()
+            })
+            .map(|byte| {
+                u8::from_str_radix(byte, 16)
+                    .unwrap_or_else(|error| panic!("invalid hex byte `{byte}` in {path}: {error}"))
+            })
+            .collect()
+    }
+
     #[test]
     fn parses_normal_packet_header_and_payload() {
         let input = [0x03, 0x00, 0x00, 0x02, b'a', b'b', b'c'];
@@ -171,6 +186,67 @@ mod tests {
             }
             .to_string(),
             "incomplete MySQL packet payload: declared 8 bytes, available 3 bytes"
+        );
+    }
+
+    #[test]
+    fn parses_normal_packet_fixture() {
+        let input = packet_fixture(
+            "fixtures/packets/normal.hex",
+            include_str!("../fixtures/packets/normal.hex"),
+        );
+
+        let packet = parse_mysql_packet(&input).expect("fixture packet should parse");
+
+        assert_eq!(packet.header.payload_length, 3);
+        assert_eq!(packet.header.sequence_id, 2);
+        assert_eq!(packet.payload, b"abc");
+    }
+
+    #[test]
+    fn parses_empty_payload_packet_fixture() {
+        let input = packet_fixture(
+            "fixtures/packets/empty-payload.hex",
+            include_str!("../fixtures/packets/empty-payload.hex"),
+        );
+
+        let packet = parse_mysql_packet(&input).expect("fixture packet should parse");
+
+        assert_eq!(packet.header.payload_length, 0);
+        assert_eq!(packet.header.sequence_id, 7);
+        assert_eq!(packet.payload, b"");
+    }
+
+    #[test]
+    fn rejects_short_header_packet_fixture() {
+        let input = packet_fixture(
+            "fixtures/packets/malformed-short-header.hex",
+            include_str!("../fixtures/packets/malformed-short-header.hex"),
+        );
+
+        let error = parse_mysql_packet(&input).expect_err("fixture should be malformed");
+
+        assert_eq!(
+            error,
+            MysqlPacketParseError::IncompleteHeader { available: 3 }
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_payload_packet_fixture() {
+        let input = packet_fixture(
+            "fixtures/packets/malformed-incomplete-payload.hex",
+            include_str!("../fixtures/packets/malformed-incomplete-payload.hex"),
+        );
+
+        let error = parse_mysql_packet(&input).expect_err("fixture should be malformed");
+
+        assert_eq!(
+            error,
+            MysqlPacketParseError::IncompletePayload {
+                declared: 5,
+                available: 2,
+            }
         );
     }
 }

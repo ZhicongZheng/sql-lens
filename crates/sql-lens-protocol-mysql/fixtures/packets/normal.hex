@@ -1,0 +1,3 @@
+# payload length 3, sequence ID 2, payload "abc"
+03 00 00 02
+61 62 63

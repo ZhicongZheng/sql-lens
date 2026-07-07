@@ -1852,18 +1852,20 @@ pub enum MysqlPacketParseError {
 Good:
 
 - Packet parser tests use inline byte arrays for normal and malformed packets.
+- Golden fixture tests use ASCII hex files under `crates/sql-lens-protocol-mysql/fixtures/packets/`.
 - Errors implement `Display` and `Error` without third-party error crates.
 
 Base:
 
 - Later stream framing can repeatedly call `parse_mysql_packet` on retained buffers.
+- Fixture files may use spaces, newlines, and `#` comments; they represent raw packet bytes passed directly to `parse_mysql_packet`.
 
 Bad:
 
 - Parsing payload contents inside the header parser.
 - Allocating a payload buffer on successful parse.
 - Emitting SQL events from packet parser tests.
-- Adding fixture files before the dedicated packet fixture task.
+- Creating binary fixture decoders or packet reassembly helpers in the packet header parser task.
 
 ### 6. Tests Required
 
@@ -1876,6 +1878,8 @@ For MySQL packet parser changes:
 - Incomplete payload test.
 - Trailing bytes test.
 - Error display test.
+- Fixture tests for normal, empty-payload, short-header, and incomplete-payload packets.
+- Fixture format documented in `crates/sql-lens-protocol-mysql/fixtures/packets/README.md`.
 - Run `cargo fmt --check`.
 - Run `cargo test -p sql-lens-protocol-mysql`.
 - Run `cargo test --workspace`.
