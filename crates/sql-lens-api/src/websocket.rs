@@ -6,7 +6,8 @@ use axum::{
     routing::get,
 };
 use serde::{Deserialize, Serialize};
-use sql_lens_core::SqlEvent;
+use serde_json::Value;
+use sql_lens_core::{CaptureStatus, DurationMillis, ProtocolName, SqlEvent};
 
 use crate::{
     ApiState, SqlEventBroadcaster, SqlEventSubscription, SqlEventSubscriptionError,
@@ -14,8 +15,11 @@ use crate::{
 };
 
 const SQL_EVENT_CREATED_MESSAGE_TYPE: &str = "sql_event.created";
+const SUBSCRIPTION_ERROR_MESSAGE_TYPE: &str = "subscription.error";
 const SUBSCRIBE_MESSAGE_TYPE: &str = "subscribe";
 const WEBSOCKET_MESSAGE_VERSION: u32 = 1;
+const INVALID_FILTER_CODE: &str = "INVALID_FILTER";
+const INVALID_FILTER_MESSAGE: &str = "invalid subscription filter";
 pub const SQL_WS_PATH: &str = "/ws/sql";
 const INITIAL_HEARTBEAT_PAYLOAD: &[u8] = b"sql-lens";
 
@@ -43,14 +47,23 @@ async fn handle_sql_socket(mut socket: WebSocket, broadcaster: SqlEventBroadcast
     while let Some(message) = socket.recv().await {
         match message {
             Ok(Message::Close(_)) | Err(_) => break,
-            Ok(Message::Text(text)) if is_valid_subscribe_message(text.as_str()) => {
-                handle_subscribed_sql_socket(socket, broadcaster.subscribe()).await;
-                break;
-            }
-            Ok(Message::Text(_))
-            | Ok(Message::Binary(_))
-            | Ok(Message::Ping(_))
-            | Ok(Message::Pong(_)) => {}
+            Ok(Message::Text(text)) => match parse_subscribe_message(text.as_str()) {
+                SubscribeMessageAction::Subscribe(filter) => {
+                    handle_subscribed_sql_socket(socket, broadcaster.subscribe(), filter).await;
+                    break;
+                }
+                SubscribeMessageAction::Error(error) => {
+                    let Ok(message) = subscription_error_message(error) else {
+                        break;
+                    };
+
+                    if socket.send(Message::Text(message.into())).await.is_err() {
+                        break;
+                    }
+                }
+                SubscribeMessageAction::Ignore => {}
+            },
+            Ok(Message::Binary(_)) | Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
         }
     }
 }
@@ -58,6 +71,7 @@ async fn handle_sql_socket(mut socket: WebSocket, broadcaster: SqlEventBroadcast
 async fn handle_subscribed_sql_socket(
     mut socket: WebSocket,
     mut subscription: SqlEventSubscription,
+    filter: SqlEventSubscriptionFilter,
 ) {
     loop {
         tokio::select! {
@@ -73,6 +87,10 @@ async fn handle_subscribed_sql_socket(
             event = subscription.recv() => {
                 match event {
                     Ok(event) => {
+                        if !filter.matches(&event) {
+                            continue;
+                        }
+
                         let Ok(message) = sql_event_created_message(&event) else {
                             break;
                         };
@@ -89,11 +107,24 @@ async fn handle_subscribed_sql_socket(
     }
 }
 
-fn is_valid_subscribe_message(text: &str) -> bool {
-    serde_json::from_str::<SubscribeMessage>(text).is_ok_and(|message| {
-        message.message_type == SUBSCRIBE_MESSAGE_TYPE
-            && message.version == WEBSOCKET_MESSAGE_VERSION
-    })
+fn parse_subscribe_message(text: &str) -> SubscribeMessageAction {
+    let Ok(message) = serde_json::from_str::<SubscribeMessage>(text) else {
+        return SubscribeMessageAction::Ignore;
+    };
+
+    if message.message_type != SUBSCRIBE_MESSAGE_TYPE
+        || message.version != WEBSOCKET_MESSAGE_VERSION
+    {
+        return SubscribeMessageAction::Ignore;
+    }
+
+    match message.filters {
+        Some(filters) => match SqlEventSubscriptionFilter::from_value(filters) {
+            Ok(filter) => SubscribeMessageAction::Subscribe(filter),
+            Err(error) => SubscribeMessageAction::Error(error),
+        },
+        None => SubscribeMessageAction::Subscribe(SqlEventSubscriptionFilter::default()),
+    }
 }
 
 fn sql_event_created_message(event: &SqlEvent) -> Result<String, serde_json::Error> {
@@ -104,11 +135,140 @@ fn sql_event_created_message(event: &SqlEvent) -> Result<String, serde_json::Err
     })
 }
 
+fn subscription_error_message(error: SubscriptionFilterError) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&SubscriptionErrorMessage {
+        message_type: SUBSCRIPTION_ERROR_MESSAGE_TYPE,
+        version: WEBSOCKET_MESSAGE_VERSION,
+        payload: SubscriptionErrorPayload {
+            code: INVALID_FILTER_CODE,
+            message: error.message,
+            field: error.field,
+        },
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SubscribeMessageAction {
+    Subscribe(SqlEventSubscriptionFilter),
+    Error(SubscriptionFilterError),
+    Ignore,
+}
+
 #[derive(Debug, Deserialize)]
 struct SubscribeMessage {
     #[serde(rename = "type")]
     message_type: String,
     version: u32,
+    filters: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SqlEventSubscriptionFilter {
+    protocol: Option<ProtocolName>,
+    statuses: Option<Vec<CaptureStatus>>,
+    database: Option<String>,
+    min_duration: Option<DurationMillis>,
+    max_duration: Option<DurationMillis>,
+}
+
+impl SqlEventSubscriptionFilter {
+    fn from_value(value: Value) -> Result<Self, SubscriptionFilterError> {
+        let filters = serde_json::from_value::<SubscribeFilterMessage>(value)
+            .map_err(|_| SubscriptionFilterError::new("filters"))?;
+
+        let statuses = filters.status.map(parse_status_filters).transpose()?;
+        if let (Some(min), Some(max)) = (filters.min_duration_ms, filters.max_duration_ms)
+            && min > max
+        {
+            return Err(SubscriptionFilterError::new("filters.min_duration_ms"));
+        }
+
+        Ok(Self {
+            protocol: filters.protocol.map(ProtocolName),
+            statuses,
+            database: filters.database,
+            min_duration: filters.min_duration_ms.map(DurationMillis),
+            max_duration: filters.max_duration_ms.map(DurationMillis),
+        })
+    }
+
+    fn matches(&self, event: &SqlEvent) -> bool {
+        if let Some(protocol) = &self.protocol
+            && &event.protocol != protocol
+        {
+            return false;
+        }
+
+        if let Some(database) = self.database.as_deref()
+            && event.database.as_deref() != Some(database)
+        {
+            return false;
+        }
+
+        if let Some(statuses) = self.statuses.as_deref()
+            && !statuses.contains(&event.status)
+        {
+            return false;
+        }
+
+        if let Some(min_duration) = self.min_duration
+            && event.duration < min_duration
+        {
+            return false;
+        }
+
+        if let Some(max_duration) = self.max_duration
+            && event.duration > max_duration
+        {
+            return false;
+        }
+
+        true
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscribeFilterMessage {
+    protocol: Option<String>,
+    status: Option<Vec<String>>,
+    database: Option<String>,
+    min_duration_ms: Option<u64>,
+    max_duration_ms: Option<u64>,
+}
+
+fn parse_status_filters(
+    values: Vec<String>,
+) -> Result<Vec<CaptureStatus>, SubscriptionFilterError> {
+    if values.is_empty() {
+        return Err(SubscriptionFilterError::new("filters.status"));
+    }
+
+    values
+        .into_iter()
+        .map(|value| match value.as_str() {
+            "ok" => Ok(CaptureStatus::Ok),
+            "slow" => Ok(CaptureStatus::Slow),
+            "error" => Ok(CaptureStatus::Error),
+            "unknown" => Ok(CaptureStatus::Unknown),
+            _ => Err(SubscriptionFilterError::new("filters.status")),
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubscriptionFilterError {
+    field: &'static str,
+    message: &'static str,
+}
+
+impl SubscriptionFilterError {
+    fn new(field: &'static str) -> Self {
+        Self {
+            field,
+            message: INVALID_FILTER_MESSAGE,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -119,16 +279,33 @@ struct SqlEventCreatedMessage {
     payload: SqlEventSummaryResponse,
 }
 
+#[derive(Debug, Serialize)]
+struct SubscriptionErrorMessage {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    version: u32,
+    payload: SubscriptionErrorPayload,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscriptionErrorPayload {
+    code: &'static str,
+    message: &'static str,
+    field: &'static str,
+}
+
 #[cfg(test)]
 mod tests {
     use std::{net::SocketAddr, time::Duration};
 
+    use super::{SubscribeMessageAction, SubscriptionFilterError, parse_subscribe_message};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
     use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
+    use sql_lens_core::{CaptureStatus, DurationMillis, ProtocolName};
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
     use tokio_tungstenite::{
         MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message as ClientMessage,
@@ -141,6 +318,58 @@ mod tests {
     };
 
     type TestClient = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+    #[test]
+    fn subscription_filter_matches_protocol_status_database_and_duration() {
+        let filter = match parse_subscribe_message(
+            r#"{
+                "type":"subscribe",
+                "version":1,
+                "filters":{
+                    "protocol":"mysql",
+                    "status":["ok","slow"],
+                    "database":"app",
+                    "min_duration_ms":3,
+                    "max_duration_ms":10
+                }
+            }"#,
+        ) {
+            SubscribeMessageAction::Subscribe(filter) => filter,
+            other => panic!("expected valid subscription filter, got {other:?}"),
+        };
+
+        assert!(filter.matches(&test_event("evt_match")));
+        assert!(!filter.matches(&event_with_protocol("evt_protocol", "postgresql")));
+        assert!(!filter.matches(&event_with_status("evt_status", CaptureStatus::Error)));
+        assert!(!filter.matches(&event_with_database("evt_database", "analytics")));
+        assert!(!filter.matches(&event_with_duration("evt_duration", 11)));
+    }
+
+    #[test]
+    fn invalid_subscription_filters_return_filter_errors() {
+        assert_eq!(
+            parse_subscribe_message(
+                r#"{"type":"subscribe","version":1,"filters":{"status":["bad"]}}"#
+            ),
+            SubscribeMessageAction::Error(SubscriptionFilterError::new("filters.status"))
+        );
+        assert_eq!(
+            parse_subscribe_message(r#"{"type":"subscribe","version":1,"filters":{"status":[]}}"#),
+            SubscribeMessageAction::Error(SubscriptionFilterError::new("filters.status"))
+        );
+        assert_eq!(
+            parse_subscribe_message(
+                r#"{"type":"subscribe","version":1,"filters":{"min_duration_ms":20,"max_duration_ms":10}}"#
+            ),
+            SubscribeMessageAction::Error(SubscriptionFilterError::new("filters.min_duration_ms"))
+        );
+        assert_eq!(
+            parse_subscribe_message(
+                r#"{"type":"subscribe","version":1,"filters":{"unsupported":"value"}}"#
+            ),
+            SubscribeMessageAction::Error(SubscriptionFilterError::new("filters"))
+        );
+    }
 
     #[tokio::test]
     async fn websocket_upgrade_sends_initial_ping_and_closes_cleanly() {
@@ -256,6 +485,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_protocol_filter_sends_matching_events_only() {
+        let state = ApiState::default();
+        let broadcaster = state.sql_event_broadcaster();
+        let (addr, shutdown_tx, server_task) = spawn_test_server(state).await;
+        let (mut client, _) = connect_async(format!("ws://{addr}{SQL_WS_PATH}"))
+            .await
+            .expect("websocket client should connect");
+        expect_initial_ping(&mut client).await;
+
+        send_subscribe(
+            &mut client,
+            r#"{"type":"subscribe","version":1,"filters":{"protocol":"mysql"}}"#,
+        )
+        .await;
+        wait_for_subscriber(&broadcaster).await;
+
+        broadcaster.publish(event_with_protocol("evt_postgres", "postgresql"));
+        assert_no_message(&mut client).await;
+
+        broadcaster.publish(event_with_protocol("evt_mysql", "mysql"));
+        assert_sql_event_created_message(next_message(&mut client).await, "evt_mysql");
+        client.close(None).await.expect("client should close");
+        stop_test_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn websocket_status_filter_supports_multiple_statuses() {
+        let state = ApiState::default();
+        let broadcaster = state.sql_event_broadcaster();
+        let (addr, shutdown_tx, server_task) = spawn_test_server(state).await;
+        let (mut client, _) = connect_async(format!("ws://{addr}{SQL_WS_PATH}"))
+            .await
+            .expect("websocket client should connect");
+        expect_initial_ping(&mut client).await;
+
+        send_subscribe(
+            &mut client,
+            r#"{"type":"subscribe","version":1,"filters":{"status":["error","slow"]}}"#,
+        )
+        .await;
+        wait_for_subscriber(&broadcaster).await;
+
+        broadcaster.publish(event_with_status("evt_ok", CaptureStatus::Ok));
+        assert_no_message(&mut client).await;
+
+        broadcaster.publish(event_with_status("evt_error", CaptureStatus::Error));
+        assert_sql_event_created_message(next_message(&mut client).await, "evt_error");
+
+        broadcaster.publish(event_with_status("evt_slow", CaptureStatus::Slow));
+        assert_sql_event_created_message(next_message(&mut client).await, "evt_slow");
+        client.close(None).await.expect("client should close");
+        stop_test_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn websocket_database_filter_sends_matching_events_only() {
+        let state = ApiState::default();
+        let broadcaster = state.sql_event_broadcaster();
+        let (addr, shutdown_tx, server_task) = spawn_test_server(state).await;
+        let (mut client, _) = connect_async(format!("ws://{addr}{SQL_WS_PATH}"))
+            .await
+            .expect("websocket client should connect");
+        expect_initial_ping(&mut client).await;
+
+        send_subscribe(
+            &mut client,
+            r#"{"type":"subscribe","version":1,"filters":{"database":"app"}}"#,
+        )
+        .await;
+        wait_for_subscriber(&broadcaster).await;
+
+        broadcaster.publish(event_with_database("evt_other_db", "analytics"));
+        assert_no_message(&mut client).await;
+
+        broadcaster.publish(event_with_database("evt_app_db", "app"));
+        assert_sql_event_created_message(next_message(&mut client).await, "evt_app_db");
+        client.close(None).await.expect("client should close");
+        stop_test_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn websocket_duration_filter_sends_matching_events_only() {
+        let state = ApiState::default();
+        let broadcaster = state.sql_event_broadcaster();
+        let (addr, shutdown_tx, server_task) = spawn_test_server(state).await;
+        let (mut client, _) = connect_async(format!("ws://{addr}{SQL_WS_PATH}"))
+            .await
+            .expect("websocket client should connect");
+        expect_initial_ping(&mut client).await;
+
+        send_subscribe(
+            &mut client,
+            r#"{"type":"subscribe","version":1,"filters":{"min_duration_ms":10,"max_duration_ms":20}}"#,
+        )
+        .await;
+        wait_for_subscriber(&broadcaster).await;
+
+        broadcaster.publish(event_with_duration("evt_fast", 9));
+        broadcaster.publish(event_with_duration("evt_slow", 21));
+        assert_no_message(&mut client).await;
+
+        broadcaster.publish(event_with_duration("evt_in_range", 10));
+        assert_sql_event_created_message(next_message(&mut client).await, "evt_in_range");
+        client.close(None).await.expect("client should close");
+        stop_test_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_filters_return_subscription_error_and_allow_later_subscribe() {
+        let state = ApiState::default();
+        let broadcaster = state.sql_event_broadcaster();
+        let (addr, shutdown_tx, server_task) = spawn_test_server(state).await;
+        let (mut client, _) = connect_async(format!("ws://{addr}{SQL_WS_PATH}"))
+            .await
+            .expect("websocket client should connect");
+        expect_initial_ping(&mut client).await;
+
+        client
+            .send(ClientMessage::text(
+                r#"{"type":"subscribe","version":1,"filters":{"status":["bad"]}}"#,
+            ))
+            .await
+            .expect("invalid filter subscribe should send");
+        assert_subscription_error(next_message(&mut client).await, "filters.status");
+
+        send_subscribe(
+            &mut client,
+            r#"{"type":"subscribe","version":1,"filters":{"status":["ok"]}}"#,
+        )
+        .await;
+        wait_for_subscriber(&broadcaster).await;
+
+        broadcaster.publish(event_with_status(
+            "evt_after_filter_error",
+            CaptureStatus::Ok,
+        ));
+        assert_sql_event_created_message(next_message(&mut client).await, "evt_after_filter_error");
+        client.close(None).await.expect("client should close");
+        stop_test_server(shutdown_tx, server_task).await;
+    }
+
+    #[tokio::test]
     async fn plain_http_request_to_websocket_path_is_rejected() {
         let response = router()
             .oneshot(
@@ -323,6 +694,13 @@ mod tests {
         panic!("websocket subscription was not registered before timeout");
     }
 
+    async fn send_subscribe(client: &mut TestClient, message: &str) {
+        client
+            .send(ClientMessage::text(message))
+            .await
+            .expect("subscribe message should send");
+    }
+
     async fn expect_initial_ping(client: &mut TestClient) {
         match next_message(client).await {
             ClientMessage::Ping(payload) => assert_eq!(payload.as_ref(), INITIAL_HEARTBEAT_PAYLOAD),
@@ -343,7 +721,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(100), client.next())
                 .await
                 .is_err(),
-            "websocket should not receive a message before valid subscribe"
+            "websocket should not receive a message"
         );
     }
 
@@ -357,8 +735,43 @@ mod tests {
         assert_eq!(payload["type"], "sql_event.created");
         assert_eq!(payload["version"], 1);
         assert_eq!(payload["payload"]["id"], expected_id);
-        assert_eq!(payload["payload"]["protocol"], "mysql");
-        assert_eq!(payload["payload"]["status"], "ok");
-        assert_eq!(payload["payload"]["duration_ms"], 3);
+    }
+
+    fn assert_subscription_error(message: ClientMessage, expected_field: &str) {
+        let ClientMessage::Text(text) = message else {
+            panic!("expected subscription.error text message, got {message:?}");
+        };
+        let payload: Value =
+            serde_json::from_str(text.as_str()).expect("websocket text should be JSON");
+
+        assert_eq!(payload["type"], "subscription.error");
+        assert_eq!(payload["version"], 1);
+        assert_eq!(payload["payload"]["code"], "INVALID_FILTER");
+        assert_eq!(payload["payload"]["message"], "invalid subscription filter");
+        assert_eq!(payload["payload"]["field"], expected_field);
+    }
+
+    fn event_with_protocol(id: &str, protocol: &str) -> sql_lens_core::SqlEvent {
+        let mut event = test_event(id);
+        event.protocol = ProtocolName(protocol.to_owned());
+        event
+    }
+
+    fn event_with_status(id: &str, status: CaptureStatus) -> sql_lens_core::SqlEvent {
+        let mut event = test_event(id);
+        event.status = status;
+        event
+    }
+
+    fn event_with_database(id: &str, database: &str) -> sql_lens_core::SqlEvent {
+        let mut event = test_event(id);
+        event.database = Some(database.to_owned());
+        event
+    }
+
+    fn event_with_duration(id: &str, duration_ms: u64) -> sql_lens_core::SqlEvent {
+        let mut event = test_event(id);
+        event.duration = DurationMillis(duration_ms);
+        event
     }
 }

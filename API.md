@@ -215,12 +215,23 @@ Client subscription:
   "version": 1,
   "filters": {
     "protocol": "mysql",
-    "status": ["ok", "error", "slow"]
+    "status": ["ok", "error", "slow"],
+    "database": "app",
+    "min_duration_ms": 10,
+    "max_duration_ms": 500
   }
 }
 ```
 
-Current implementation requires a `subscribe` message before sending live events. Filters are part of the documented protocol shape but are applied by a later WebSocket filters task; until then, subscription messages with `filters` are accepted and delivered as an unfiltered live stream.
+Current implementation requires a valid `subscribe` message before sending live events. `filters` is optional; when omitted, the subscriber receives all future SQL events. Supported filters are:
+
+- `protocol`: exact protocol name.
+- `status`: one or more of `ok`, `slow`, `error`, or `unknown`.
+- `database`: exact database name.
+- `min_duration_ms`: inclusive minimum duration in milliseconds.
+- `max_duration_ms`: inclusive maximum duration in milliseconds.
+
+All provided filter fields use AND semantics. Multiple `status` values use OR semantics. Invalid filter fields or values return a subscription error and keep the socket open while the server waits for a later valid `subscribe` message.
 
 Server event:
 
@@ -235,6 +246,20 @@ Server event:
     "status": "ok",
     "duration_ms": 3.4,
     "sql_preview": "SELECT * FROM users WHERE id = 42"
+  }
+}
+```
+
+Subscription error:
+
+```json
+{
+  "type": "subscription.error",
+  "version": 1,
+  "payload": {
+    "code": "INVALID_FILTER",
+    "message": "invalid subscription filter",
+    "field": "filters.status"
   }
 }
 ```

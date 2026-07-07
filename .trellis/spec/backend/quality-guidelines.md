@@ -2250,8 +2250,8 @@ For WebSocket foundation changes:
 ### 1. Scope / Trigger
 
 - Trigger: `sql-lens-api` broadcasts live `SqlEvent` values to `/ws/sql` subscribers.
-- This layer owns API-local WebSocket fan-out and message serialization.
-- It must not wire proxy/runtime capture receivers, implement filters, replay history, authenticate users, or add MySQL-specific behavior.
+- This layer owns API-local WebSocket fan-out, subscription filtering, and message serialization.
+- It must not wire proxy/runtime capture receivers, replay history, authenticate users, or add MySQL-specific behavior.
 
 ### 2. Signatures
 
@@ -2289,6 +2289,15 @@ Do not add capture, proxy, app runtime, auth, filter engines, OpenAPI, or fronte
 - If there are no subscribers, `publish` returns `NoSubscribers` and records the condition without treating it as a hard error.
 - A socket must send a valid JSON text message with `type = "subscribe"` and `version = 1` before receiving SQL events.
 - Malformed, unsupported, or wrong-version subscription messages are ignored while the socket continues waiting for a valid subscribe.
+- Subscribe messages may include an optional `filters` object.
+- Supported WebSocket filters are `protocol`, `status`, `database`, `min_duration_ms`, and `max_duration_ms`.
+- Unknown filter fields are invalid.
+- `protocol` and `database` use exact string matches against `SqlEvent`.
+- `status` must be a non-empty array containing only `ok`, `slow`, `error`, and `unknown`.
+- Multiple status values use OR semantics; different filter fields use AND semantics.
+- Duration bounds are inclusive and must satisfy `min_duration_ms <= max_duration_ms` when both are present.
+- Invalid filters send a `subscription.error` JSON text frame with `version: 1`, `payload.code: "INVALID_FILTER"`, and `payload.field` pointing at the invalid filter.
+- After a subscription filter error, the socket remains open and continues waiting for a later valid subscribe message.
 - After subscription, server messages are JSON text frames with `type`, `version`, and `payload`.
 - `sql_event.created` payloads reuse `SqlEventSummaryResponse` mapping.
 - Subscriber lag is local to that subscriber; lagged receivers skip missed events and continue with newer retained events.
@@ -2302,8 +2311,11 @@ Do not add capture, proxy, app runtime, auth, filter engines, OpenAPI, or fronte
 | Subscriber lags beyond broadcast capacity | Report lag locally and continue reading retained events |
 | Socket has not sent valid subscribe | Do not forward SQL events to that socket |
 | Socket sends malformed subscribe text | Ignore and keep waiting |
-| Socket sends valid subscribe | Start forwarding future broadcast SQL events |
-| Socket receives live event | Send `sql_event.created` JSON text with `version: 1` |
+| Socket sends valid subscribe without filters | Start forwarding all future broadcast SQL events |
+| Socket sends valid subscribe with filters | Start forwarding only matching future broadcast SQL events |
+| Socket sends subscribe with invalid filters | Send `subscription.error`; keep waiting for valid subscribe |
+| Socket receives matching live event | Send `sql_event.created` JSON text with `version: 1` |
+| Socket receives non-matching live event | Skip it silently for that subscriber |
 
 ### 5. Good/Base/Bad Cases
 
@@ -2311,12 +2323,13 @@ Good:
 
 - Tests publish through `ApiState::sql_event_broadcaster()` into a running `/ws/sql` server.
 - WebSocket payloads reuse the REST SQL event summary DTO.
-- Invalid subscribe messages do not close the socket before an error-frame protocol exists.
+- Invalid top-level subscribe messages do not close the socket.
+- Invalid filter messages use the subscription error envelope and do not close the socket.
 
 Base:
 
 - Future `sql-lens-app` runtime fan-out can read from `CaptureEventReceiver` and call `SqlEventBroadcaster::publish`.
-- Future Issue 036 can add filters after the subscribe state exists.
+- Future filter fields should stay protocol-neutral or live under protocol metadata instead of adding MySQL-specific top-level behavior.
 
 Bad:
 
@@ -2324,6 +2337,7 @@ Bad:
 - Sending historical ring-buffer events as part of live subscription.
 - Blocking publishers until slow WebSocket clients read messages.
 - Adding MySQL-specific fields to WebSocket message envelopes.
+- Treating invalid filter values as unfiltered subscriptions.
 
 ### 6. Tests Required
 
@@ -2335,6 +2349,9 @@ For SQL WebSocket subscription changes:
 - WebSocket test proving events are not sent before valid subscribe.
 - WebSocket test proving invalid subscribe messages are ignored and valid subscribe can still succeed.
 - WebSocket test proving a subscribed client receives `sql_event.created`.
+- WebSocket tests proving protocol, status, database, and duration filters send matching events only.
+- WebSocket test proving invalid filters return `subscription.error`.
+- WebSocket test proving valid subscribe can still succeed after a filter error.
 - Run `cargo fmt --check`.
 - Run `cargo test -p sql-lens-api`.
 - Run `cargo test --workspace`.
