@@ -1792,6 +1792,95 @@ For MySQL adapter foundation changes:
 - Run `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
+## Scenario: MySQL Packet Header Parser Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` parses MySQL-compatible packet envelopes.
+- This parser owns the 4-byte packet header only.
+- It must not parse handshake payloads, commands, result packets, prepared statements, or emit SQL events.
+
+### 2. Signatures
+
+Public packet parser types live in `crates/sql-lens-protocol-mysql/src/packet.rs` and are re-exported from the crate root:
+
+```rust
+pub const MYSQL_PACKET_HEADER_LEN: usize = 4;
+
+pub struct MysqlPacketHeader {
+    pub payload_length: u32,
+    pub sequence_id: u8,
+}
+
+pub struct MysqlPacket<'a> {
+    pub header: MysqlPacketHeader,
+    pub payload: &'a [u8],
+}
+
+pub fn parse_mysql_packet(input: &[u8]) -> Result<MysqlPacket<'_>, MysqlPacketParseError>;
+
+pub enum MysqlPacketParseError {
+    IncompleteHeader { available: usize },
+    IncompletePayload { declared: u32, available: usize },
+}
+```
+
+### 3. Contracts
+
+- MySQL packet headers are exactly 4 bytes.
+- Header bytes `0..3` encode payload length as a 3-byte little-endian unsigned integer.
+- Header byte `3` encodes sequence ID.
+- Payload length excludes the 4-byte header.
+- Successful parsing returns a borrowed payload slice and performs no allocation.
+- If input has fewer than 4 bytes, return `IncompleteHeader`.
+- If declared payload length exceeds available payload bytes, return `IncompletePayload`.
+- Trailing bytes after the first complete packet are ignored by this single-packet parser.
+- Stream buffering, reassembly, and multi-packet parsing belong to later tasks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Normal packet with payload | Return payload length, sequence ID, and payload slice |
+| Empty-payload packet | Return payload length `0` and empty payload slice |
+| Header shorter than 4 bytes | Return `IncompleteHeader { available }` |
+| Declared payload length exceeds available bytes | Return `IncompletePayload { declared, available }` |
+| Extra bytes follow a complete packet | Returned payload excludes trailing bytes |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Packet parser tests use inline byte arrays for normal and malformed packets.
+- Errors implement `Display` and `Error` without third-party error crates.
+
+Base:
+
+- Later stream framing can repeatedly call `parse_mysql_packet` on retained buffers.
+
+Bad:
+
+- Parsing payload contents inside the header parser.
+- Allocating a payload buffer on successful parse.
+- Emitting SQL events from packet parser tests.
+- Adding fixture files before the dedicated packet fixture task.
+
+### 6. Tests Required
+
+For MySQL packet parser changes:
+
+- Normal packet test.
+- Empty payload test.
+- 3-byte little-endian payload length test.
+- Short header test.
+- Incomplete payload test.
+- Trailing bytes test.
+- Error display test.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

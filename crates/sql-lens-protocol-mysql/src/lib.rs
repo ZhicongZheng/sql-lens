@@ -1,9 +1,16 @@
 //! MySQL-compatible protocol adapter for SQL Lens.
 
+mod packet;
+
 use sql_lens_core::ProtocolName;
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
     ProtocolConnectionState, ProtocolObservation,
+};
+
+pub use packet::{
+    MYSQL_PACKET_HEADER_LEN, MysqlPacket, MysqlPacketHeader, MysqlPacketParseError,
+    parse_mysql_packet,
 };
 
 pub const MYSQL_PROTOCOL_NAME: &str = "mysql";
