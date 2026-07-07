@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Crate/module ownership rules for protocol-specific Rust code."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Protocol and core contract safety rules, tests, and forbidden patterns."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Handshake state is a protocol boundary that will affect later auth and capture work."}
+{"file":"PROTOCOL.md","reason":"Project-level MySQL protocol state machine and authentication safety constraints."}

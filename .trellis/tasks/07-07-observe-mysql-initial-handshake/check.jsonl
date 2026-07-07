@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Verify the MySQL-specific implementation stays in the correct crate/module boundary."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify protocol contract, sensitive data handling, and backend validation expectations."}
+{"file":"PROTOCOL.md","reason":"Verify the implemented state transition matches the documented MySQL protocol lifecycle."}

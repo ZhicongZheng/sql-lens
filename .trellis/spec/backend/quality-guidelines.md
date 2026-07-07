@@ -1885,6 +1885,139 @@ For MySQL packet parser changes:
 - Run `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
+## Scenario: MySQL Initial Handshake Observation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` observes the backend-to-client MySQL-compatible initial handshake packet.
+- This layer decodes protocol setup metadata needed by later authentication and command parsing tasks.
+- It must not store authentication challenge bytes, parse client authentication responses, emit SQL events, log packet payloads, or add stream buffering.
+
+### 2. Signatures
+
+Public handshake parser types live in `crates/sql-lens-protocol-mysql/src/handshake.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlInitialHandshake {
+    pub protocol_version: u8,
+    pub server_version: String,
+    pub connection_id: u32,
+    pub capability_flags: Option<u32>,
+    pub character_set: Option<u8>,
+    pub status_flags: Option<u16>,
+    pub auth_plugin_name: Option<String>,
+}
+
+pub fn parse_initial_handshake(
+    payload: &[u8],
+) -> Result<MysqlInitialHandshake, MysqlHandshakeParseError>;
+
+pub enum MysqlHandshakeParseError {
+    EmptyPayload,
+    UnsupportedProtocolVersion { version: u8 },
+    MissingServerVersionTerminator,
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+    InvalidUtf8 { field: &'static str },
+}
+
+pub enum MysqlConnectionPhase {
+    AwaitingInitialHandshake,
+    InitialHandshakeSeen,
+}
+```
+
+`MysqlConnectionState` exposes read-only state accessors:
+
+```rust
+impl MysqlConnectionState {
+    pub fn phase(&self) -> MysqlConnectionPhase;
+    pub fn initial_handshake(&self) -> Option<&MysqlInitialHandshake>;
+}
+```
+
+### 3. Contracts
+
+- `MysqlConnectionState::default()` starts in `AwaitingInitialHandshake`.
+- The initial handshake is observed only from backend-to-client bytes.
+- `observe_backend_bytes` continues to return `ProtocolObservation::new(bytes.len(), 0)` for this layer.
+- `observe_backend_bytes` attempts handshake observation only while the phase is `AwaitingInitialHandshake`.
+- A complete packet with sequence ID `0` and a valid Protocol 10 payload stores sanitized handshake metadata and moves the phase to `InitialHandshakeSeen`.
+- Client bytes do not move the phase to `InitialHandshakeSeen`.
+- Incomplete or malformed backend bytes remain non-fatal and keep the phase as `AwaitingInitialHandshake`; stream buffering belongs to a later task.
+- `MysqlInitialHandshake` must not contain auth plugin challenge/scramble bytes.
+- The parser may expose safe setup metadata: protocol version, server version, connection ID, capability flags, character set, status flags, and auth plugin name.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty handshake payload | Return `EmptyPayload` |
+| Protocol version is not 10 | Return `UnsupportedProtocolVersion` |
+| Server version lacks NUL terminator | Return `MissingServerVersionTerminator` |
+| Required field is incomplete | Return `IncompletePayload { field, needed, available }` |
+| Server version or plugin name is invalid UTF-8 | Return `InvalidUtf8 { field }` |
+| Complete backend sequence-0 handshake | Store sanitized metadata; set phase to `InitialHandshakeSeen`; emit zero events |
+| Client sends handshake-shaped bytes | Count bytes only; keep phase awaiting |
+| Backend sends incomplete/malformed bytes through adapter | Count bytes only; keep phase awaiting; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests use representative Protocol 10 bytes and assert safe metadata fields.
+- Adapter tests publish a complete packet through `observe_backend_bytes` and assert state transition plus zero events.
+- Debug output for `MysqlInitialHandshake` does not include auth challenge strings because they are never stored.
+
+Base:
+
+- Later authentication tasks can read stored capability flags and auth plugin name without re-parsing the initial handshake.
+- Later stream buffering can call the same parser after assembling complete packets.
+
+Bad:
+
+- Storing `auth_plugin_data_part_1`, `auth_plugin_data_part_2`, or raw handshake payload bytes.
+- Logging raw handshake bytes or server challenge data.
+- Failing packet forwarding because an observed handshake is malformed.
+- Parsing client handshake response in the initial-handshake task.
+
+### 6. Tests Required
+
+For MySQL initial handshake changes:
+
+- Parser test for representative Protocol 10 handshake metadata.
+- Parser tests for empty payload, unsupported protocol version, missing server-version terminator, incomplete required fields, and invalid UTF-8.
+- Test that auth challenge bytes are not exposed by the parsed handshake type.
+- State creation test for `AwaitingInitialHandshake`.
+- Adapter backend handshake transition test.
+- Adapter client-bytes no-transition test.
+- Adapter malformed-backend-bytes non-fatal test.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct MysqlInitialHandshake {
+    pub auth_plugin_data_part_1: Vec<u8>,
+    pub raw_payload: Vec<u8>,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlInitialHandshake {
+    pub protocol_version: u8,
+    pub server_version: String,
+    pub connection_id: u32,
+    pub auth_plugin_name: Option<String>,
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger
