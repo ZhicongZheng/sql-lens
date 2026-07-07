@@ -25,15 +25,15 @@ Implement Issue 034 design: add the foundation for WebSocket connections at `GET
 
 ## Acceptance Criteria
 
-- [ ] `GET /ws/sql` is registered in the API router.
-- [ ] A valid WebSocket upgrade request receives a switching-protocols response.
-- [ ] The upgraded task sends at least one server ping heartbeat.
-- [ ] Client close/disconnect completes cleanly without panics.
-- [ ] Non-WebSocket requests to `/ws/sql` return an appropriate HTTP error from Axum.
-- [ ] Existing REST endpoint tests still pass.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo test --workspace` passes.
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `GET /ws/sql` is registered in the API router.
+- [x] A valid WebSocket upgrade request receives a switching-protocols response.
+- [x] The upgraded task sends at least one server ping heartbeat.
+- [x] Client close/disconnect completes cleanly without panics.
+- [x] Non-WebSocket requests to `/ws/sql` return an appropriate HTTP error from Axum.
+- [x] Existing REST endpoint tests still pass.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo test --workspace` passes.
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Out of Scope
 

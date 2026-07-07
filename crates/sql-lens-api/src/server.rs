@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 
 use crate::{
     ApiState, api_error::ApiEndpointError, connections, health, protocols,
-    request_id::attach_request_id, sql_events, statistics,
+    request_id::attach_request_id, sql_events, statistics, websocket,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +77,7 @@ pub fn router_with_state(state: ApiState) -> Router {
         .merge(connections::routes())
         .merge(statistics::routes())
         .merge(protocols::routes())
+        .merge(websocket::routes())
         .fallback(api_not_found)
         .layer(axum::Extension(state))
         .layer(middleware::from_fn(attach_request_id))

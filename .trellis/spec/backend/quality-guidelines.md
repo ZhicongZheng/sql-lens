@@ -2163,6 +2163,88 @@ let local_addr = server.local_addr();
 server.serve_with_shutdown(shutdown_future).await?;
 ```
 
+## Scenario: WebSocket Server Foundation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` owns the first WebSocket upgrade endpoint for live SQL event streaming.
+- The foundation must register `GET /ws/sql`, accept upgrades, send a minimal heartbeat, and handle disconnects cleanly.
+- This layer must not implement SQL event fan-out, subscription parsing, filters, replay, authentication, statistics streaming, or frontend code.
+
+### 2. Signatures
+
+WebSocket route code lives in `crates/sql-lens-api/src/websocket.rs` and is merged by `server::router_with_state` before fallback:
+
+```rust
+pub const SQL_WS_PATH: &str = "/ws/sql";
+```
+
+Allowed dependency changes for this foundation:
+
+```toml
+axum = { version = "0.8", features = ["ws"] }
+
+[dev-dependencies]
+futures-util = "0.3"
+tokio-tungstenite = "0.28"
+```
+
+Do not add capture, storage broadcast, auth, OpenAPI, TLS, or frontend dependencies for the WebSocket foundation task.
+
+### 3. Contracts
+
+- `GET /ws/sql` uses Axum `WebSocketUpgrade`.
+- A valid WebSocket upgrade returns a switching-protocols response.
+- Request ID middleware still applies to the HTTP upgrade response.
+- After upgrade, the server sends one initial `Message::Ping` heartbeat.
+- The socket reads until the client sends close, disconnects, or a socket error occurs.
+- Text, binary, ping, and pong frames are ignored until a later subscription protocol task defines message schemas.
+- Plain HTTP requests to `/ws/sql` may use Axum's WebSocket extractor rejection instead of the REST JSON error envelope.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Valid WebSocket upgrade | Return switching protocols and spawn socket lifecycle |
+| Socket opens successfully | Send one initial ping heartbeat |
+| Initial ping send fails | Treat as clean early disconnect |
+| Client sends close | End socket lifecycle without panic |
+| Socket read returns error | End socket lifecycle without API error mapping |
+| Plain HTTP request hits `/ws/sql` | Return non-200 Axum upgrade rejection |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Use a real local server and WebSocket client in tests for upgrade behavior.
+- Keep heartbeat to one initial ping until timeout policy is explicitly designed.
+- Keep subscription JSON parsing in a later task.
+
+Base:
+
+- `router_with_state` merges WebSocket routes before fallback and under request ID middleware.
+- The endpoint is protocol-neutral and does not mention MySQL-specific event fields.
+
+Bad:
+
+- Adding event broadcast channels, storage fan-out, or replay behavior to the foundation endpoint.
+- Blocking WebSocket socket reads on capture or storage writes.
+- Forcing WebSocket upgrade failures through REST error envelopes without a protocol-level error design.
+
+### 6. Tests Required
+
+For WebSocket foundation changes:
+
+- Valid WebSocket upgrade test using `GET /ws/sql`.
+- Initial ping heartbeat test.
+- Clean close/disconnect test.
+- Plain HTTP `/ws/sql` rejection test.
+- Existing REST endpoint tests still pass.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-api`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Scenario: REST Error Response Contracts
 
 ### 1. Scope / Trigger

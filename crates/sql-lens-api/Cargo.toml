@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 serde = { version = "1.0", features = ["derive"] }
 sql-lens-core = { path = "../sql-lens-core" }
 sql-lens-config = { path = "../sql-lens-config" }
@@ -14,6 +14,8 @@ sql-lens-storage = { path = "../sql-lens-storage" }
 tokio = { version = "1", features = ["net", "sync"] }
 
 [dev-dependencies]
+futures-util = "0.3"
 serde_json = "1.0"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-tungstenite = "0.28"
 tower = { version = "0.5", features = ["util"] }
