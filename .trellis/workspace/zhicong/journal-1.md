@@ -904,3 +904,36 @@ Added the live statistics REST endpoint, exact recent latency percentiles, API s
 ### Next Steps
 
 - None - task complete
+
+
+## Session 28: Implement protocols endpoint
+
+**Date**: 2026-07-07
+**Task**: Implement protocols endpoint
+**Branch**: `main`
+
+### Summary
+
+Added the protocol discovery REST endpoint, static supported/planned protocol response, endpoint tests, and backend contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c7840a5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

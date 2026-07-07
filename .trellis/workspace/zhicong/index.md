@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 27
+- **Total Sessions**: 28
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~906 | Active |
+| `journal-1.md` | ~939 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 28 | 2026-07-07 | Implement protocols endpoint | `c7840a5` | `main` |
 | 27 | 2026-07-07 | Implement statistics endpoint | `c1f6148` | `main` |
 | 26 | 2026-07-07 | Implement connections endpoint | `f1b0938` | `main` |
 | 25 | 2026-07-07 | Implement SQL event detail endpoint | `0f27f0a` | `main` |
