@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 30
+- **Total Sessions**: 31
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1005 | Active |
+| `journal-1.md` | ~1038 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 31 | 2026-07-07 | Parse MySQL packet headers | `478373c` | `main` |
 | 30 | 2026-07-07 | Add MySQL protocol adapter foundation | `bc5ec8f` | `main` |
 | 29 | 2026-07-07 | Standardize REST error responses | `006aa21` | `main` |
 | 28 | 2026-07-07 | Implement protocols endpoint | `c7840a5` | `main` |

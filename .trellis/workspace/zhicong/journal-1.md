@@ -1003,3 +1003,36 @@ Added the sql-lens-protocol-mysql adapter foundation, mysql registry compatibili
 ### Next Steps
 
 - None - task complete
+
+
+## Session 31: Parse MySQL packet headers
+
+**Date**: 2026-07-07
+**Task**: Parse MySQL packet headers
+**Branch**: `main`
+
+### Summary
+
+Added MySQL packet envelope parsing, parser errors, unit tests, crate re-exports, and backend parser contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `478373c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
