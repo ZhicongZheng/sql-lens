@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 35
+- **Total Sessions**: 36
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1170 | Active |
+| `journal-1.md` | ~1203 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 36 | 2026-07-07 | Observe MySQL initial handshake | `bb527b1` | `main` |
 | 35 | 2026-07-07 | Add WebSocket subscription filters | `4c7b08b` | `main` |
 | 34 | 2026-07-07 | Implement SQL WebSocket subscription | `6c7ff2b` | `main` |
 | 33 | 2026-07-07 | Add SQL WebSocket server foundation | `1c35097` | `main` |

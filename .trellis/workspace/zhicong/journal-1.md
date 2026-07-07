@@ -1168,3 +1168,36 @@ Implemented filtered /ws/sql subscriptions with protocol, status, database, and 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 36: Observe MySQL initial handshake
+
+**Date**: 2026-07-07
+**Task**: Observe MySQL initial handshake
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL Protocol 10 initial handshake parsing with sanitized metadata, adapter state transition to InitialHandshakeSeen, parser and adapter tests, and backend contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bb527b1` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
