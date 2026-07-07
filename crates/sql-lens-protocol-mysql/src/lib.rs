@@ -9,7 +9,10 @@ use sql_lens_protocol::{
     ProtocolConnectionState, ProtocolObservation,
 };
 
-pub use handshake::{MysqlHandshakeParseError, MysqlInitialHandshake, parse_initial_handshake};
+pub use handshake::{
+    MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
+    MysqlInitialHandshake, parse_client_handshake_response, parse_initial_handshake,
+};
 pub use packet::{
     MYSQL_PACKET_HEADER_LEN, MysqlPacket, MysqlPacketHeader, MysqlPacketParseError,
     parse_mysql_packet,
@@ -58,6 +61,7 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
     ) -> Result<ProtocolObservation, ProtocolAdapterError> {
         let state = self.state_mut(state)?;
         state.client_bytes_observed += bytes.len();
+        state.observe_client_handshake_response(bytes);
 
         Ok(ProtocolObservation::new(bytes.len(), 0))
     }
@@ -81,6 +85,7 @@ pub enum MysqlConnectionPhase {
     #[default]
     AwaitingInitialHandshake,
     InitialHandshakeSeen,
+    ClientHandshakeSeen,
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +94,7 @@ pub struct MysqlConnectionState {
     backend_bytes_observed: usize,
     phase: MysqlConnectionPhase,
     initial_handshake: Option<MysqlInitialHandshake>,
+    client_handshake: Option<MysqlClientHandshakeResponse>,
 }
 
 impl MysqlConnectionState {
@@ -106,6 +112,10 @@ impl MysqlConnectionState {
 
     pub fn initial_handshake(&self) -> Option<&MysqlInitialHandshake> {
         self.initial_handshake.as_ref()
+    }
+
+    pub fn client_handshake(&self) -> Option<&MysqlClientHandshakeResponse> {
+        self.client_handshake.as_ref()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -127,6 +137,27 @@ impl MysqlConnectionState {
 
         self.initial_handshake = Some(handshake);
         self.phase = MysqlConnectionPhase::InitialHandshakeSeen;
+    }
+
+    fn observe_client_handshake_response(&mut self, bytes: &[u8]) {
+        if self.phase != MysqlConnectionPhase::InitialHandshakeSeen {
+            return;
+        }
+
+        let Ok(packet) = parse_mysql_packet(bytes) else {
+            return;
+        };
+
+        if packet.header.sequence_id != 1 {
+            return;
+        }
+
+        let Ok(handshake) = parse_client_handshake_response(packet.payload) else {
+            return;
+        };
+
+        self.client_handshake = Some(handshake);
+        self.phase = MysqlConnectionPhase::ClientHandshakeSeen;
     }
 }
 
@@ -199,6 +230,7 @@ mod tests {
             MysqlConnectionPhase::AwaitingInitialHandshake
         );
         assert!(state.initial_handshake().is_none());
+        assert!(state.client_handshake().is_none());
     }
 
     #[test]
@@ -313,6 +345,96 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_observes_client_handshake_response_after_initial_handshake() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        let initial_packet = initial_handshake_packet();
+        let client_packet = client_handshake_response_packet();
+
+        adapter
+            .observe_backend_bytes(state.as_mut(), &initial_packet, &mut events)
+            .expect("backend handshake should be observed");
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &client_packet, &mut events)
+            .expect("client handshake response should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let client_handshake = state
+            .client_handshake()
+            .expect("client handshake response should be stored");
+
+        assert_eq!(
+            observation,
+            ProtocolObservation::new(client_packet.len(), 0)
+        );
+        assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
+        assert_eq!(state.client_bytes_observed(), client_packet.len());
+        assert_eq!(client_handshake.username, Some("app".to_owned()));
+        assert_eq!(client_handshake.database, Some("app_db".to_owned()));
+        assert_eq!(
+            client_handshake.auth_plugin_name,
+            Some("mysql_native_password".to_owned())
+        );
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_does_not_observe_client_handshake_before_initial_handshake() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        let client_packet = client_handshake_response_packet();
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &client_packet, &mut events)
+            .expect("client bytes should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(
+            observation,
+            ProtocolObservation::new(client_packet.len(), 0)
+        );
+        assert_eq!(
+            state.phase(),
+            MysqlConnectionPhase::AwaitingInitialHandshake
+        );
+        assert!(state.client_handshake().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_initial_handshake_phase_for_malformed_client_response() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+
+        adapter
+            .observe_backend_bytes(state.as_mut(), &initial_handshake_packet(), &mut events)
+            .expect("backend handshake should be observed");
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &[0x05, 0x00], &mut events)
+            .expect("malformed client bytes should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(2, 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::InitialHandshakeSeen);
+        assert!(state.client_handshake().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_rejects_wrong_connection_state() {
         let adapter = MysqlProtocolAdapter::new();
         let mut state = WrongState;
@@ -354,13 +476,22 @@ mod tests {
 
     fn initial_handshake_packet() -> Vec<u8> {
         let payload = representative_handshake_payload();
+        packet_with_sequence_id(payload, 0)
+    }
+
+    fn client_handshake_response_packet() -> Vec<u8> {
+        let payload = client_handshake_response_payload();
+        packet_with_sequence_id(payload, 1)
+    }
+
+    fn packet_with_sequence_id(payload: Vec<u8>, sequence_id: u8) -> Vec<u8> {
         let payload_len =
             u32::try_from(payload.len()).expect("test handshake payload should fit u32");
         let mut packet = vec![
             (payload_len & 0xff) as u8,
             ((payload_len >> 8) & 0xff) as u8,
             ((payload_len >> 16) & 0xff) as u8,
-            0,
+            sequence_id,
         ];
         packet.extend_from_slice(&payload);
 
@@ -383,6 +514,38 @@ mod tests {
         payload.push(21);
         payload.extend_from_slice(&[0; 10]);
         payload.extend_from_slice(b"ijklmnopqrst");
+        payload.push(0);
+        payload.extend_from_slice(b"mysql_native_password");
+        payload.push(0);
+
+        payload
+    }
+
+    fn client_handshake_response_payload() -> Vec<u8> {
+        const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
+        const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+        const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+        const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+        const CLIENT_HANDSHAKE_RESERVED_LEN: usize = 23;
+
+        let capability_flags = CLIENT_PROTOCOL_41
+            | CLIENT_SECURE_CONNECTION
+            | CLIENT_CONNECT_WITH_DB
+            | CLIENT_PLUGIN_AUTH;
+        let auth_response = b"secret-password";
+        let mut payload = Vec::new();
+
+        payload.extend_from_slice(&capability_flags.to_le_bytes());
+        payload.extend_from_slice(&(16 * 1024 * 1024u32).to_le_bytes());
+        payload.push(0x21);
+        payload.extend_from_slice(&[0; CLIENT_HANDSHAKE_RESERVED_LEN]);
+        payload.extend_from_slice(b"app");
+        payload.push(0);
+        payload.push(
+            u8::try_from(auth_response.len()).expect("test auth response length should fit u8"),
+        );
+        payload.extend_from_slice(auth_response);
+        payload.extend_from_slice(b"app_db");
         payload.push(0);
         payload.extend_from_slice(b"mysql_native_password");
         payload.push(0);

@@ -1923,6 +1923,7 @@ pub enum MysqlHandshakeParseError {
 pub enum MysqlConnectionPhase {
     AwaitingInitialHandshake,
     InitialHandshakeSeen,
+    ClientHandshakeSeen,
 }
 ```
 
@@ -2014,6 +2015,133 @@ pub struct MysqlInitialHandshake {
     pub protocol_version: u8,
     pub server_version: String,
     pub connection_id: u32,
+    pub auth_plugin_name: Option<String>,
+}
+```
+
+## Scenario: MySQL Client Handshake Response Observation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` observes the client-to-backend MySQL-compatible handshake response after the initial server handshake.
+- This layer extracts safe authentication metadata needed by later auth-result and command-parsing tasks.
+- It must not store authentication response bytes, decode passwords, handle TLS/SSLRequest, emit SQL events, update shared connection models, log payloads, or add stream buffering.
+
+### 2. Signatures
+
+Public client handshake parser types live in `crates/sql-lens-protocol-mysql/src/handshake.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlClientHandshakeResponse {
+    pub capability_flags: u32,
+    pub max_packet_size: u32,
+    pub character_set: u8,
+    pub username: Option<String>,
+    pub database: Option<String>,
+    pub auth_plugin_name: Option<String>,
+}
+
+pub fn parse_client_handshake_response(
+    payload: &[u8],
+) -> Result<MysqlClientHandshakeResponse, MysqlClientHandshakeParseError>;
+
+pub enum MysqlClientHandshakeParseError {
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+    UnsupportedProtocol { message: &'static str },
+    MissingNullTerminator { field: &'static str },
+    InvalidUtf8 { field: &'static str },
+    InvalidLengthEncodedInteger { field: &'static str },
+}
+```
+
+`MysqlConnectionState` exposes safe client response metadata:
+
+```rust
+impl MysqlConnectionState {
+    pub fn client_handshake(&self) -> Option<&MysqlClientHandshakeResponse>;
+}
+```
+
+### 3. Contracts
+
+- Client handshake response observation happens only when phase is `InitialHandshakeSeen`.
+- `observe_client_bytes` always increments observed client bytes and returns `ProtocolObservation::new(bytes.len(), 0)` for this layer.
+- A complete client packet with sequence ID `1` and a valid Protocol 41 response stores sanitized metadata and moves phase to `ClientHandshakeSeen`.
+- Client response-shaped bytes before the initial server handshake do not update client handshake state.
+- Incomplete or malformed client bytes remain non-fatal and keep the previous phase.
+- The parser requires `CLIENT_PROTOCOL_41`.
+- SSLRequest packets are reported as unsupported full client handshake responses; TLS handling belongs to a later task.
+- Safe metadata may include capability flags, max packet size, character set, username, database, and auth plugin name.
+- Auth response bytes are skipped according to client capability flags and must not appear on `MysqlClientHandshakeResponse`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Fixed Protocol 41 header is incomplete | Return `IncompletePayload` |
+| `CLIENT_PROTOCOL_41` is missing | Return `UnsupportedProtocol` |
+| SSLRequest shape is observed | Return `UnsupportedProtocol`; adapter keeps prior phase |
+| Username/database/plugin lacks NUL terminator | Return `MissingNullTerminator { field }` |
+| Username/database/plugin is invalid UTF-8 | Return `InvalidUtf8 { field }` |
+| Length-encoded auth response length marker is invalid | Return `InvalidLengthEncodedInteger { field: "auth_response" }` |
+| Complete client sequence-1 response after initial handshake | Store sanitized metadata; set phase to `ClientHandshakeSeen`; emit zero events |
+| Client response before initial handshake | Count bytes only; keep phase awaiting; emit zero events |
+| Malformed client response after initial handshake | Count bytes only; keep phase `InitialHandshakeSeen`; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests assert username, database, plugin, and capability metadata while checking debug output does not include auth response strings.
+- Adapter tests first observe a backend initial handshake, then observe a client response and assert the phase transition.
+- Secure-connection and length-encoded auth response forms are skipped without storing bytes.
+
+Base:
+
+- Later auth-result detection can start from `ClientHandshakeSeen`.
+- Later connection/API layers can decide whether and how to project sanitized username/database into shared connection records.
+
+Bad:
+
+- Adding an `auth_response`, `password`, `raw_payload`, or `packet_bytes` field to `MysqlClientHandshakeResponse`.
+- Logging username/password pairs or raw handshake response bytes.
+- Treating SSLRequest as authenticated or as a full client handshake response.
+- Emitting SQL events from authentication observation.
+
+### 6. Tests Required
+
+For MySQL client handshake response changes:
+
+- Parser test for Protocol 41 response with username, database, and plugin name.
+- Parser test without database/plugin flags.
+- Parser tests for secure-connection and length-encoded auth response skipping.
+- Parser tests for incomplete header, missing NUL terminator, invalid UTF-8, and invalid length-encoded auth length.
+- Test that auth response bytes are not exposed by the parsed response type.
+- Adapter transition test from `InitialHandshakeSeen` to `ClientHandshakeSeen`.
+- Adapter test proving client response before initial handshake does not transition.
+- Adapter malformed-client-response non-fatal test.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct MysqlClientHandshakeResponse {
+    pub username: Option<String>,
+    pub auth_response: Vec<u8>,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlClientHandshakeResponse {
+    pub username: Option<String>,
+    pub database: Option<String>,
     pub auth_plugin_name: Option<String>,
 }
 ```
