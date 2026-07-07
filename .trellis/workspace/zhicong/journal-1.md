@@ -1300,3 +1300,36 @@ Implemented MySQL COM_QUERY parsing with a command parser module, authenticated-
 ### Next Steps
 
 - None - task complete
+
+
+## Session 40: Capture MySQL COM_QUERY timing
+
+**Date**: 2026-07-07
+**Task**: Capture MySQL COM_QUERY timing
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL COM_QUERY pending timing and OK/ERR event emission with deterministic clock tests, updated backend contract documentation, and verified fmt, targeted tests, workspace tests, and clippy.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dcd83fa` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
