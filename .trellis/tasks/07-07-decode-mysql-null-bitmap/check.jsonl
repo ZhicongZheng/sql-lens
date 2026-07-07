@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Quality checklist for backend parser, adapter, and spec updates."}
+{"file": ".trellis/tasks/07-07-decode-mysql-null-bitmap/research/mysql-null-bitmap.md", "reason": "Protocol-specific expectations to verify during review."}

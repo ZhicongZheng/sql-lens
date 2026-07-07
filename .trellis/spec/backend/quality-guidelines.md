@@ -2950,6 +2950,138 @@ MysqlStatementExecuteEnvelope {
 }
 ```
 
+## Scenario: MySQL COM_STMT_EXECUTE NULL Bitmap Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` decodes the NULL bitmap inside client-to-backend `COM_STMT_EXECUTE` parameter payloads.
+- This layer records zero-based NULL parameter indexes in MySQL-local execute envelope state when prepared statement metadata is known.
+- It must not decode `new_params_bind_flag`, parameter types, parameter values, expanded SQL, redaction, storage/API/UI contracts, or protocol-neutral core models.
+
+### 2. Signatures
+
+Public NULL bitmap parser types live in `crates/sql-lens-protocol-mysql/src/execute.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlNullBitmap {
+    pub null_parameter_indexes: Vec<usize>,
+    pub bytes_consumed: usize,
+}
+
+pub fn decode_null_bitmap(
+    parameter_payload: &[u8],
+    parameter_count: u16,
+) -> Result<MysqlNullBitmap, MysqlExecuteParseError>;
+
+pub enum MysqlExecuteParseError {
+    IncompletePayload {
+        field: &'static str,
+        needed: usize,
+        available: usize,
+    },
+}
+```
+
+`MysqlConnectionState` exposes decoded NULL indexes only through MySQL-local execute envelope state:
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub command: MysqlClientCommand,
+    pub statement_id: u32,
+    pub flags: u8,
+    pub iteration_count: u32,
+    pub has_parameter_payload: bool,
+    pub statement: Option<MysqlPreparedStatement>,
+    pub null_parameter_indexes: Vec<usize>,
+}
+```
+
+### 3. Contracts
+
+- NULL bitmap length is derived from prepared statement parameter count: `(parameter_count + 7) / 8`.
+- Bits map to zero-based parameter indexes with execute bitmap bit offset `0`.
+- Inside each byte, bit `0` maps to the lowest parameter index for that byte.
+- Parser ignores padding bits beyond `parameter_count`.
+- `bytes_consumed` is the computed bitmap length, including `0` for zero-parameter statements.
+- Truncated bitmap bytes return `MysqlExecuteParseError::IncompletePayload { field: "null_bitmap" }`.
+- Adapter-level bitmap parsing runs only when the execute statement ID is known and has connection-local `MysqlPreparedStatement` metadata.
+- Unknown statement IDs remain non-fatal and store `null_parameter_indexes = Vec::new()`.
+- Known statements with zero parameters store an empty NULL index list.
+- Known statements with truncated NULL bitmap bytes are non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope`.
+- Raw parameter payload bytes must not be stored in connection state.
+- NULL bitmap decoding emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `parameter_count = 0` and payload empty | Return empty indexes with `bytes_consumed = 0` |
+| Bitmap has mixed NULL and non-NULL bits | Return zero-based indexes for set bits within `parameter_count` |
+| Bitmap has no NULL bits | Return empty indexes with computed `bytes_consumed` |
+| Bitmap has set padding bits beyond `parameter_count` | Ignore padding bits |
+| Available bytes are shorter than computed bitmap length | Return `IncompletePayload { field: "null_bitmap" }` |
+| Known statement ID after `Authenticated` | Decode bitmap and store indexes on execute envelope; emit zero events |
+| Unknown statement ID after `Authenticated` | Store execute envelope with empty NULL indexes; emit zero events |
+| Truncated known-statement bitmap after `Authenticated` | Keep phase `Authenticated`; do not update command or execute state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover mixed NULL bits, all non-NULL parameters, zero parameters, ignored padding bits, and truncated bitmap errors.
+- Adapter tests drive known-statement bitmap decoding through real `COM_STMT_PREPARE`, prepare OK, and execute packets.
+- Unknown statement ID tests assert empty NULL index state without trying to infer parameter count.
+
+Base:
+
+- Later parameter type decoding can begin at `bytes_consumed` after the NULL bitmap.
+- Later value decoding can use `null_parameter_indexes` to skip values for NULL parameters.
+- Later expanded SQL rendering can use NULL indexes without changing this bitmap contract.
+
+Bad:
+
+- Treating a truncated bitmap as a `ProtocolAdapterError`.
+- Decoding parameter types or values in the NULL bitmap parser task.
+- Storing raw parameter payload bytes in `MysqlConnectionState`.
+- Adding MySQL NULL bitmap fields directly to shared core models.
+- Logging parameter payload bytes or raw SQL templates.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_EXECUTE` NULL bitmap changes:
+
+- Parser test for mixed NULL and non-NULL parameters.
+- Parser test for all non-NULL parameters.
+- Parser test for zero parameters.
+- Parser test proving padding bits beyond parameter count are ignored.
+- Parser test for truncated bitmap bytes.
+- Adapter test proving known statement IDs store decoded NULL indexes.
+- Adapter test proving unknown statement IDs remain non-fatal with empty NULL indexes.
+- Adapter test proving truncated known-statement bitmaps stay non-fatal and do not update execute state.
+- Regression test coverage that existing execute envelope, prepare, and query behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub raw_parameter_payload: Vec<u8>,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub null_parameter_indexes: Vec<usize>,
+}
+```
+
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
 
 ### 1. Scope / Trigger

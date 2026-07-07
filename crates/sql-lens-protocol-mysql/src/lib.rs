@@ -3,6 +3,7 @@
 mod authentication;
 mod command;
 mod err;
+mod execute;
 mod handshake;
 mod ok;
 mod packet;
@@ -34,6 +35,7 @@ pub use command::{
     MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
 };
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
+pub use execute::{MysqlExecuteParseError, MysqlNullBitmap, decode_null_bitmap};
 pub use handshake::{
     MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
     MysqlInitialHandshake, parse_client_handshake_response, parse_initial_handshake,
@@ -49,6 +51,8 @@ pub use prepare::{
 };
 
 pub const MYSQL_PROTOCOL_NAME: &str = "mysql";
+
+const MYSQL_COM_STMT_EXECUTE_PARAMETER_PAYLOAD_OFFSET: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct MysqlProtocolAdapter {
@@ -207,6 +211,7 @@ pub struct MysqlStatementExecuteEnvelope {
     pub iteration_count: u32,
     pub has_parameter_payload: bool,
     pub statement: Option<MysqlPreparedStatement>,
+    pub null_parameter_indexes: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -413,6 +418,21 @@ impl MysqlConnectionState {
             }
             MysqlParsedClientCommand::StatementExecute(execute) => {
                 let statement = self.prepared_statement(execute.statement_id).cloned();
+                let null_parameter_indexes = if let Some(statement) = &statement {
+                    let parameter_payload = packet
+                        .payload
+                        .get(MYSQL_COM_STMT_EXECUTE_PARAMETER_PAYLOAD_OFFSET..)
+                        .unwrap_or_default();
+                    let Ok(null_bitmap) =
+                        decode_null_bitmap(parameter_payload, statement.num_params)
+                    else {
+                        return;
+                    };
+
+                    null_bitmap.null_parameter_indexes
+                } else {
+                    Vec::new()
+                };
                 let client_command = MysqlClientCommand {
                     kind: MysqlCommandKind::StatementExecute,
                     sequence_id: packet.header.sequence_id,
@@ -430,6 +450,7 @@ impl MysqlConnectionState {
                     iteration_count: execute.iteration_count,
                     has_parameter_payload: execute.has_parameter_payload,
                     statement,
+                    null_parameter_indexes,
                 });
             }
         }
@@ -1220,6 +1241,7 @@ mod tests {
         assert_eq!(envelope.flags, 0);
         assert_eq!(envelope.iteration_count, 1);
         assert!(envelope.has_parameter_payload);
+        assert_eq!(envelope.null_parameter_indexes, [0]);
         assert_eq!(
             envelope.statement.as_ref(),
             Some(&MysqlPreparedStatement {
@@ -1268,6 +1290,7 @@ mod tests {
         assert_eq!(envelope.iteration_count, 3);
         assert!(!envelope.has_parameter_payload);
         assert!(envelope.statement.is_none());
+        assert!(envelope.null_parameter_indexes.is_empty());
         assert!(events.events.is_empty());
     }
 
@@ -1571,6 +1594,48 @@ mod tests {
         assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
         assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
         assert!(state.last_client_command().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_authenticated_phase_for_truncated_execute_null_bitmap() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select many_params(?, ?, ?, ?, ?, ?, ?, ?, ?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x1122_3344, 0, 9, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let packet = com_stmt_execute_packet(0x1122_3344, 0, 1, &[0x00], 2);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("truncated NULL bitmap should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("prepare command should remain the last stored command");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(command.kind, MysqlCommandKind::StatementPrepare);
         assert!(state.last_statement_execute_envelope().is_none());
         assert!(events.events.is_empty());
     }

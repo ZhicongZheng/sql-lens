@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend protocol parser contracts and required validation commands."}
+{"file": ".trellis/tasks/07-07-decode-mysql-null-bitmap/research/mysql-null-bitmap.md", "reason": "MySQL COM_STMT_EXECUTE NULL bitmap protocol notes and task scope decisions."}
