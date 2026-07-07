@@ -2493,7 +2493,7 @@ impl MysqlConnectionState {
 | `COM_STMT_PREPARE` before `Authenticated` | Count bytes only; do not update command or pending prepare state; emit zero events |
 | `COM_STMT_PREPARE` after `Authenticated` | Store command and pending prepare state; keep phase `Authenticated`; emit zero events |
 | Invalid prepare packet after `Authenticated` | Keep phase `Authenticated`; do not update command or pending prepare state; emit zero events |
-| Backend prepare response is observed | Do not consume pending prepare state until a later prepare-response task defines that contract |
+| Backend prepare response is observed | Follow the MySQL `COM_STMT_PREPARE` response parser contract; the client command parser must not parse it |
 
 ### 5. Good/Base/Bad Cases
 
@@ -2548,6 +2548,160 @@ pub struct MysqlPendingStatementPrepare {
 ```rust
 pub struct MysqlPendingStatementPrepare {
     pub command: MysqlClientCommand,
+}
+```
+
+## Scenario: MySQL COM_STMT_PREPARE Response Parser Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` observes backend-to-client responses after a valid client `COM_STMT_PREPARE`.
+- This layer parses the first prepare OK response packet or ERR packet so later statement-map work can connect server `statement_id` values to SQL templates.
+- It must not build the per-connection statement map, parse parameter definition packets, parse column definition packets, expand parameters, emit SQL events, or update protocol-neutral core models.
+
+### 2. Signatures
+
+Public prepare response parser types live in `crates/sql-lens-protocol-mysql/src/prepare.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlComStmtPrepareOk {
+    pub statement_id: u32,
+    pub num_columns: u16,
+    pub num_params: u16,
+    pub warning_count: Option<u16>,
+}
+
+pub enum MysqlComStmtPrepareResponse {
+    Ok(MysqlComStmtPrepareOk),
+    Error(MysqlErrPacketSummary),
+}
+
+pub fn parse_com_stmt_prepare_response(
+    payload: &[u8],
+) -> Result<Option<MysqlComStmtPrepareResponse>, MysqlComStmtPrepareResponseParseError>;
+
+pub enum MysqlComStmtPrepareResponseParseError {
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+    ErrPacket { source: MysqlErrPacketParseError },
+}
+```
+
+`MysqlConnectionState` exposes only the latest MySQL-local prepare outcome in this layer:
+
+```rust
+pub struct MysqlStatementPrepareOutcome {
+    pub command: MysqlClientCommand,
+    pub response_sequence_id: u8,
+    pub response: MysqlStatementPrepareResponseState,
+}
+
+pub enum MysqlStatementPrepareResponseState {
+    Prepared {
+        statement_id: u32,
+        num_columns: u16,
+        num_params: u16,
+        warning_count: Option<u16>,
+    },
+    Failed {
+        error: MysqlErrPacketSummary,
+    },
+}
+
+impl MysqlConnectionState {
+    pub fn last_statement_prepare_outcome(&self) -> Option<&MysqlStatementPrepareOutcome>;
+}
+```
+
+### 3. Contracts
+
+- Backend prepare response observation runs only when phase is `Authenticated` and `pending_statement_prepare` exists.
+- `observe_backend_bytes` always increments observed backend bytes and returns `ProtocolObservation::new(bytes.len(), 0)` for prepare response consumption.
+- Successful prepare OK payloads start with `0x00`.
+- Prepare OK parsing extracts little-endian `statement_id`, `num_columns`, and `num_params`.
+- Prepare OK parsing consumes the reserved filler byte.
+- Prepare OK parsing exposes `warning_count` when at least two warning-count bytes are present.
+- Prepare OK payloads with exactly one trailing warning-count byte return `IncompletePayload { field: "warning_count" }`.
+- Failed prepare responses use the existing MySQL ERR packet parser and are stored as a failed prepare outcome.
+- Valid prepare OK and valid ERR responses consume `pending_statement_prepare`.
+- Malformed, incomplete, unsupported, or unrecognized prepare responses are non-fatal and leave `pending_statement_prepare` intact.
+- Valid prepare response consumption stores `last_statement_prepare_outcome` with the original prepare command and backend response sequence ID.
+- Prepare response observation emits zero SQL events and does not call query timing logic for consumed prepare responses.
+- Parsed prepare outcome is MySQL-specific and must not be projected into `SqlEvent`, `ConnectionInfo`, storage, API, WebSocket, or plugin contracts in this layer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty prepare response payload | Return `IncompletePayload { field: "header" }` |
+| Payload starts with `0x00` and has all required prepare OK fields | Return `Some(MysqlComStmtPrepareResponse::Ok(...))` |
+| Prepare OK is missing `statement_id`, `num_columns`, `num_params`, or filler | Return `IncompletePayload` for the missing field |
+| Prepare OK has one warning-count byte | Return `IncompletePayload { field: "warning_count" }` |
+| Payload starts with `0xff` and has a valid ERR packet | Return `Some(MysqlComStmtPrepareResponse::Error(...))` |
+| Payload starts with `0xff` but ERR packet is malformed | Return `ErrPacket { source }` |
+| Payload starts with another byte | Return `Ok(None)` |
+| Backend prepare OK with pending prepare | Clear pending prepare, store prepared outcome, emit zero events |
+| Backend prepare ERR with pending prepare | Clear pending prepare, store failed outcome, emit zero events |
+| Backend prepare response without pending prepare | Emit zero events and do not update outcome |
+| Malformed prepare response with pending prepare | Keep pending prepare and do not update outcome |
+| Existing `COM_QUERY` backend OK/ERR flow | Keep current query event behavior unchanged |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover successful prepare OK, ERR, unrecognized payloads, and incomplete fields.
+- Adapter tests first send a valid `COM_STMT_PREPARE`, then observe backend prepare OK or ERR.
+- The backend packet envelope sequence ID is retained only in MySQL-specific prepare outcome metadata.
+
+Base:
+
+- Later statement-map work can consume `last_statement_prepare_outcome` to create a connection-local `statement_id -> template SQL` mapping.
+- Later parameter and column definition parsing can use `num_params` and `num_columns` to know how many definition packets to expect.
+
+Bad:
+
+- Building the prepared statement map in the response parser task.
+- Parsing parameter definition or column definition packets in the first response packet parser.
+- Emitting a protocol-neutral SQL event from prepare response observation alone.
+- Logging raw template SQL, packet payloads, or database error text from parser or adapter code.
+- Adding MySQL prepared-statement fields directly to shared core models.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_PREPARE` response changes:
+
+- Parser test for valid prepare OK statement ID.
+- Parser test for valid prepare OK parameter and column counts.
+- Parser test for valid prepare ERR response.
+- Parser tests for incomplete prepare OK fields and malformed ERR packet.
+- Adapter test proving prepare OK consumes pending prepare and stores prepared outcome.
+- Adapter test proving prepare ERR consumes pending prepare and stores failed outcome.
+- Adapter test proving backend prepare response without pending prepare is non-fatal.
+- Adapter test proving malformed prepare response keeps pending prepare.
+- Regression test coverage that existing `COM_QUERY` response behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct SqlEvent {
+    pub mysql_statement_id: u32,
+    pub mysql_param_count: u16,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlStatementPrepareOutcome {
+    pub command: MysqlClientCommand,
+    pub response_sequence_id: u8,
+    pub response: MysqlStatementPrepareResponseState,
 }
 ```
 

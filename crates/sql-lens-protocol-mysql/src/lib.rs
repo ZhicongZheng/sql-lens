@@ -6,6 +6,7 @@ mod err;
 mod handshake;
 mod ok;
 mod packet;
+mod prepare;
 
 use std::{
     sync::Arc,
@@ -40,6 +41,10 @@ pub use ok::{MysqlOkPacketParseError, MysqlOkPacketSummary, parse_ok_packet_summ
 pub use packet::{
     MYSQL_PACKET_HEADER_LEN, MysqlPacket, MysqlPacketHeader, MysqlPacketParseError,
     parse_mysql_packet,
+};
+pub use prepare::{
+    MysqlComStmtPrepareOk, MysqlComStmtPrepareResponse, MysqlComStmtPrepareResponseParseError,
+    parse_com_stmt_prepare_response,
 };
 
 pub const MYSQL_PROTOCOL_NAME: &str = "mysql";
@@ -113,8 +118,12 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
         state.backend_bytes_observed += bytes.len();
         state.observe_initial_handshake(bytes);
         state.observe_authentication_result(bytes);
-        let events_emitted =
-            state.observe_backend_query_response(bytes, events, self.clock.as_ref());
+        let prepare_response_consumed = state.observe_backend_statement_prepare_response(bytes);
+        let events_emitted = if prepare_response_consumed {
+            0
+        } else {
+            state.observe_backend_query_response(bytes, events, self.clock.as_ref())
+        };
 
         Ok(ProtocolObservation::new(bytes.len(), events_emitted))
     }
@@ -169,6 +178,26 @@ pub struct MysqlPendingStatementPrepare {
     pub command: MysqlClientCommand,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlStatementPrepareOutcome {
+    pub command: MysqlClientCommand,
+    pub response_sequence_id: u8,
+    pub response: MysqlStatementPrepareResponseState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MysqlStatementPrepareResponseState {
+    Prepared {
+        statement_id: u32,
+        num_columns: u16,
+        num_params: u16,
+        warning_count: Option<u16>,
+    },
+    Failed {
+        error: MysqlErrPacketSummary,
+    },
+}
+
 #[derive(Debug)]
 pub struct MysqlConnectionState {
     client_bytes_observed: usize,
@@ -181,6 +210,7 @@ pub struct MysqlConnectionState {
     last_client_command: Option<MysqlClientCommand>,
     pending_query: Option<MysqlPendingQuery>,
     pending_statement_prepare: Option<MysqlPendingStatementPrepare>,
+    last_statement_prepare_outcome: Option<MysqlStatementPrepareOutcome>,
     next_query_sequence: u64,
 }
 
@@ -197,6 +227,7 @@ impl MysqlConnectionState {
             last_client_command: None,
             pending_query: None,
             pending_statement_prepare: None,
+            last_statement_prepare_outcome: None,
             next_query_sequence: 1,
         }
     }
@@ -235,6 +266,10 @@ impl MysqlConnectionState {
 
     pub fn pending_statement_prepare(&self) -> Option<&MysqlPendingStatementPrepare> {
         self.pending_statement_prepare.as_ref()
+    }
+
+    pub fn last_statement_prepare_outcome(&self) -> Option<&MysqlStatementPrepareOutcome> {
+        self.last_statement_prepare_outcome.as_ref()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -380,6 +415,46 @@ impl MysqlConnectionState {
         events.emit(event);
 
         1
+    }
+
+    fn observe_backend_statement_prepare_response(&mut self, bytes: &[u8]) -> bool {
+        if self.phase != MysqlConnectionPhase::Authenticated
+            || self.pending_statement_prepare.is_none()
+        {
+            return false;
+        }
+
+        let Ok(packet) = parse_mysql_packet(bytes) else {
+            return false;
+        };
+
+        let Ok(Some(response)) = parse_com_stmt_prepare_response(packet.payload) else {
+            return false;
+        };
+
+        let Some(pending) = self.pending_statement_prepare.take() else {
+            return false;
+        };
+
+        self.last_statement_prepare_outcome = Some(MysqlStatementPrepareOutcome {
+            command: pending.command,
+            response_sequence_id: packet.header.sequence_id,
+            response: match response {
+                MysqlComStmtPrepareResponse::Ok(ok) => {
+                    MysqlStatementPrepareResponseState::Prepared {
+                        statement_id: ok.statement_id,
+                        num_columns: ok.num_columns,
+                        num_params: ok.num_params,
+                        warning_count: ok.warning_count,
+                    }
+                }
+                MysqlComStmtPrepareResponse::Error(error) => {
+                    MysqlStatementPrepareResponseState::Failed { error }
+                }
+            },
+        });
+
+        true
     }
 
     fn query_event(
@@ -555,6 +630,7 @@ mod tests {
         assert!(state.last_client_command().is_none());
         assert!(state.pending_query().is_none());
         assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_prepare_outcome().is_none());
     }
 
     #[test]
@@ -995,6 +1071,152 @@ mod tests {
         assert_eq!(command.sql, "select * from users where id = ?");
         assert_eq!(&pending.command, command);
         assert!(state.pending_query().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_consumes_pending_prepare_after_ok_response() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select * from users where id = ?", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        let response = prepare_ok_packet(0x1122_3344, 3, 2, Some(7), 1);
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("prepare OK should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let outcome = state
+            .last_statement_prepare_outcome()
+            .expect("prepare outcome should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert!(state.pending_statement_prepare().is_none());
+        assert_eq!(outcome.command.kind, MysqlCommandKind::StatementPrepare);
+        assert_eq!(outcome.command.sequence_id, 0);
+        assert_eq!(outcome.command.sql, "select * from users where id = ?");
+        assert_eq!(outcome.response_sequence_id, 1);
+        assert_eq!(
+            outcome.response,
+            MysqlStatementPrepareResponseState::Prepared {
+                statement_id: 0x1122_3344,
+                num_columns: 3,
+                num_params: 2,
+                warning_count: Some(7),
+            }
+        );
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_consumes_pending_prepare_after_err_response() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select bad", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        let response = prepare_err_packet(1);
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("prepare ERR should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let outcome = state
+            .last_statement_prepare_outcome()
+            .expect("prepare outcome should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert!(state.pending_statement_prepare().is_none());
+        assert_eq!(outcome.command.kind, MysqlCommandKind::StatementPrepare);
+        assert_eq!(outcome.command.sql, "select bad");
+        assert_eq!(outcome.response_sequence_id, 1);
+        assert_eq!(
+            outcome.response,
+            MysqlStatementPrepareResponseState::Failed {
+                error: MysqlErrPacketSummary {
+                    error_code: 1064,
+                    sql_state: Some("42000".to_owned()),
+                    message: "You have an error".to_owned(),
+                },
+            }
+        );
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_ignores_prepare_response_without_pending_prepare() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let response = prepare_ok_packet(42, 0, 1, None, 1);
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("prepare response without pending state should be non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_prepare_outcome().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_pending_prepare_for_malformed_response() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select * from users where id = ?", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        let response = malformed_prepare_ok_packet();
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("malformed prepare response should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let pending = state
+            .pending_statement_prepare()
+            .expect("pending prepare should remain stored");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert_eq!(pending.command.sql, "select * from users where id = ?");
+        assert!(state.last_statement_prepare_outcome().is_none());
         assert!(events.events.is_empty());
     }
 
@@ -1444,6 +1666,39 @@ mod tests {
 
     fn unsupported_backend_response_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![0x01], 1)
+    }
+
+    fn prepare_ok_packet(
+        statement_id: u32,
+        num_columns: u16,
+        num_params: u16,
+        warning_count: Option<u16>,
+        sequence_id: u8,
+    ) -> Vec<u8> {
+        let mut payload = vec![0x00];
+        payload.extend_from_slice(&statement_id.to_le_bytes());
+        payload.extend_from_slice(&num_columns.to_le_bytes());
+        payload.extend_from_slice(&num_params.to_le_bytes());
+        payload.push(0x00);
+        if let Some(warning_count) = warning_count {
+            payload.extend_from_slice(&warning_count.to_le_bytes());
+        }
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn prepare_err_packet(sequence_id: u8) -> Vec<u8> {
+        let mut payload = vec![0xff];
+        payload.extend_from_slice(&1064u16.to_le_bytes());
+        payload.push(b'#');
+        payload.extend_from_slice(b"42000");
+        payload.extend_from_slice(b"You have an error");
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn malformed_prepare_ok_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0x00, 0x01], 1)
     }
 
     fn com_query_packet(sql: &str, sequence_id: u8) -> Vec<u8> {
