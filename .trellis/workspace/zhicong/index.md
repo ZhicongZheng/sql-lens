@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 40
+- **Total Sessions**: 41
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1335 | Active |
+| `journal-1.md` | ~1368 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 41 | 2026-07-07 | Parse MySQL OK packet summary | `5ad862e` | `main` |
 | 40 | 2026-07-07 | Capture MySQL COM_QUERY timing | `dcd83fa` | `main` |
 | 39 | 2026-07-07 | Parse MySQL COM_QUERY | `1b95e5d` | `main` |
 | 38 | 2026-07-07 | Detect MySQL authentication result | `2ba3c10` | `main` |

@@ -1333,3 +1333,36 @@ Implemented MySQL COM_QUERY pending timing and OK/ERR event emission with determ
 ### Next Steps
 
 - None - task complete
+
+
+## Session 41: Parse MySQL OK packet summary
+
+**Date**: 2026-07-07
+**Task**: Parse MySQL OK packet summary
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL OK packet summary parsing for affected rows and status flags, attached OK summaries to successful COM_QUERY events, kept malformed OK summaries non-fatal, updated backend contracts, and verified fmt, MySQL tests, workspace tests, and clippy.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5ad862e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
