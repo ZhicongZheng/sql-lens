@@ -13,6 +13,8 @@ pub use server::{
     BoundHttpServer, HttpServerConfig, HttpServerError, bind_http_server, router, router_with_state,
 };
 pub use sql_events::{
-    MetadataValueResponse, ProtocolMetadataResponse, RowsSummaryResponse, SQL_EVENTS_PATH,
-    SqlEventListResponse, SqlEventSummaryResponse,
+    ErrorSummaryResponse, MetadataValueResponse, ProtocolMetadataResponse, QueryTimingResponse,
+    RowsSummaryResponse, SQL_EVENT_DETAIL_PATH, SQL_EVENTS_PATH, SqlEventDetailResponse,
+    SqlEventListResponse, SqlEventSummaryResponse, SqlParameterResponse,
+    SqlParameterValueDataResponse, SqlParameterValueResponse,
 };

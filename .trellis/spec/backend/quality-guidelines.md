@@ -2136,6 +2136,150 @@ async fn list_sql_events(
 }
 ```
 
+## Scenario: SQL Event Detail Endpoint Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` exposes retained SQL event detail through `GET /api/v1/sql-events/{id}`.
+- The endpoint backs the future SQL detail panel and must include the complete retained event payload needed for inspection.
+- It must reuse the SQL event API mapping conventions instead of creating a second response style.
+
+### 2. Signatures
+
+Endpoint:
+
+```http
+GET /api/v1/sql-events/{id}
+```
+
+Public constants and DTOs:
+
+```rust
+pub const SQL_EVENT_DETAIL_PATH: &str = "/api/v1/sql-events/{id}";
+
+pub struct SqlEventDetailResponse {
+    pub id: String,
+    pub timestamp: String,
+    pub protocol: String,
+    pub database_type: String,
+    pub connection_id: String,
+    pub client_addr: String,
+    pub backend_addr: String,
+    pub user: Option<String>,
+    pub database: Option<String>,
+    pub kind: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub original_sql: String,
+    pub normalized_sql: Option<String>,
+    pub expanded_sql: Option<String>,
+    pub fingerprint: Option<String>,
+    pub parameters: Vec<SqlParameterResponse>,
+    pub timings: QueryTimingResponse,
+    pub rows: Option<RowsSummaryResponse>,
+    pub error: Option<ErrorSummaryResponse>,
+    pub metadata: ProtocolMetadataResponse,
+}
+```
+
+Parameter values use explicit type/value JSON:
+
+```json
+{
+  "index": 0,
+  "name": "id",
+  "value": {
+    "type": "integer",
+    "value": 42
+  },
+  "redacted": false
+}
+```
+
+### 3. Contracts
+
+- The route path is `/api/v1/sql-events/{id}`.
+- The handler wraps `{id}` as `SqlEventId` and calls `RingBufferStore::get`.
+- Existing retained event returns HTTP 200 with `SqlEventDetailResponse`.
+- Missing event returns HTTP 404.
+- Missing event uses `ApiErrorCode::NotFound` serialized as `NOT_FOUND`.
+- Missing event error details include the requested ID as `details.id`.
+- Detail response includes all list-summary fields plus `normalized_sql`, `parameters`, `timings`, and `error`.
+- Detail response reuses lowercase/snake_case status and kind mappings.
+- Detail response reuses protocol-keyed metadata mapping.
+- Request ID middleware applies to success and error responses.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Retained event exists for `{id}` | Return HTTP 200 detail response |
+| Event is missing or evicted | Return HTTP 404 `NOT_FOUND` |
+| Event has parameters | Return typed parameter values |
+| Event has error summary | Return error code, SQL state, message, and protocol metadata |
+| Event has no error summary | Return `error: null` |
+| Request omits `x-request-id` | Response includes a generated `x-request-id` header |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Detail endpoint tests inject retained events through `router_with_state`.
+- Tests assert parameters, timings, rows, error, and metadata.
+- Missing-event tests assert both HTTP 404 and `NOT_FOUND`.
+
+Base:
+
+- A selected event from the list endpoint can be fetched by its `id` without translation.
+
+Bad:
+
+- Returning HTTP 200 with `null` for a missing event.
+- Returning core `SqlEvent` directly and leaking Rust enum variant names.
+- Building a separate storage lookup abstraction before a second backend exists.
+
+### 6. Tests Required
+
+For SQL event detail endpoint changes:
+
+- Existing event HTTP 200 test.
+- Missing event HTTP 404 test.
+- Missing event `NOT_FOUND` error body test.
+- Detail payload test covering parameters, timings, rows, error summary, and metadata.
+- Existing SQL event list endpoint tests still pass.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+async fn get_sql_event_detail(Path(id): Path<String>) -> Json<Option<SqlEvent>> {
+    Json(store.get(&SqlEventId(id)).cloned())
+}
+```
+
+#### Correct
+
+```rust
+async fn get_sql_event_detail(
+    Extension(state): Extension<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<SqlEventDetailResponse>, ApiEndpointError> {
+    let event = {
+        let event_store = state.event_store();
+        let store = event_store.read().await;
+        store.get(&SqlEventId(id.clone())).cloned()
+    }
+    .ok_or_else(|| ApiEndpointError::not_found("SQL event not found", "id", id))?;
+
+    Ok(Json(SqlEventDetailResponse::from(&event)))
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

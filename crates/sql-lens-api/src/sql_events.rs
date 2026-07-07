@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use axum::{
     Extension, Json, Router,
-    extract::Query,
+    extract::{Path, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::get,
@@ -10,7 +10,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sql_lens_core::{
     ApiErrorCode, CaptureStatus, DatabaseType, DurationMillis, MetadataField, MetadataValue,
-    ProtocolMetadata, ProtocolName, SqlEvent, SqlEventKind, Timestamp,
+    ProtocolMetadata, ProtocolName, SqlEvent, SqlEventId, SqlEventKind, SqlParameter,
+    SqlParameterValue, Timestamp,
 };
 use sql_lens_storage::{
     RingBufferTimelineCursor, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
@@ -19,12 +20,15 @@ use sql_lens_storage::{
 use crate::ApiState;
 
 pub const SQL_EVENTS_PATH: &str = "/api/v1/sql-events";
+pub const SQL_EVENT_DETAIL_PATH: &str = "/api/v1/sql-events/{id}";
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
 const CURSOR_PREFIX: &str = "seq_";
 
 pub(crate) fn routes() -> Router {
-    Router::new().route(SQL_EVENTS_PATH, get(list_sql_events))
+    Router::new()
+        .route(SQL_EVENTS_PATH, get(list_sql_events))
+        .route(SQL_EVENT_DETAIL_PATH, get(get_sql_event_detail))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -72,6 +76,71 @@ pub struct SqlEventSummaryResponse {
     pub metadata: ProtocolMetadataResponse,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlEventDetailResponse {
+    pub id: String,
+    pub timestamp: String,
+    pub protocol: String,
+    pub database_type: String,
+    pub connection_id: String,
+    pub client_addr: String,
+    pub backend_addr: String,
+    pub user: Option<String>,
+    pub database: Option<String>,
+    pub kind: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub original_sql: String,
+    pub normalized_sql: Option<String>,
+    pub expanded_sql: Option<String>,
+    pub fingerprint: Option<String>,
+    pub parameters: Vec<SqlParameterResponse>,
+    pub timings: QueryTimingResponse,
+    pub rows: Option<RowsSummaryResponse>,
+    pub error: Option<ErrorSummaryResponse>,
+    pub metadata: ProtocolMetadataResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlParameterResponse {
+    pub index: u16,
+    pub name: Option<String>,
+    pub value: SqlParameterValueResponse,
+    pub redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlParameterValueResponse {
+    #[serde(rename = "type")]
+    pub value_type: String,
+    pub value: Option<SqlParameterValueDataResponse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SqlParameterValueDataResponse {
+    Integer(i64),
+    Unsigned(u64),
+    Float(f64),
+    Boolean(bool),
+    String(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueryTimingResponse {
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ErrorSummaryResponse {
+    pub code: Option<String>,
+    pub sql_state: Option<String>,
+    pub message: String,
+    pub metadata: Option<ProtocolMetadataResponse>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowsSummaryResponse {
     pub affected: Option<u64>,
@@ -109,6 +178,20 @@ async fn list_sql_events(
             .collect(),
         next_cursor: page.next_cursor.map(encode_cursor),
     }))
+}
+
+async fn get_sql_event_detail(
+    Extension(state): Extension<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<SqlEventDetailResponse>, ApiEndpointError> {
+    let event = {
+        let event_store = state.event_store();
+        let store = event_store.read().await;
+        store.get(&SqlEventId(id.clone())).cloned()
+    }
+    .ok_or_else(|| ApiEndpointError::not_found("SQL event not found", "id", id))?;
+
+    Ok(Json(SqlEventDetailResponse::from(&event)))
 }
 
 impl SqlEventListQueryParams {
@@ -169,10 +252,10 @@ fn decode_cursor(cursor: &str) -> Result<RingBufferTimelineCursor, ApiEndpointEr
 impl From<&SqlEvent> for SqlEventSummaryResponse {
     fn from(event: &SqlEvent) -> Self {
         Self {
-            id: event.id.0.clone(),
-            timestamp: event.timestamp.0.clone(),
-            protocol: event.protocol.0.clone(),
-            database_type: event.database_type.0.clone(),
+            id: event_id(event),
+            timestamp: timestamp_value(&event.timestamp),
+            protocol: protocol_name(&event.protocol),
+            database_type: database_type_name(&event.database_type),
             connection_id: event.connection_id.0.clone(),
             client_addr: event.client_addr.clone(),
             backend_addr: event.backend_addr.clone(),
@@ -184,13 +267,145 @@ impl From<&SqlEvent> for SqlEventSummaryResponse {
             original_sql: event.original_sql.clone(),
             expanded_sql: event.expanded_sql.clone(),
             fingerprint: event.fingerprint.clone(),
-            rows: event.result.map(|result| RowsSummaryResponse {
-                affected: result.affected_rows,
-                returned: result.returned_rows,
+            rows: rows_summary(event),
+            metadata: protocol_metadata_response(&event.metadata),
+        }
+    }
+}
+
+impl From<&SqlEvent> for SqlEventDetailResponse {
+    fn from(event: &SqlEvent) -> Self {
+        Self {
+            id: event_id(event),
+            timestamp: timestamp_value(&event.timestamp),
+            protocol: protocol_name(&event.protocol),
+            database_type: database_type_name(&event.database_type),
+            connection_id: event.connection_id.0.clone(),
+            client_addr: event.client_addr.clone(),
+            backend_addr: event.backend_addr.clone(),
+            user: event.user.clone(),
+            database: event.database.clone(),
+            kind: event_kind_name(event.kind).to_owned(),
+            status: capture_status_name(event.status).to_owned(),
+            duration_ms: event.duration.0,
+            original_sql: event.original_sql.clone(),
+            normalized_sql: event.normalized_sql.clone(),
+            expanded_sql: event.expanded_sql.clone(),
+            fingerprint: event.fingerprint.clone(),
+            parameters: event
+                .parameters
+                .iter()
+                .map(SqlParameterResponse::from)
+                .collect(),
+            timings: QueryTimingResponse {
+                started_at: timestamp_value(&event.timings.started_at),
+                ended_at: event.timings.ended_at.as_ref().map(timestamp_value),
+                duration_ms: event.timings.duration.0,
+            },
+            rows: rows_summary(event),
+            error: event.error.as_ref().map(|error| ErrorSummaryResponse {
+                code: error.code.clone(),
+                sql_state: error.sql_state.clone(),
+                message: error.message.clone(),
+                metadata: error.metadata.as_ref().map(protocol_metadata_response),
             }),
             metadata: protocol_metadata_response(&event.metadata),
         }
     }
+}
+
+impl From<&SqlParameter> for SqlParameterResponse {
+    fn from(parameter: &SqlParameter) -> Self {
+        Self {
+            index: parameter.index,
+            name: parameter.name.clone(),
+            value: SqlParameterValueResponse::from(&parameter.value),
+            redacted: parameter.redacted,
+        }
+    }
+}
+
+impl From<&SqlParameterValue> for SqlParameterValueResponse {
+    fn from(value: &SqlParameterValue) -> Self {
+        match value {
+            SqlParameterValue::Null => Self::new("null", None),
+            SqlParameterValue::Integer(value) => Self::new(
+                "integer",
+                Some(SqlParameterValueDataResponse::Integer(*value)),
+            ),
+            SqlParameterValue::Unsigned(value) => Self::new(
+                "unsigned",
+                Some(SqlParameterValueDataResponse::Unsigned(*value)),
+            ),
+            SqlParameterValue::Float(value) => {
+                Self::new("float", Some(SqlParameterValueDataResponse::Float(*value)))
+            }
+            SqlParameterValue::Boolean(value) => Self::new(
+                "boolean",
+                Some(SqlParameterValueDataResponse::Boolean(*value)),
+            ),
+            SqlParameterValue::String(value) => Self::new(
+                "string",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+            SqlParameterValue::Date(value) => Self::new(
+                "date",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+            SqlParameterValue::Time(value) => Self::new(
+                "time",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+            SqlParameterValue::Timestamp(value) => Self::new(
+                "timestamp",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+            SqlParameterValue::Json(value) => Self::new(
+                "json",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+            SqlParameterValue::BinarySummary(value) => Self::new(
+                "binary_summary",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+            SqlParameterValue::Unsupported(value) => Self::new(
+                "unsupported",
+                Some(SqlParameterValueDataResponse::String(value.clone())),
+            ),
+        }
+    }
+}
+
+impl SqlParameterValueResponse {
+    fn new(value_type: impl Into<String>, value: Option<SqlParameterValueDataResponse>) -> Self {
+        Self {
+            value_type: value_type.into(),
+            value,
+        }
+    }
+}
+
+fn event_id(event: &SqlEvent) -> String {
+    event.id.0.clone()
+}
+
+fn timestamp_value(timestamp: &Timestamp) -> String {
+    timestamp.0.clone()
+}
+
+fn protocol_name(protocol: &ProtocolName) -> String {
+    protocol.0.clone()
+}
+
+fn database_type_name(database_type: &DatabaseType) -> String {
+    database_type.0.clone()
+}
+
+fn rows_summary(event: &SqlEvent) -> Option<RowsSummaryResponse> {
+    event.result.map(|result| RowsSummaryResponse {
+        affected: result.affected_rows,
+        returned: result.returned_rows,
+    })
 }
 
 fn event_kind_name(kind: SqlEventKind) -> &'static str {
@@ -254,7 +469,7 @@ struct ApiEndpointError {
     status: StatusCode,
     code: ApiErrorCode,
     message: String,
-    field: Option<String>,
+    details: BTreeMap<String, String>,
 }
 
 impl ApiEndpointError {
@@ -263,7 +478,20 @@ impl ApiEndpointError {
             status: StatusCode::BAD_REQUEST,
             code: ApiErrorCode::BadRequest,
             message: message.into(),
-            field: Some(field.into()),
+            details: BTreeMap::from([("field".to_owned(), field.into())]),
+        }
+    }
+
+    fn not_found(
+        message: impl Into<String>,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: ApiErrorCode::NotFound,
+            message: message.into(),
+            details: BTreeMap::from([(key.into(), value.into())]),
         }
     }
 }
@@ -283,16 +511,12 @@ impl From<SqlEventFilterError> for ApiEndpointError {
 
 impl IntoResponse for ApiEndpointError {
     fn into_response(self) -> Response {
-        let details = self
-            .field
-            .map(|field| BTreeMap::from([("field".to_owned(), field)]))
-            .unwrap_or_default();
         let body = ApiErrorEnvelope {
             error: ApiErrorBody {
                 code: api_error_code_name(self.code).to_owned(),
                 message: self.message,
                 request_id: None,
-                details,
+                details: self.details,
             },
         };
 
@@ -324,8 +548,8 @@ mod tests {
     };
     use serde_json::Value;
     use sql_lens_core::{
-        ConnectionId, MetadataField, MetadataValue, ProtocolMetadata, QueryTiming, ResultSummary,
-        SqlEventId,
+        ConnectionId, ErrorSummary, MetadataField, MetadataValue, ProtocolMetadata, QueryTiming,
+        ResultSummary, SqlEventId,
     };
     use sql_lens_storage::RingBufferStore;
     use tower::ServiceExt;
@@ -355,7 +579,12 @@ mod tests {
             normalized_sql: Some("select * from users where id = ?".to_owned()),
             expanded_sql: Some("SELECT * FROM users WHERE id = 42".to_owned()),
             fingerprint: Some("select * from users where id = ?".to_owned()),
-            parameters: Vec::new(),
+            parameters: vec![SqlParameter {
+                index: 0,
+                name: Some("id".to_owned()),
+                value: SqlParameterValue::Integer(42),
+                redacted: false,
+            }],
             result: Some(ResultSummary {
                 affected_rows: Some(0),
                 returned_rows: Some(1),
@@ -532,5 +761,53 @@ mod tests {
         assert!(has_request_id);
         assert_eq!(json["error"]["code"], "BAD_REQUEST");
         assert_eq!(json["error"]["details"]["field"], "min_duration_ms");
+    }
+
+    #[tokio::test]
+    async fn sql_event_detail_returns_full_event() {
+        let mut event = test_event("evt_1");
+        event.error = Some(ErrorSummary {
+            code: Some("1064".to_owned()),
+            sql_state: Some("42000".to_owned()),
+            message: "syntax error".to_owned(),
+            metadata: Some(ProtocolMetadata {
+                protocol: ProtocolName("mysql".to_owned()),
+                fields: vec![MetadataField {
+                    key: "severity".to_owned(),
+                    value: MetadataValue::String("error".to_owned()),
+                }],
+            }),
+        });
+
+        let (status, json, has_request_id) =
+            get_json(app_with_events(vec![event]), "/api/v1/sql-events/evt_1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(has_request_id);
+        assert_eq!(json["id"], "evt_1");
+        assert_eq!(json["normalized_sql"], "select * from users where id = ?");
+        assert_eq!(json["parameters"][0]["index"], 0);
+        assert_eq!(json["parameters"][0]["name"], "id");
+        assert_eq!(json["parameters"][0]["value"]["type"], "integer");
+        assert_eq!(json["parameters"][0]["value"]["value"], 42);
+        assert_eq!(json["timings"]["started_at"], "2026-07-07T09:00:00Z");
+        assert_eq!(json["timings"]["duration_ms"], 3);
+        assert_eq!(json["rows"]["returned"], 1);
+        assert_eq!(json["error"]["code"], "1064");
+        assert_eq!(json["error"]["sql_state"], "42000");
+        assert_eq!(json["error"]["metadata"]["mysql"]["severity"], "error");
+        assert_eq!(json["metadata"]["mysql"]["statement_id"], 12);
+    }
+
+    #[tokio::test]
+    async fn sql_event_detail_returns_not_found_for_missing_event() {
+        let (status, json, has_request_id) =
+            get_json(app_with_events(Vec::new()), "/api/v1/sql-events/missing").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(has_request_id);
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+        assert_eq!(json["error"]["message"], "SQL event not found");
+        assert_eq!(json["error"]["details"]["id"], "missing");
     }
 }
