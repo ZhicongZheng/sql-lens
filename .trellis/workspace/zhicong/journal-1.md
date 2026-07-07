@@ -1531,3 +1531,36 @@ Implemented MySQL COM_STMT_EXECUTE envelope parsing, connection-local execute st
 ### Next Steps
 
 - None - task complete
+
+
+## Session 47: Decode MySQL execute NULL bitmap
+
+**Date**: 2026-07-07
+**Task**: Decode MySQL execute NULL bitmap
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL COM_STMT_EXECUTE NULL bitmap decoding, adapter integration for known prepared statements, non-fatal unknown/truncated handling, backend spec guidance, and parser/adapter tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0c6634d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
