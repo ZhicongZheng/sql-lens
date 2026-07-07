@@ -1,12 +1,17 @@
 //! REST and WebSocket API surface for SQL Lens.
 
+mod api_error;
 mod api_state;
+mod connections;
 mod health;
 mod request_id;
 mod server;
 mod sql_events;
 
-pub use api_state::{ApiState, DEFAULT_EVENT_STORE_CAPACITY};
+pub use api_state::{ApiState, DEFAULT_CONNECTION_STORE_CAPACITY, DEFAULT_EVENT_STORE_CAPACITY};
+pub use connections::{
+    CONNECTION_DETAIL_PATH, CONNECTIONS_PATH, ConnectionListResponse, ConnectionResponse,
+};
 pub use health::{HEALTH_PATH, HealthResponse, HealthState};
 pub use request_id::{REQUEST_ID_HEADER, RequestId};
 pub use server::{

@@ -1287,6 +1287,120 @@ if self.events.len() == self.capacity.get() {
 self.events.push_back(event);
 ```
 
+## Scenario: Connection Store Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-storage` owns the in-memory connection state store used by the connections API.
+- The store keeps the latest retained `ConnectionInfo` per connection ID.
+- This layer must not start proxy runtime work, install async locks, persist to SQLite/DuckDB, or format API DTOs.
+
+### 2. Signatures
+
+Public connection store types live in `crates/sql-lens-storage/src/lib.rs`:
+
+```rust
+pub struct ConnectionStore;
+
+impl ConnectionStore {
+    pub fn new(capacity: std::num::NonZeroUsize) -> Self;
+    pub fn upsert(&mut self, connection: sql_lens_core::ConnectionInfo) -> ConnectionUpsertOutcome;
+    pub fn list_recent(&self, limit: std::num::NonZeroUsize) -> Vec<sql_lens_core::ConnectionInfo>;
+    pub fn get(&self, id: &sql_lens_core::ConnectionId) -> Option<&sql_lens_core::ConnectionInfo>;
+    pub fn len(&self) -> usize;
+    pub fn capacity(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct ConnectionUpsertOutcome {
+    pub stored_connection_id: sql_lens_core::ConnectionId,
+    pub replaced_existing: bool,
+    pub evicted_connection_id: Option<sql_lens_core::ConnectionId>,
+}
+```
+
+Allowed dependency remains:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+```
+
+### 3. Contracts
+
+- Capacity is represented by `NonZeroUsize`; zero-capacity stores are unrepresentable.
+- `upsert` stores the latest `ConnectionInfo` for a `ConnectionId`.
+- If an upsert ID already exists, replace it and move it to the newest position.
+- If an upsert ID is new and the store is full, evict the oldest-updated connection.
+- `ConnectionUpsertOutcome.stored_connection_id` is the incoming connection ID.
+- `ConnectionUpsertOutcome.replaced_existing` is `true` only when an existing ID was replaced.
+- `ConnectionUpsertOutcome.evicted_connection_id` is set only when a different oldest connection was evicted.
+- `list_recent` returns cloned connections newest-first.
+- `get` returns a borrowed retained connection by ID.
+- `get` returns `None` for missing or evicted connections.
+- Connection store ordering is update-recency, not original connection time.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty store receives a connection | Store length becomes 1 |
+| Existing ID is upserted | Replace old value, length unchanged, move to newest |
+| New ID is upserted when full | Evict oldest-updated connection |
+| `list_recent` limit is smaller than stored count | Return newest `limit` items |
+| Existing connection is looked up | Return `Some(&ConnectionInfo)` |
+| Missing or evicted connection is looked up | Return `None` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Proxy lifecycle can later upsert active and closed `ConnectionInfo` values into the same store.
+- API tests inject a `ConnectionStore` through `ApiState::with_stores`.
+
+Base:
+
+- A closed connection replaces its earlier active connection record.
+
+Bad:
+
+- Adding `tokio::sync::RwLock` inside `sql-lens-storage`.
+- Returning API-shaped JSON structs from storage.
+- Treating the connection store as durable persistence before SQLite/DuckDB work exists.
+
+### 6. Tests Required
+
+For connection store changes:
+
+- Upsert active connection test.
+- Update existing connection to closed test.
+- Recent list newest-first test.
+- Existing lookup test.
+- Missing and evicted lookup test.
+- Capacity and empty-state test.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct ConnectionStore {
+    inner: tokio::sync::RwLock<Vec<ConnectionResponse>>,
+}
+```
+
+#### Correct
+
+```rust
+pub struct ConnectionStore {
+    capacity: NonZeroUsize,
+    connections: VecDeque<ConnectionInfo>,
+}
+```
+
 ## Scenario: Live Statistics Counter Contracts
 
 ### 1. Scope / Trigger
@@ -2277,6 +2391,154 @@ async fn get_sql_event_detail(
     .ok_or_else(|| ApiEndpointError::not_found("SQL event not found", "id", id))?;
 
     Ok(Json(SqlEventDetailResponse::from(&event)))
+}
+```
+
+## Scenario: Connections Endpoint Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` exposes retained connection state through `GET /api/v1/connections` and `GET /api/v1/connections/{id}`.
+- The endpoint is API-facing and must format `ConnectionInfo` into `API.md` JSON shape.
+- It must not wire live proxy runtime updates; runtime composition belongs to a later task.
+
+### 2. Signatures
+
+Endpoints:
+
+```http
+GET /api/v1/connections
+GET /api/v1/connections/{id}
+```
+
+Public API constants and DTOs:
+
+```rust
+pub const CONNECTIONS_PATH: &str = "/api/v1/connections";
+pub const CONNECTION_DETAIL_PATH: &str = "/api/v1/connections/{id}";
+
+pub struct ConnectionListResponse {
+    pub items: Vec<ConnectionResponse>,
+}
+
+pub struct ConnectionResponse {
+    pub id: String,
+    pub protocol: String,
+    pub database_type: String,
+    pub client_addr: String,
+    pub backend_addr: String,
+    pub user: Option<String>,
+    pub database: Option<String>,
+    pub state: String,
+    pub connected_at: String,
+    pub closed_at: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub query_count: u64,
+}
+```
+
+API state:
+
+```rust
+pub const DEFAULT_CONNECTION_STORE_CAPACITY: usize = 10_000;
+
+impl ApiState {
+    pub fn with_stores(
+        event_store: sql_lens_storage::RingBufferStore,
+        connection_store: sql_lens_storage::ConnectionStore,
+    ) -> Self;
+
+    pub fn connection_store(&self) -> std::sync::Arc<tokio::sync::RwLock<sql_lens_storage::ConnectionStore>>;
+}
+```
+
+### 3. Contracts
+
+- `ApiState::new(event_store)` remains valid and creates a default connection store.
+- `router_with_state` registers both connection routes under request ID middleware.
+- `GET /api/v1/connections` returns `ConnectionListResponse`.
+- List endpoint supports only `limit` in this task.
+- Default `limit` is `100`.
+- Maximum `limit` is `500`; larger values are clamped to `500`.
+- `limit = 0` returns HTTP 400.
+- List ordering is newest-updated first, inherited from `ConnectionStore::list_recent`.
+- `GET /api/v1/connections/{id}` returns `ConnectionResponse` for retained connections.
+- Missing or evicted connection returns HTTP 404 `NOT_FOUND`.
+- `ConnectionState` values serialize as snake_case strings.
+- Request ID middleware applies to success and error responses.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| No retained connections | Return HTTP 200 with empty `items` |
+| Active and closed connections exist | Return both in newest-updated order |
+| `limit = 0` | Return HTTP 400 `BAD_REQUEST` with `field = "limit"` |
+| Existing connection detail requested | Return HTTP 200 with `ConnectionResponse` |
+| Missing connection detail requested | Return HTTP 404 `NOT_FOUND` with `details.id` |
+| Request omits `x-request-id` | Response includes generated `x-request-id` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- API tests inject a populated `ConnectionStore` via `ApiState::with_stores`.
+- State strings are asserted as `ready`, `closed`, and similar snake_case values.
+
+Base:
+
+- Future proxy runtime code upserts connection lifecycle state into the same store.
+
+Bad:
+
+- Returning core `ConnectionInfo` directly and exposing Rust enum names.
+- Adding cursor/filter support before a product task requires it.
+- Starting proxy or app runtime just to test connection handlers.
+
+### 6. Tests Required
+
+For connections endpoint changes:
+
+- List response includes active and closed connections.
+- Detail response returns existing connection.
+- Missing detail returns HTTP 404 and `NOT_FOUND`.
+- Invalid list limit returns HTTP 400.
+- Response includes request ID header.
+- Existing health and SQL event endpoint tests still pass.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+async fn list_connections() -> Json<Vec<ConnectionInfo>> {
+    Json(proxy.active_connections())
+}
+```
+
+#### Correct
+
+```rust
+async fn list_connections(
+    Extension(state): Extension<ApiState>,
+    Query(params): Query<ConnectionListQueryParams>,
+) -> Result<Json<ConnectionListResponse>, ApiEndpointError> {
+    let limit = parse_limit(params.limit)?;
+    let connections = {
+        let connection_store = state.connection_store();
+        let store = connection_store.read().await;
+        store.list_recent(limit)
+    };
+
+    Ok(Json(ConnectionListResponse {
+        items: connections.iter().map(ConnectionResponse::from).collect(),
+    }))
 }
 ```
 

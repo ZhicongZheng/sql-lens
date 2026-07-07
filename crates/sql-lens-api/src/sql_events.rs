@@ -3,21 +3,18 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query},
-    http::StatusCode,
-    response::{IntoResponse, Response},
     routing::get,
 };
 use serde::{Deserialize, Serialize};
 use sql_lens_core::{
-    ApiErrorCode, CaptureStatus, DatabaseType, DurationMillis, MetadataField, MetadataValue,
-    ProtocolMetadata, ProtocolName, SqlEvent, SqlEventId, SqlEventKind, SqlParameter,
-    SqlParameterValue, Timestamp,
+    CaptureStatus, DatabaseType, DurationMillis, MetadataField, MetadataValue, ProtocolMetadata,
+    ProtocolName, SqlEvent, SqlEventId, SqlEventKind, SqlParameter, SqlParameterValue, Timestamp,
 };
 use sql_lens_storage::{
     RingBufferTimelineCursor, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
 };
 
-use crate::ApiState;
+use crate::{ApiState, api_error::ApiEndpointError};
 
 pub const SQL_EVENTS_PATH: &str = "/api/v1/sql-events";
 pub const SQL_EVENT_DETAIL_PATH: &str = "/api/v1/sql-events/{id}";
@@ -451,51 +448,6 @@ fn metadata_field_response(field: &MetadataField) -> (String, MetadataValueRespo
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ApiErrorEnvelope {
-    error: ApiErrorBody,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ApiErrorBody {
-    code: String,
-    message: String,
-    request_id: Option<String>,
-    details: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ApiEndpointError {
-    status: StatusCode,
-    code: ApiErrorCode,
-    message: String,
-    details: BTreeMap<String, String>,
-}
-
-impl ApiEndpointError {
-    fn bad_request(message: impl Into<String>, field: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: ApiErrorCode::BadRequest,
-            message: message.into(),
-            details: BTreeMap::from([("field".to_owned(), field.into())]),
-        }
-    }
-
-    fn not_found(
-        message: impl Into<String>,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: ApiErrorCode::NotFound,
-            message: message.into(),
-            details: BTreeMap::from([(key.into(), value.into())]),
-        }
-    }
-}
-
 impl From<SqlEventFilterError> for ApiEndpointError {
     fn from(error: SqlEventFilterError) -> Self {
         match error {
@@ -506,35 +458,6 @@ impl From<SqlEventFilterError> for ApiEndpointError {
                 Self::bad_request("invalid timestamp filter", "from")
             }
         }
-    }
-}
-
-impl IntoResponse for ApiEndpointError {
-    fn into_response(self) -> Response {
-        let body = ApiErrorEnvelope {
-            error: ApiErrorBody {
-                code: api_error_code_name(self.code).to_owned(),
-                message: self.message,
-                request_id: None,
-                details: self.details,
-            },
-        };
-
-        (self.status, Json(body)).into_response()
-    }
-}
-
-fn api_error_code_name(code: ApiErrorCode) -> &'static str {
-    match code {
-        ApiErrorCode::BadRequest => "BAD_REQUEST",
-        ApiErrorCode::Unauthorized => "UNAUTHORIZED",
-        ApiErrorCode::Forbidden => "FORBIDDEN",
-        ApiErrorCode::NotFound => "NOT_FOUND",
-        ApiErrorCode::Conflict => "CONFLICT",
-        ApiErrorCode::RateLimited => "RATE_LIMITED",
-        ApiErrorCode::Internal => "INTERNAL",
-        ApiErrorCode::StorageUnavailable => "STORAGE_UNAVAILABLE",
-        ApiErrorCode::ProxyNotReady => "PROXY_NOT_READY",
     }
 }
 
