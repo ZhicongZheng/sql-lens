@@ -2418,6 +2418,140 @@ pub struct MysqlClientCommand {
 }
 ```
 
+## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` measures a parsed `COM_QUERY` from client observation to a backend terminal query response.
+- This layer is the first bridge from MySQL-specific command parsing to protocol-neutral `SqlEvent` emission.
+- It must not parse detailed OK summaries, parse detailed ERR summaries, normalize SQL, fingerprint SQL, redact SQL, persist events, broadcast events, or block forwarding on capture consumers.
+
+### 2. Signatures
+
+MySQL-local timing types live in `crates/sql-lens-protocol-mysql/src/lib.rs`:
+
+```rust
+pub struct MysqlObservationTime {
+    pub timestamp: sql_lens_core::Timestamp,
+    pub monotonic: std::time::Instant,
+}
+
+pub trait MysqlObservationClock: std::fmt::Debug + Send + Sync {
+    fn now(&self) -> MysqlObservationTime;
+}
+
+pub struct MysqlPendingQuery {
+    pub command: MysqlClientCommand,
+    pub started_at: sql_lens_core::Timestamp,
+    pub started_monotonic: std::time::Instant,
+}
+
+impl MysqlProtocolAdapter {
+    pub fn with_clock(clock: std::sync::Arc<dyn MysqlObservationClock>) -> Self;
+}
+
+impl MysqlConnectionState {
+    pub fn pending_query(&self) -> Option<&MysqlPendingQuery>;
+}
+```
+
+### 3. Contracts
+
+- `MysqlProtocolAdapter::new()` uses a standard-library system clock only.
+- Tests may inject a deterministic clock with `MysqlProtocolAdapter::with_clock`.
+- `COM_QUERY` after `Authenticated` stores a pending query with SQL text, packet sequence ID, start timestamp, and start monotonic instant.
+- Starting a new valid `COM_QUERY` replaces any existing pending query until result-set lifecycle support is added.
+- `observe_client_bytes` emits zero events when starting pending timing.
+- Backend payload first byte `0x00` finalizes the pending query with `CaptureStatus::Ok`.
+- Backend payload first byte `0xff` finalizes the pending query with `CaptureStatus::Error`.
+- Any unsupported backend payload keeps the pending query open and emits zero events.
+- Backend terminal responses without a pending query emit zero events.
+- Finalized query observation emits exactly one `SqlEvent` through `CaptureEventEmitter`.
+- `ProtocolObservation.events_emitted` must equal the number of emitted events.
+- Event IDs are deterministic process-local strings derived from connection ID and an incrementing per-connection query counter.
+- Event connection fields come from `ProtocolConnectionContext.connection`.
+- MySQL-only command details live under `ProtocolMetadata`, not top-level `SqlEvent` fields.
+- Detailed OK result summaries and ERR packet summaries remain `None` until their dedicated tasks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Valid `COM_QUERY` before `Authenticated` | Count bytes only; do not start pending timing; emit zero events |
+| Valid `COM_QUERY` after `Authenticated` | Store pending timing; keep phase `Authenticated`; emit zero events |
+| Backend OK with pending query | Emit one `SqlEvent` with `CaptureStatus::Ok`; clear pending query |
+| Backend ERR with pending query | Emit one `SqlEvent` with `CaptureStatus::Error`; clear pending query |
+| Backend OK/ERR without pending query | Emit zero events |
+| Unsupported backend response with pending query | Emit zero events; keep pending query |
+| Malformed backend packet with pending query | Emit zero events; keep pending query |
+| Monotonic elapsed duration exceeds `u64::MAX` milliseconds | Saturate event duration at `u64::MAX` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A manual test clock provides `query_start` and `query_end`, and assertions verify exact duration and timing fields.
+- `SqlEvent.metadata.fields` contains `command = "COM_QUERY"` and `command_sequence_id`.
+- OK and ERR finalization both assert exactly one emitted event and a cleared pending query.
+
+Base:
+
+- Later OK packet parsing can populate `SqlEvent.result` without changing the pending timing contract.
+- Later ERR packet parsing can populate `SqlEvent.error` without changing terminal status detection.
+- Later result-set lifecycle parsing can replace first-byte OK handling for row-returning queries.
+
+Bad:
+
+- Adding MySQL command fields directly to `SqlEvent`.
+- Introducing `time`, `chrono`, or `uuid` only for this timing layer.
+- Parsing SQL text, rendering SQL, persisting events, or broadcasting WebSocket messages from the MySQL adapter.
+- Treating unsupported backend packets as fatal during observation.
+
+### 6. Tests Required
+
+For MySQL `COM_QUERY` timing changes:
+
+- Adapter test proving valid `COM_QUERY` after authentication starts pending timing and emits zero events.
+- Adapter test proving backend OK finalizes pending timing, emits one OK event, records duration, and clears pending state.
+- Adapter test proving backend ERR finalizes pending timing, emits one error event, records duration, and clears pending state.
+- Adapter test proving terminal responses without pending timing emit zero events.
+- Adapter test proving unsupported backend responses keep pending timing and emit zero events.
+- Event assertions covering SQL text, connection context, duration, timing fields, and MySQL metadata.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+event.metadata.fields.push(MetadataField {
+    key: "mysql_ok_packet".to_owned(),
+    value: MetadataValue::String(format!("{packet:?}")),
+});
+```
+
+#### Correct
+
+```rust
+SqlEvent {
+    status: CaptureStatus::Ok,
+    result: None,
+    metadata: ProtocolMetadata {
+        protocol: ProtocolName("mysql".to_owned()),
+        fields: vec![
+            MetadataField {
+                key: "command".to_owned(),
+                value: MetadataValue::String("COM_QUERY".to_owned()),
+            },
+        ],
+    },
+    // remaining protocol-neutral fields copied from the connection context
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

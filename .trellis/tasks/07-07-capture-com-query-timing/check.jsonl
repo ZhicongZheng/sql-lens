@@ -1,0 +1,5 @@
+{"path":".trellis/tasks/07-07-capture-com-query-timing/prd.md","kind":"task","reason":"Verify acceptance criteria were satisfied."}
+{"path":".trellis/tasks/07-07-capture-com-query-timing/implement.md","kind":"task","reason":"Verify implementation checklist and validation commands."}
+{"path":".trellis/spec/backend/quality-guidelines.md","kind":"spec","reason":"Verify spec update and backend contract compliance."}
+{"path":"crates/sql-lens-protocol-mysql/src/lib.rs","kind":"code","reason":"Review adapter timing, event emission count, and state transitions."}
+{"path":"crates/sql-lens-core/src/event.rs","kind":"code","reason":"Review emitted SqlEvent field population against core contract."}

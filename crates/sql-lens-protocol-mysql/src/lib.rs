@@ -5,7 +5,15 @@ mod command;
 mod handshake;
 mod packet;
 
-use sql_lens_core::ProtocolName;
+use std::{
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+
+use sql_lens_core::{
+    CaptureStatus, ConnectionInfo, DurationMillis, MetadataField, MetadataValue, ProtocolMetadata,
+    ProtocolName, QueryTiming, SqlEvent, SqlEventId, SqlEventKind, Timestamp,
+};
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
     ProtocolConnectionState, ProtocolObservation,
@@ -30,12 +38,18 @@ pub use packet::{
 
 pub const MYSQL_PROTOCOL_NAME: &str = "mysql";
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MysqlProtocolAdapter;
+#[derive(Debug, Clone)]
+pub struct MysqlProtocolAdapter {
+    clock: Arc<dyn MysqlObservationClock>,
+}
 
 impl MysqlProtocolAdapter {
     pub fn new() -> Self {
-        Self
+        Self::with_clock(Arc::new(SystemMysqlObservationClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn MysqlObservationClock>) -> Self {
+        Self { clock }
     }
 
     fn state_mut<'a>(
@@ -51,6 +65,12 @@ impl MysqlProtocolAdapter {
     }
 }
 
+impl Default for MysqlProtocolAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProtocolAdapter for MysqlProtocolAdapter {
     fn protocol_name(&self) -> ProtocolName {
         ProtocolName(MYSQL_PROTOCOL_NAME.to_owned())
@@ -58,9 +78,9 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
 
     fn create_connection_state(
         &self,
-        _context: &ProtocolConnectionContext,
+        context: &ProtocolConnectionContext,
     ) -> Box<dyn ProtocolConnectionState> {
-        Box::new(MysqlConnectionState::default())
+        Box::new(MysqlConnectionState::new(context.connection.clone()))
     }
 
     fn observe_client_bytes(
@@ -72,7 +92,7 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
         let state = self.state_mut(state)?;
         state.client_bytes_observed += bytes.len();
         state.observe_client_handshake_response(bytes);
-        state.observe_client_command(bytes);
+        state.observe_client_command(bytes, self.clock.as_ref());
 
         Ok(ProtocolObservation::new(bytes.len(), 0))
     }
@@ -81,14 +101,43 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
         &self,
         state: &mut dyn ProtocolConnectionState,
         bytes: &[u8],
-        _events: &mut dyn CaptureEventEmitter,
+        events: &mut dyn CaptureEventEmitter,
     ) -> Result<ProtocolObservation, ProtocolAdapterError> {
         let state = self.state_mut(state)?;
         state.backend_bytes_observed += bytes.len();
         state.observe_initial_handshake(bytes);
         state.observe_authentication_result(bytes);
+        let events_emitted =
+            state.observe_backend_query_response(bytes, events, self.clock.as_ref());
 
-        Ok(ProtocolObservation::new(bytes.len(), 0))
+        Ok(ProtocolObservation::new(bytes.len(), events_emitted))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MysqlObservationTime {
+    pub timestamp: Timestamp,
+    pub monotonic: Instant,
+}
+
+pub trait MysqlObservationClock: std::fmt::Debug + Send + Sync {
+    fn now(&self) -> MysqlObservationTime;
+}
+
+#[derive(Debug, Default)]
+struct SystemMysqlObservationClock;
+
+impl MysqlObservationClock for SystemMysqlObservationClock {
+    fn now(&self) -> MysqlObservationTime {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+
+        MysqlObservationTime {
+            timestamp: Timestamp(format!("unix_ms:{millis}")),
+            monotonic: Instant::now(),
+        }
     }
 }
 
@@ -102,18 +151,43 @@ pub enum MysqlConnectionPhase {
     AuthenticationFailed,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlPendingQuery {
+    pub command: MysqlClientCommand,
+    pub started_at: Timestamp,
+    pub started_monotonic: Instant,
+}
+
+#[derive(Debug)]
 pub struct MysqlConnectionState {
     client_bytes_observed: usize,
     backend_bytes_observed: usize,
+    connection: ConnectionInfo,
     phase: MysqlConnectionPhase,
     initial_handshake: Option<MysqlInitialHandshake>,
     client_handshake: Option<MysqlClientHandshakeResponse>,
     authentication_result: Option<MysqlAuthenticationResult>,
     last_client_command: Option<MysqlClientCommand>,
+    pending_query: Option<MysqlPendingQuery>,
+    next_query_sequence: u64,
 }
 
 impl MysqlConnectionState {
+    pub fn new(connection: ConnectionInfo) -> Self {
+        Self {
+            client_bytes_observed: 0,
+            backend_bytes_observed: 0,
+            connection,
+            phase: MysqlConnectionPhase::AwaitingInitialHandshake,
+            initial_handshake: None,
+            client_handshake: None,
+            authentication_result: None,
+            last_client_command: None,
+            pending_query: None,
+            next_query_sequence: 1,
+        }
+    }
+
     pub fn client_bytes_observed(&self) -> usize {
         self.client_bytes_observed
     }
@@ -140,6 +214,10 @@ impl MysqlConnectionState {
 
     pub fn last_client_command(&self) -> Option<&MysqlClientCommand> {
         self.last_client_command.as_ref()
+    }
+
+    pub fn pending_query(&self) -> Option<&MysqlPendingQuery> {
+        self.pending_query.as_ref()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -204,7 +282,7 @@ impl MysqlConnectionState {
         self.authentication_result = Some(result);
     }
 
-    fn observe_client_command(&mut self, bytes: &[u8]) {
+    fn observe_client_command(&mut self, bytes: &[u8], clock: &dyn MysqlObservationClock) {
         if self.phase != MysqlConnectionPhase::Authenticated {
             return;
         }
@@ -222,12 +300,121 @@ impl MysqlConnectionState {
             sequence_id: packet.header.sequence_id,
             sql: query.sql,
         });
+        let time = clock.now();
+
+        self.pending_query = Some(MysqlPendingQuery {
+            command: self
+                .last_client_command
+                .clone()
+                .expect("last client command was just stored"),
+            started_at: time.timestamp,
+            started_monotonic: time.monotonic,
+        });
     }
+
+    fn observe_backend_query_response(
+        &mut self,
+        bytes: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+        clock: &dyn MysqlObservationClock,
+    ) -> usize {
+        if self.phase != MysqlConnectionPhase::Authenticated || self.pending_query.is_none() {
+            return 0;
+        }
+
+        let Ok(packet) = parse_mysql_packet(bytes) else {
+            return 0;
+        };
+
+        let Some(status) = query_terminal_status(packet.payload) else {
+            return 0;
+        };
+
+        let Some(pending) = self.pending_query.take() else {
+            return 0;
+        };
+        let ended = clock.now();
+        let event = self.query_event(pending, ended, status);
+
+        events.emit(event);
+
+        1
+    }
+
+    fn query_event(
+        &mut self,
+        pending: MysqlPendingQuery,
+        ended: MysqlObservationTime,
+        status: CaptureStatus,
+    ) -> SqlEvent {
+        let duration = duration_millis(pending.started_monotonic, ended.monotonic);
+        let event_id = SqlEventId(format!(
+            "{}_query_{}",
+            self.connection.id.0, self.next_query_sequence
+        ));
+        self.next_query_sequence += 1;
+
+        SqlEvent {
+            id: event_id,
+            timestamp: pending.started_at.clone(),
+            protocol: self.connection.protocol.clone(),
+            database_type: self.connection.database_type.clone(),
+            connection_id: self.connection.id.clone(),
+            client_addr: self.connection.client_addr.clone(),
+            backend_addr: self.connection.backend_addr.clone(),
+            user: self.connection.user.clone(),
+            database: self.connection.database.clone(),
+            kind: SqlEventKind::Query,
+            status,
+            duration,
+            original_sql: pending.command.sql,
+            normalized_sql: None,
+            expanded_sql: None,
+            fingerprint: None,
+            parameters: Vec::new(),
+            result: None,
+            error: None,
+            timings: QueryTiming {
+                started_at: pending.started_at,
+                ended_at: Some(ended.timestamp),
+                duration,
+            },
+            metadata: ProtocolMetadata {
+                protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+                fields: vec![
+                    MetadataField {
+                        key: "command".to_owned(),
+                        value: MetadataValue::String("COM_QUERY".to_owned()),
+                    },
+                    MetadataField {
+                        key: "command_sequence_id".to_owned(),
+                        value: MetadataValue::Unsigned(u64::from(pending.command.sequence_id)),
+                    },
+                ],
+            },
+        }
+    }
+}
+
+fn query_terminal_status(payload: &[u8]) -> Option<CaptureStatus> {
+    match payload.first() {
+        Some(0x00) => Some(CaptureStatus::Ok),
+        Some(0xff) => Some(CaptureStatus::Error),
+        _ => None,
+    }
+}
+
+fn duration_millis(started: Instant, ended: Instant) -> DurationMillis {
+    let millis = ended.saturating_duration_since(started).as_millis();
+
+    DurationMillis(u64::try_from(millis).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::VecDeque, sync::Mutex, time::Duration};
+
     use sql_lens_core::{
         ConnectionId, ConnectionInfo, ConnectionState, DatabaseType, ProtocolName, SqlEvent,
         Timestamp,
@@ -297,6 +484,7 @@ mod tests {
         assert!(state.client_handshake().is_none());
         assert!(state.authentication_result().is_none());
         assert!(state.last_client_command().is_none());
+        assert!(state.pending_query().is_none());
     }
 
     #[test]
@@ -677,6 +865,7 @@ mod tests {
         assert_eq!(command.kind, MysqlCommandKind::Query);
         assert_eq!(command.sequence_id, 0);
         assert_eq!(command.sql, "select * from users");
+        assert!(state.pending_query().is_some());
         assert!(events.events.is_empty());
     }
 
@@ -750,6 +939,156 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_starts_pending_query_for_com_query_after_authentication() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = com_query_packet("select 1", 0);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_QUERY should start pending query");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let pending = state
+            .pending_query()
+            .expect("pending query should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(pending.command.kind, MysqlCommandKind::Query);
+        assert_eq!(pending.command.sequence_id, 0);
+        assert_eq!(pending.command.sql, "select 1");
+        assert_eq!(pending.started_at, Timestamp("query_start".to_owned()));
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_emits_ok_sql_event_when_backend_ok_finalizes_pending_query() {
+        let adapter =
+            MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start"), (7, "query_end")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select 1", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let response = query_ok_packet();
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("backend OK should finalize pending query");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(events.events.len(), 1);
+        assert!(state.pending_query().is_none());
+        assert_sql_event(event, CaptureStatus::Ok, "select 1", "query_end", 7);
+        assert_eq!(event.id, SqlEventId("conn_1_query_1".to_owned()));
+        assert_eq!(event.error, None);
+        assert_eq!(event.result, None);
+    }
+
+    #[test]
+    fn mysql_adapter_emits_error_sql_event_when_backend_err_finalizes_pending_query() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[
+            (10, "query_start"),
+            (42, "query_error"),
+        ]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select bad", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let response = query_err_packet();
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("backend ERR should finalize pending query");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(events.events.len(), 1);
+        assert!(state.pending_query().is_none());
+        assert_sql_event(event, CaptureStatus::Error, "select bad", "query_error", 32);
+        assert_eq!(event.error, None);
+        assert_eq!(event.result, None);
+    }
+
+    #[test]
+    fn mysql_adapter_does_not_emit_terminal_response_without_pending_query() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let response = query_ok_packet();
+
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("backend OK without pending query should be non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert!(state.pending_query().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_pending_query_for_unsupported_backend_response() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select 1", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let response = unsupported_backend_response_packet();
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("unsupported backend response should be non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert!(state.pending_query().is_some());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_rejects_wrong_connection_state() {
         let adapter = MysqlProtocolAdapter::new();
         let mut state = WrongState;
@@ -817,6 +1156,18 @@ mod tests {
         packet_with_sequence_id(vec![0xfe, b'a', b'u', b't', b'h'], 2)
     }
 
+    fn query_ok_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0x00], 1)
+    }
+
+    fn query_err_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0xff], 1)
+    }
+
+    fn unsupported_backend_response_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0x01], 1)
+    }
+
     fn com_query_packet(sql: &str, sequence_id: u8) -> Vec<u8> {
         let mut payload = vec![MYSQL_COM_QUERY];
         payload.extend_from_slice(sql.as_bytes());
@@ -830,6 +1181,47 @@ mod tests {
 
     fn invalid_utf8_com_query_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![MYSQL_COM_QUERY, 0xff], 0)
+    }
+
+    fn assert_sql_event(
+        event: &SqlEvent,
+        expected_status: CaptureStatus,
+        expected_sql: &str,
+        expected_ended_at: &str,
+        expected_duration_ms: u64,
+    ) {
+        assert_eq!(event.timestamp, Timestamp("query_start".to_owned()));
+        assert_eq!(event.protocol, ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()));
+        assert_eq!(event.database_type, DatabaseType("mysql".to_owned()));
+        assert_eq!(event.connection_id, ConnectionId("conn_1".to_owned()));
+        assert_eq!(event.client_addr, "127.0.0.1:51000");
+        assert_eq!(event.backend_addr, "127.0.0.1:3306");
+        assert_eq!(event.kind, SqlEventKind::Query);
+        assert_eq!(event.status, expected_status);
+        assert_eq!(event.duration, DurationMillis(expected_duration_ms));
+        assert_eq!(event.original_sql, expected_sql);
+        assert_eq!(event.normalized_sql, None);
+        assert_eq!(event.expanded_sql, None);
+        assert_eq!(event.fingerprint, None);
+        assert!(event.parameters.is_empty());
+        assert_eq!(
+            event.timings.started_at,
+            Timestamp("query_start".to_owned())
+        );
+        assert_eq!(event.timings.duration, DurationMillis(expected_duration_ms));
+        assert_eq!(
+            event.timings.ended_at,
+            Some(Timestamp(expected_ended_at.to_owned()))
+        );
+        assert_eq!(event.metadata.protocol, ProtocolName("mysql".to_owned()));
+        assert_eq!(event.metadata.fields.len(), 2);
+        assert_eq!(event.metadata.fields[0].key, "command");
+        assert_eq!(
+            event.metadata.fields[0].value,
+            MetadataValue::String("COM_QUERY".to_owned())
+        );
+        assert_eq!(event.metadata.fields[1].key, "command_sequence_id");
+        assert_eq!(event.metadata.fields[1].value, MetadataValue::Unsigned(0));
     }
 
     fn observe_complete_handshake(
@@ -923,5 +1315,41 @@ mod tests {
         payload.push(0);
 
         payload
+    }
+
+    #[derive(Debug)]
+    struct ManualMysqlObservationClock {
+        times: Mutex<VecDeque<MysqlObservationTime>>,
+    }
+
+    impl ManualMysqlObservationClock {
+        fn new(entries: &[(u64, &str)]) -> Self {
+            let base = Instant::now();
+            let times = entries
+                .iter()
+                .map(|(offset_ms, timestamp)| MysqlObservationTime {
+                    timestamp: Timestamp((*timestamp).to_owned()),
+                    monotonic: base + Duration::from_millis(*offset_ms),
+                })
+                .collect();
+
+            Self {
+                times: Mutex::new(times),
+            }
+        }
+    }
+
+    impl MysqlObservationClock for ManualMysqlObservationClock {
+        fn now(&self) -> MysqlObservationTime {
+            self.times
+                .lock()
+                .expect("manual clock lock should not be poisoned")
+                .pop_front()
+                .expect("manual clock should have a queued observation time")
+        }
+    }
+
+    fn manual_clock(entries: &[(u64, &str)]) -> Arc<ManualMysqlObservationClock> {
+        Arc::new(ManualMysqlObservationClock::new(entries))
     }
 }

@@ -1,0 +1,6 @@
+{"path":".trellis/tasks/07-07-capture-com-query-timing/prd.md","kind":"task","reason":"Requirements and acceptance criteria for Issue 044."}
+{"path":".trellis/tasks/07-07-capture-com-query-timing/design.md","kind":"task","reason":"Technical design for timing, pending query state, and event emission."}
+{"path":".trellis/spec/backend/quality-guidelines.md","kind":"spec","reason":"Backend protocol contracts and quality gate expectations."}
+{"path":"crates/sql-lens-protocol-mysql/src/lib.rs","kind":"code","reason":"MySQL adapter, state machine, and tests to extend."}
+{"path":"crates/sql-lens-protocol-mysql/src/command.rs","kind":"code","reason":"COM_QUERY parser and command metadata from Issue 043."}
+{"path":"crates/sql-lens-core/src/event.rs","kind":"code","reason":"SqlEvent contract and timing fields used for emitted events."}
