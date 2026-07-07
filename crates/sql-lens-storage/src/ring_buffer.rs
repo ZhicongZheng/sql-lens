@@ -166,10 +166,12 @@ pub struct SqlEventFilter {
     pub database_type: Option<DatabaseType>,
     pub database: Option<String>,
     pub user: Option<String>,
+    pub client_addr: Option<String>,
     pub status: Option<CaptureStatus>,
     pub min_duration: Option<DurationMillis>,
     pub max_duration: Option<DurationMillis>,
     pub text: Option<String>,
+    pub fingerprint: Option<String>,
     pub from: Option<Timestamp>,
     pub to: Option<Timestamp>,
 }
@@ -219,6 +221,12 @@ impl SqlEventFilter {
             }
         }
 
+        if let Some(client_addr) = self.client_addr.as_deref() {
+            if event.client_addr != client_addr {
+                return false;
+            }
+        }
+
         if let Some(status) = self.status {
             if event.status != status {
                 return false;
@@ -239,6 +247,12 @@ impl SqlEventFilter {
 
         if let Some(text) = self.text.as_deref() {
             if !event_text_matches(event, text) {
+                return false;
+            }
+        }
+
+        if let Some(fingerprint) = self.fingerprint.as_deref() {
+            if event.fingerprint.as_deref() != Some(fingerprint) {
                 return false;
             }
         }
@@ -780,6 +794,43 @@ mod tests {
                 SqlEventId("evt_2".to_owned()),
                 SqlEventId("evt_1".to_owned())
             ]
+        );
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn ring_buffer_timeline_filters_by_client_addr_and_fingerprint() {
+        let mut store = RingBufferStore::new(capacity(3));
+        let mut target = test_event("evt_1");
+        target.client_addr = "127.0.0.1:51000".to_owned();
+        target.fingerprint = Some("select * from users where id = ?".to_owned());
+        let mut wrong_client = target.clone();
+        wrong_client.id = SqlEventId("evt_2".to_owned());
+        wrong_client.client_addr = "127.0.0.1:51001".to_owned();
+        let mut wrong_fingerprint = target.clone();
+        wrong_fingerprint.id = SqlEventId("evt_3".to_owned());
+        wrong_fingerprint.fingerprint = Some("select * from orders where id = ?".to_owned());
+
+        store.append(target);
+        store.append(wrong_client);
+        store.append(wrong_fingerprint);
+
+        let page = query_page(
+            &store,
+            filtered_timeline_query(
+                10,
+                None,
+                SqlEventFilter {
+                    client_addr: Some("127.0.0.1:51000".to_owned()),
+                    fingerprint: Some("select * from users where id = ?".to_owned()),
+                    ..SqlEventFilter::default()
+                },
+            ),
+        );
+
+        assert_eq!(
+            event_ids(&page.events),
+            vec![SqlEventId("evt_1".to_owned())]
         );
         assert_eq!(page.next_cursor, None);
     }

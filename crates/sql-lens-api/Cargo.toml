@@ -8,8 +8,10 @@ license.workspace = true
 [dependencies]
 axum = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+sql-lens-core = { path = "../sql-lens-core" }
 sql-lens-config = { path = "../sql-lens-config" }
-tokio = { version = "1", features = ["net"] }
+sql-lens-storage = { path = "../sql-lens-storage" }
+tokio = { version = "1", features = ["net", "sync"] }
 
 [dev-dependencies]
 serde_json = "1.0"

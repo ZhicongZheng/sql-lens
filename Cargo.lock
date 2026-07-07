@@ -526,6 +526,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sql-lens-config",
+ "sql-lens-core",
+ "sql-lens-storage",
  "tokio",
  "tower",
 ]

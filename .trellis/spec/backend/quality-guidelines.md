@@ -1117,10 +1117,12 @@ pub struct SqlEventFilter {
     pub database_type: Option<sql_lens_core::DatabaseType>,
     pub database: Option<String>,
     pub user: Option<String>,
+    pub client_addr: Option<String>,
     pub status: Option<sql_lens_core::CaptureStatus>,
     pub min_duration: Option<sql_lens_core::DurationMillis>,
     pub max_duration: Option<sql_lens_core::DurationMillis>,
     pub text: Option<String>,
+    pub fingerprint: Option<String>,
     pub from: Option<sql_lens_core::Timestamp>,
     pub to: Option<sql_lens_core::Timestamp>,
 }
@@ -1176,8 +1178,10 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 - A cursor remains stable across newer appends because newer events have larger sequences and are excluded from older-page queries.
 - Evicted events may naturally disappear from later cursor pages.
 - `SqlEventFilter::default()` means no filtering.
-- Supported storage filters are strongly typed: protocol, database type, database, user, status, minimum duration, maximum duration, SQL text, start timestamp, and end timestamp.
+- Supported storage filters are strongly typed: protocol, database type, database, user, client address, status, minimum duration, maximum duration, SQL text, fingerprint, start timestamp, and end timestamp.
 - Storage combines filter fields with logical AND.
+- Client address filtering matches `SqlEvent.client_addr` exactly.
+- Fingerprint filtering matches `SqlEvent.fingerprint` exactly when present.
 - SQL text filtering performs a case-sensitive substring match against `original_sql`, `normalized_sql`, and `expanded_sql`; storage must not parse SQL.
 - Time range filtering uses the current `Timestamp` string ordering and assumes sortable captured timestamp strings; storage must not add timestamp parsing in this layer.
 - `min_duration > max_duration` returns `SqlEventFilterError::InvalidDurationRange`.
@@ -1206,6 +1210,8 @@ Do not add async runtime, database, API, protocol, app, HTTP, serialization, or 
 | Older cursor-targeted events were evicted | Return the remaining retained older events without error |
 | Timeline query has `SqlEventFilter::default()` | Behave like the unfiltered timeline query |
 | Multiple filter fields are set | Return only events matching all fields |
+| Client address filter is set | Match `SqlEvent.client_addr` exactly |
+| Fingerprint filter is set | Match `SqlEvent.fingerprint` exactly |
 | Text filter is set | Match stored SQL text fields by case-sensitive substring |
 | Time range filter is set | Compare `Timestamp` string values without parsing |
 | `min_duration > max_duration` | Return `SqlEventFilterError::InvalidDurationRange` before scanning |
@@ -1253,7 +1259,7 @@ For ring buffer append changes:
 - Timeline limit and next-cursor test.
 - Timeline cursor paging test with no duplicate events across pages.
 - Timeline cursor stability test after newer append.
-- At least five combined filter tests covering protocol, database type, database, user, status, duration, SQL text, and time range behavior.
+- At least five combined filter tests covering protocol, database type, database, user, client address, status, duration, SQL text, fingerprint, and time range behavior.
 - Filtered cursor pagination test proving `next_cursor` is based on older matching events.
 - Invalid duration range test.
 - Invalid timestamp range test.
@@ -1957,6 +1963,176 @@ async fn health(storage: Storage) -> Json<serde_json::Value> {
 ```rust
 async fn health(Extension(state): Extension<HealthState>) -> Json<HealthResponse> {
     Json(state.snapshot())
+}
+```
+
+## Scenario: SQL Event List Endpoint Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` exposes retained SQL events through `GET /api/v1/sql-events`.
+- The endpoint is the API-facing SQL timeline list and must map HTTP query parameters into strongly typed storage filters.
+- This layer formats response DTOs for `API.md`; it must not leak Rust enum variant names, internal ring-buffer sequence numbers, or storage structs directly.
+
+### 2. Signatures
+
+Endpoint:
+
+```http
+GET /api/v1/sql-events
+```
+
+Router and state signatures:
+
+```rust
+pub struct ApiState;
+
+impl ApiState {
+    pub fn new(event_store: sql_lens_storage::RingBufferStore) -> Self;
+    pub fn event_store(&self) -> std::sync::Arc<tokio::sync::RwLock<sql_lens_storage::RingBufferStore>>;
+}
+
+pub fn router() -> axum::Router;
+pub fn router_with_state(state: ApiState) -> axum::Router;
+```
+
+Public response DTOs:
+
+```rust
+pub const SQL_EVENTS_PATH: &str = "/api/v1/sql-events";
+
+pub struct SqlEventListResponse {
+    pub items: Vec<SqlEventSummaryResponse>,
+    pub next_cursor: Option<String>,
+}
+
+pub struct SqlEventSummaryResponse {
+    pub id: String,
+    pub timestamp: String,
+    pub protocol: String,
+    pub database_type: String,
+    pub connection_id: String,
+    pub client_addr: String,
+    pub backend_addr: String,
+    pub user: Option<String>,
+    pub database: Option<String>,
+    pub kind: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub original_sql: String,
+    pub expanded_sql: Option<String>,
+    pub fingerprint: Option<String>,
+    pub rows: Option<RowsSummaryResponse>,
+    pub metadata: ProtocolMetadataResponse,
+}
+```
+
+Allowed `sql-lens-api` dependencies for this layer:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+sql-lens-storage = { path = "../sql-lens-storage" }
+tokio = { version = "1", features = ["net", "sync"] }
+```
+
+### 3. Contracts
+
+- `router()` uses `ApiState::default()` and remains usable for empty API smoke tests.
+- `router_with_state(ApiState)` registers health routes and SQL event routes under the existing request ID middleware.
+- `ApiState` stores a concrete `RingBufferStore` behind `Arc<RwLock<_>>`.
+- The endpoint supports `limit`, `cursor`, `protocol`, `database_type`, `database`, `user`, `client_addr`, `status`, `min_duration_ms`, `max_duration_ms`, `q`, `fingerprint`, `from`, and `to`.
+- Default `limit` is `100`.
+- Maximum `limit` is `500`; larger values are clamped to `500`.
+- `limit = 0` returns HTTP 400.
+- Cursor format is `seq_<u64>`.
+- Invalid cursor returns HTTP 400.
+- Status values are `ok`, `slow`, `error`, and `unknown`.
+- Response event `kind` values are snake_case strings such as `statement_execute`.
+- Response event `status` values are lowercase strings.
+- Metadata is returned as a deterministic protocol-keyed object, not as `Vec<MetadataField>`.
+- API errors use the documented error envelope and core `ApiErrorCode` names.
+- Request ID headers are still attached to successful and error responses.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Store is empty | Return HTTP 200 with empty `items` and `next_cursor: null` |
+| Retained events exist | Return newest matching events first |
+| `limit` is present | Return at most that many items, clamped to `500` |
+| `limit = 0` | Return HTTP 400 `BAD_REQUEST` with `field = "limit"` |
+| Older matching events exist after a page | Return `next_cursor` |
+| `cursor = seq_N` | Return retained matching events with internal sequence `< N` |
+| Cursor has an unsupported format | Return HTTP 400 `BAD_REQUEST` with `field = "cursor"` |
+| `min_duration_ms > max_duration_ms` | Return HTTP 400 `BAD_REQUEST` with `field = "min_duration_ms"` |
+| `from > to` | Return HTTP 400 `BAD_REQUEST` with `field = "from"` |
+| Request omits `x-request-id` | Response includes a generated `x-request-id` header |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Endpoint tests inject a `RingBufferStore` through `router_with_state`.
+- DTO tests assert lowercase/snake_case `status` and `kind` values.
+- Metadata tests assert protocol-keyed JSON such as `metadata.mysql.command`.
+
+Base:
+
+- A future app runtime creates one configured ring buffer and passes it to `ApiState::new`.
+- Future SQLite/DuckDB backends can introduce a repository boundary after a second storage backend is actually wired.
+
+Bad:
+
+- Returning `SqlEvent` directly and exposing Rust enum names such as `StatementExecute`.
+- Exposing raw ring-buffer sequence numbers as JSON numbers instead of encoded cursors.
+- Adding SQL parsing, database connections, or runtime startup to the endpoint task.
+- Holding the storage write lock while serializing response bodies.
+
+### 6. Tests Required
+
+For SQL event list endpoint changes:
+
+- Empty list response test.
+- Populated list schema test matching `API.md` fields.
+- Query-parameter-to-storage-filter test.
+- Cursor pagination test.
+- Invalid cursor HTTP 400 test.
+- Invalid duration range HTTP 400 test.
+- Storage tests for `client_addr` and `fingerprint` filters.
+- Existing health and request ID tests still pass.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+async fn list() -> Json<Vec<SqlEvent>> {
+    Json(store.snapshot())
+}
+```
+
+#### Correct
+
+```rust
+async fn list_sql_events(
+    Extension(state): Extension<ApiState>,
+    Query(params): Query<SqlEventListQueryParams>,
+) -> Result<Json<SqlEventListResponse>, ApiEndpointError> {
+    let query = params.try_into_timeline_query()?;
+    let page = {
+        let event_store = state.event_store();
+        let store = event_store.read().await;
+        store.query_timeline(query)?
+    };
+
+    Ok(Json(SqlEventListResponse {
+        items: page.events.iter().map(SqlEventSummaryResponse::from).collect(),
+        next_cursor: page.next_cursor.map(encode_cursor),
+    }))
 }
 ```
 
