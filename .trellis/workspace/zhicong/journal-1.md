@@ -1366,3 +1366,36 @@ Implemented MySQL OK packet summary parsing for affected rows and status flags, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 42: Parse MySQL error packet summary
+
+**Date**: 2026-07-07
+**Task**: Parse MySQL error packet summary
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL ERR packet summary parsing with sanitized lossy error messages, attached ErrorSummary metadata to failed COM_QUERY events, kept malformed ERR summaries non-fatal, updated backend contracts, and verified fmt, targeted tests, workspace tests, clippy, and no protocol logging.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3eadadd` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
