@@ -2556,6 +2556,86 @@ async fn list_connections(
 }
 ```
 
+## Scenario: Protocols Endpoint Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` exposes protocol discovery through `GET /api/v1/protocols`.
+- The endpoint is API-facing and returns protocol-neutral capability metadata for UI and tooling.
+- The first implementation is static. Dynamic adapter registry inspection belongs to a later runtime composition task.
+
+### 2. Signatures
+
+Endpoint:
+
+```http
+GET /api/v1/protocols
+```
+
+Public API constants and DTOs:
+
+```rust
+pub const PROTOCOLS_PATH: &str = "/api/v1/protocols";
+
+pub struct ProtocolListResponse {
+    pub items: Vec<ProtocolResponse>,
+}
+
+pub struct ProtocolResponse {
+    pub name: String,
+    pub status: String,
+    pub databases: Vec<String>,
+}
+```
+
+### 3. Contracts
+
+- `router_with_state` registers the protocols route under request ID middleware.
+- `GET /api/v1/protocols` returns `ProtocolListResponse`.
+- `mysql` is listed with `status = "supported"`.
+- The MySQL-compatible `databases` list contains `mysql`, `starrocks`, `tidb`, and `doris`.
+- Planned protocol families use `status = "planned"`.
+- Planned protocols may include `postgresql`, `clickhouse`, and `sqlite`.
+- Response fields stay protocol-neutral; do not expose adapter-specific Rust types.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Protocols endpoint requested | Return HTTP 200 with an `items` array |
+| Request omits `x-request-id` | Response includes generated `x-request-id` |
+| MySQL adapter is the only supported first protocol family | Return `mysql` as supported and other roadmap families as planned |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A static response keeps early UI code from hard-coding protocol roadmap data.
+- Future runtime code can replace or augment the source without changing the public DTO shape.
+
+Base:
+
+- Tests assert supported MySQL-compatible databases and at least representative planned protocols.
+
+Bad:
+
+- Reading protocol support from docs at runtime.
+- Starting proxy or app runtime just to test protocol discovery.
+- Adding MySQL-specific top-level fields to protocol discovery responses.
+
+### 6. Tests Required
+
+For protocols endpoint changes:
+
+- Response includes request ID header.
+- `mysql` is present with `supported` status.
+- MySQL-compatible databases include `mysql`, `starrocks`, `tidb`, and `doris`.
+- Planned protocols are present with `planned` status.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

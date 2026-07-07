@@ -4,6 +4,7 @@ mod api_error;
 mod api_state;
 mod connections;
 mod health;
+mod protocols;
 mod request_id;
 mod server;
 mod sql_events;
@@ -14,6 +15,7 @@ pub use connections::{
     CONNECTION_DETAIL_PATH, CONNECTIONS_PATH, ConnectionListResponse, ConnectionResponse,
 };
 pub use health::{HEALTH_PATH, HealthResponse, HealthState};
+pub use protocols::{PROTOCOLS_PATH, ProtocolListResponse, ProtocolResponse};
 pub use request_id::{REQUEST_ID_HEADER, RequestId};
 pub use server::{
     BoundHttpServer, HttpServerConfig, HttpServerError, bind_http_server, router, router_with_state,
