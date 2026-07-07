@@ -1267,3 +1267,36 @@ Implemented MySQL backend authentication result observation: OK packets mark con
 ### Next Steps
 
 - None - task complete
+
+
+## Session 39: Parse MySQL COM_QUERY
+
+**Date**: 2026-07-07
+**Task**: Parse MySQL COM_QUERY
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL COM_QUERY parsing with a command parser module, authenticated-only adapter state capture, non-fatal unsupported/malformed handling, parser and adapter tests, and backend spec documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1b95e5d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
