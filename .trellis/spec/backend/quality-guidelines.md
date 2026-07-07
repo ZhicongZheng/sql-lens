@@ -3082,6 +3082,148 @@ pub struct MysqlStatementExecuteEnvelope {
 }
 ```
 
+## Scenario: MySQL COM_STMT_EXECUTE Numeric Parameter Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` decodes common numeric prepared statement parameters inside client-to-backend `COM_STMT_EXECUTE` parameter payloads.
+- This layer records MySQL-local decoded numeric parameters when prepared statement metadata is known and current-packet parameter type metadata is present.
+- It must not implement cross-execute parameter type caching, string/binary/date/time/decimal/JSON decoding, expanded SQL rendering, redaction, storage/API/UI contracts, or protocol-neutral event emission.
+
+### 2. Signatures
+
+Public numeric parameter parser types live in `crates/sql-lens-protocol-mysql/src/execute.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlParameterType {
+    pub type_code: u8,
+    pub unsigned: bool,
+}
+
+pub struct MysqlDecodedParameter {
+    pub index: u16,
+    pub value: sql_lens_core::SqlParameterValue,
+}
+
+pub struct MysqlDecodedParameters {
+    pub parameters: Vec<MysqlDecodedParameter>,
+    pub bytes_consumed: usize,
+}
+
+pub fn decode_numeric_parameters(
+    parameter_payload_after_null_bitmap: &[u8],
+    parameter_count: u16,
+    null_parameter_indexes: &[usize],
+) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError>;
+```
+
+`MysqlConnectionState` exposes decoded numeric parameters only through MySQL-local execute envelope state:
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub null_parameter_indexes: Vec<usize>,
+    pub numeric_parameters: Vec<MysqlDecodedParameter>,
+}
+```
+
+### 3. Contracts
+
+- Decode numeric values only after NULL bitmap decoding has identified NULL parameter indexes.
+- `parameter_payload_after_null_bitmap` begins with `new_params_bind_flag` when `parameter_count > 0`.
+- `new_params_bind_flag = 1` means current-packet parameter type metadata is present and can be decoded.
+- `new_params_bind_flag = 0` is non-fatal unsupported in this layer; return `Ok(None)` and do not decode values until a later type-cache task exists.
+- Parameter type metadata is two bytes per parameter: type code plus flag byte.
+- The unsigned marker is the high bit of the flag byte (`0x80`).
+- Supported numeric type codes are `TINY`, `SHORT`, `LONG`, `LONGLONG`, `INT24`, `FLOAT`, and `DOUBLE`.
+- `TINY`, `SHORT`, `LONG`, `LONGLONG`, and `INT24` decode to `SqlParameterValue::Integer` or `SqlParameterValue::Unsigned` according to the unsigned flag.
+- `FLOAT` and `DOUBLE` decode to `SqlParameterValue::Float`.
+- NULL parameter indexes produce `SqlParameterValue::Null` and do not consume value bytes.
+- Unsupported type codes are non-fatal unsupported; return `Ok(None)` and do not expose partial decoded parameter state.
+- Truncated bind flag, parameter type metadata, or numeric value bytes return `MysqlExecuteParseError::IncompletePayload`.
+- Adapter-level numeric parsing runs only when the execute statement ID is known and has connection-local `MysqlPreparedStatement` metadata.
+- Unknown statement IDs remain non-fatal and store `numeric_parameters = Vec::new()`.
+- Malformed numeric payloads are non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope`.
+- Raw parameter payload bytes must not be stored in connection state.
+- Numeric parameter decoding emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `parameter_count = 0` and payload empty | Return empty decoded parameters with `bytes_consumed = 0` |
+| `new_params_bind_flag = 1` with supported signed integer types | Decode as `SqlParameterValue::Integer` |
+| `new_params_bind_flag = 1` with supported unsigned integer types | Decode as `SqlParameterValue::Unsigned` |
+| `new_params_bind_flag = 1` with `FLOAT` or `DOUBLE` | Decode as `SqlParameterValue::Float` |
+| Parameter index is listed in NULL bitmap | Decode as `SqlParameterValue::Null` and consume no value bytes |
+| `new_params_bind_flag = 0` | Return `Ok(None)`; adapter may still store execute envelope and NULL bitmap state |
+| Unsupported type code | Return `Ok(None)` without exposing partial decoded parameter state |
+| Missing bind flag | Return `IncompletePayload { field: "new_params_bind_flag" }` |
+| Truncated type metadata | Return `IncompletePayload { field: "parameter_types" }` |
+| Truncated numeric value | Return `IncompletePayload { field: "parameter_value" }` |
+| Known statement ID with valid numeric payload | Store decoded numeric parameters on execute envelope; emit zero events |
+| Unknown statement ID | Store empty numeric parameters; emit zero events |
+| Malformed numeric payload after `Authenticated` | Keep phase `Authenticated`; do not update command or execute state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover signed integers, unsigned integers, `FLOAT`, `DOUBLE`, NULL numeric parameters, missing bind flag, truncated type metadata, and truncated values.
+- Adapter tests drive numeric decoding through real `COM_STMT_PREPARE`, prepare OK, and execute packets.
+- `new_params_bind_flag = 0` tests assert non-fatal behavior without cross-execute type caching.
+
+Base:
+
+- Later string/binary/date/time tasks can add supported type-code branches without changing this numeric contract.
+- Later expanded SQL rendering can consume MySQL-local decoded parameters or convert them into core `SqlParameter` values.
+- Later per-statement type caching can add support for `new_params_bind_flag = 0`.
+
+Bad:
+
+- Attempting to decode values when `new_params_bind_flag = 0` without a type cache.
+- Treating unsupported type codes as adapter errors.
+- Storing raw parameter payload bytes in `MysqlConnectionState`.
+- Emitting `SqlEvent` from numeric decoding alone.
+- Adding decoded MySQL parameter details directly to shared core models before event emission needs them.
+- Logging parameter payload bytes, raw SQL templates, or decoded sensitive values.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_EXECUTE` numeric parameter changes:
+
+- Parser test for signed integer representative values.
+- Parser test for unsigned integer representative values.
+- Parser test for `FLOAT` and `DOUBLE` values.
+- Parser test proving NULL parameters do not consume value bytes.
+- Parser test for `new_params_bind_flag = 0` returning unsupported `None`.
+- Parser test for unsupported type code returning unsupported `None`.
+- Parser tests for missing bind flag, truncated type metadata, and truncated numeric value bytes.
+- Adapter test proving known statement IDs store decoded numeric parameters.
+- Adapter test proving malformed numeric payloads stay non-fatal and do not update execute state.
+- Regression test coverage that existing execute envelope, NULL bitmap, prepare, and query behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+if new_params_bind_flag == 0 {
+    decode_using_last_seen_types_without_storing_them();
+}
+```
+
+#### Correct
+
+```rust
+if new_params_bind_flag != 1 {
+    return Ok(None);
+}
+```
+
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
 
 ### 1. Scope / Trigger
