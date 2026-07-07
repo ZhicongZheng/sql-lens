@@ -3,7 +3,7 @@
   "name": "render-expanded-sql-for-prepared-statements",
   "title": "Render expanded SQL for prepared statements",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

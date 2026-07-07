@@ -59,6 +59,95 @@ pub struct MysqlDecodedParameters {
     pub bytes_consumed: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MysqlExpandedSqlRenderError {
+    MissingParameter {
+        placeholder_index: usize,
+        parameter_count: usize,
+    },
+    ExtraParameters {
+        placeholder_count: usize,
+        parameter_count: usize,
+    },
+}
+
+impl fmt::Display for MysqlExpandedSqlRenderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingParameter {
+                placeholder_index,
+                parameter_count,
+            } => write!(
+                f,
+                "missing MySQL prepared statement parameter for placeholder {placeholder_index}; only {parameter_count} parameters decoded"
+            ),
+            Self::ExtraParameters {
+                placeholder_count,
+                parameter_count,
+            } => write!(
+                f,
+                "too many MySQL prepared statement parameters: {parameter_count} decoded for {placeholder_count} placeholders"
+            ),
+        }
+    }
+}
+
+impl Error for MysqlExpandedSqlRenderError {}
+
+pub fn render_expanded_sql(
+    template_sql: &str,
+    parameters: &[MysqlDecodedParameter],
+) -> Result<String, MysqlExpandedSqlRenderError> {
+    let bytes = template_sql.as_bytes();
+    let mut output = String::with_capacity(template_sql.len());
+    let mut parameter_index = 0;
+    let mut last_emitted = 0;
+    let mut cursor = 0;
+
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_quoted_sql(bytes, cursor, bytes[cursor]);
+            }
+            b'-' if starts_line_comment(bytes, cursor) => {
+                cursor = skip_line_comment(bytes, cursor);
+            }
+            b'#' => {
+                cursor = skip_line_comment(bytes, cursor);
+            }
+            b'/' if starts_block_comment(bytes, cursor) => {
+                cursor = skip_block_comment(bytes, cursor);
+            }
+            b'?' => {
+                let Some(parameter) = parameters.get(parameter_index) else {
+                    return Err(MysqlExpandedSqlRenderError::MissingParameter {
+                        placeholder_index: parameter_index,
+                        parameter_count: parameters.len(),
+                    });
+                };
+                output.push_str(&template_sql[last_emitted..cursor]);
+                output.push_str(&render_parameter_literal(&parameter.value));
+                parameter_index += 1;
+                cursor += 1;
+                last_emitted = cursor;
+            }
+            _ => {
+                cursor += 1;
+            }
+        }
+    }
+
+    if parameter_index < parameters.len() {
+        return Err(MysqlExpandedSqlRenderError::ExtraParameters {
+            placeholder_count: parameter_index,
+            parameter_count: parameters.len(),
+        });
+    }
+
+    output.push_str(&template_sql[last_emitted..]);
+    Ok(output)
+}
+
 pub fn decode_null_bitmap(
     parameter_payload: &[u8],
     parameter_count: u16,
@@ -539,6 +628,98 @@ fn binary_summary(bytes: &[u8]) -> String {
 
     let suffix = if bytes.len() > prefix_len { "..." } else { "" };
     format!("len={} hex={hex}{suffix}", bytes.len())
+}
+
+fn render_parameter_literal(value: &SqlParameterValue) -> String {
+    match value {
+        SqlParameterValue::Null => "NULL".to_owned(),
+        SqlParameterValue::Integer(value) => value.to_string(),
+        SqlParameterValue::Unsigned(value) => value.to_string(),
+        SqlParameterValue::Float(value) => value.to_string(),
+        SqlParameterValue::Boolean(value) => {
+            if *value {
+                "TRUE".to_owned()
+            } else {
+                "FALSE".to_owned()
+            }
+        }
+        SqlParameterValue::String(value)
+        | SqlParameterValue::Date(value)
+        | SqlParameterValue::Time(value)
+        | SqlParameterValue::Timestamp(value)
+        | SqlParameterValue::Json(value)
+        | SqlParameterValue::BinarySummary(value)
+        | SqlParameterValue::Unsupported(value) => quote_display_literal(value),
+    }
+}
+
+fn quote_display_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push('\'');
+            quoted.push('\'');
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+
+    quoted
+}
+
+fn starts_line_comment(bytes: &[u8], cursor: usize) -> bool {
+    bytes.get(cursor..cursor + 3) == Some(b"-- ")
+}
+
+fn starts_block_comment(bytes: &[u8], cursor: usize) -> bool {
+    bytes.get(cursor..cursor + 2) == Some(b"/*")
+}
+
+fn skip_quoted_sql(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        if quote != b'`' && bytes[cursor] == b'\\' {
+            cursor = (cursor + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[cursor] == quote {
+            if bytes.get(cursor + 1) == Some(&quote) {
+                cursor += 2;
+            } else {
+                return cursor + 1;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+
+    bytes.len()
+}
+
+fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        cursor += 1;
+        if bytes[cursor - 1] == b'\n' {
+            break;
+        }
+    }
+
+    cursor
+}
+
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut cursor = start + 2;
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+            return cursor + 2;
+        }
+        cursor += 1;
+    }
+
+    bytes.len()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1187,6 +1368,159 @@ mod tests {
             ]
         );
         assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn renders_expanded_sql_literals() {
+        let parameters = [
+            MysqlDecodedParameter {
+                index: 0,
+                value: SqlParameterValue::String("O'Reilly".to_owned()),
+            },
+            MysqlDecodedParameter {
+                index: 1,
+                value: SqlParameterValue::Null,
+            },
+            MysqlDecodedParameter {
+                index: 2,
+                value: SqlParameterValue::Integer(-42),
+            },
+            MysqlDecodedParameter {
+                index: 3,
+                value: SqlParameterValue::Unsigned(42),
+            },
+            MysqlDecodedParameter {
+                index: 4,
+                value: SqlParameterValue::Float(2.5),
+            },
+            MysqlDecodedParameter {
+                index: 5,
+                value: SqlParameterValue::Boolean(true),
+            },
+            MysqlDecodedParameter {
+                index: 6,
+                value: SqlParameterValue::Date("2026-07-07".to_owned()),
+            },
+            MysqlDecodedParameter {
+                index: 7,
+                value: SqlParameterValue::Time("01:02:03".to_owned()),
+            },
+            MysqlDecodedParameter {
+                index: 8,
+                value: SqlParameterValue::Timestamp("2026-07-07 09:10:11".to_owned()),
+            },
+            MysqlDecodedParameter {
+                index: 9,
+                value: SqlParameterValue::Json("{\"name\":\"sql-lens\"}".to_owned()),
+            },
+            MysqlDecodedParameter {
+                index: 10,
+                value: SqlParameterValue::BinarySummary("len=3 hex=abcdef".to_owned()),
+            },
+            MysqlDecodedParameter {
+                index: 11,
+                value: SqlParameterValue::Unsupported("unsupported".to_owned()),
+            },
+        ];
+
+        let expanded =
+            render_expanded_sql("select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?", &parameters)
+                .expect("expanded SQL should render");
+
+        assert_eq!(
+            expanded,
+            "select 'O''Reilly', NULL, -42, 42, 2.5, TRUE, '2026-07-07', '01:02:03', '2026-07-07 09:10:11', '{\"name\":\"sql-lens\"}', 'len=3 hex=abcdef', 'unsupported'"
+        );
+    }
+
+    #[test]
+    fn renders_expanded_sql_skipping_non_placeholder_contexts() {
+        let parameters = [
+            MysqlDecodedParameter {
+                index: 0,
+                value: SqlParameterValue::Integer(1),
+            },
+            MysqlDecodedParameter {
+                index: 1,
+                value: SqlParameterValue::Integer(2),
+            },
+        ];
+
+        let expanded = render_expanded_sql(
+            "select '?' as single_q, \"?\" as double_q, `?` as ident, ? -- ? line\n, ? /* ? block */ # ? hash\n",
+            &parameters,
+        )
+        .expect("expanded SQL should render");
+
+        assert_eq!(
+            expanded,
+            "select '?' as single_q, \"?\" as double_q, `?` as ident, 1 -- ? line\n, 2 /* ? block */ # ? hash\n"
+        );
+    }
+
+    #[test]
+    fn renders_expanded_sql_skipping_escaped_quotes() {
+        let parameters = [MysqlDecodedParameter {
+            index: 0,
+            value: SqlParameterValue::String("done".to_owned()),
+        }];
+
+        let expanded = render_expanded_sql(
+            "select 'it''s ?' as doubled, 'escaped \\' ?' as backslash, ?",
+            &parameters,
+        )
+        .expect("expanded SQL should render");
+
+        assert_eq!(
+            expanded,
+            "select 'it''s ?' as doubled, 'escaped \\' ?' as backslash, 'done'"
+        );
+    }
+
+    #[test]
+    fn render_expanded_sql_rejects_missing_parameter() {
+        let error = render_expanded_sql(
+            "select ?, ?",
+            &[MysqlDecodedParameter {
+                index: 0,
+                value: SqlParameterValue::Integer(1),
+            }],
+        )
+        .expect_err("second placeholder should be missing");
+
+        assert_eq!(
+            error,
+            MysqlExpandedSqlRenderError::MissingParameter {
+                placeholder_index: 1,
+                parameter_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn render_expanded_sql_rejects_extra_parameters() {
+        let error = render_expanded_sql(
+            "select ?",
+            &[
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Integer(1),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::Integer(2),
+                },
+            ],
+        )
+        .expect_err("extra parameter should fail");
+
+        assert_eq!(
+            error,
+            MysqlExpandedSqlRenderError::ExtraParameters {
+                placeholder_count: 1,
+                parameter_count: 2,
+            }
+        );
     }
 
     #[test]

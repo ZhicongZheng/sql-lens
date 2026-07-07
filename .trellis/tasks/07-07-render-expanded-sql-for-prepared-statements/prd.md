@@ -39,13 +39,13 @@ literals for debugging display, while never modifying forwarded traffic.
 
 ## Acceptance Criteria
 
-- [ ] Strings are quoted and escaped.
-- [ ] `NULL` renders as `NULL`.
-- [ ] Binary values render as summaries.
-- [ ] Placeholder scanning skips `?` inside strings, quoted identifiers, and
+- [x] Strings are quoted and escaped.
+- [x] `NULL` renders as `NULL`.
+- [x] Binary values render as summaries.
+- [x] Placeholder scanning skips `?` inside strings, quoted identifiers, and
       comments.
-- [ ] Parameter count mismatches return structured errors.
-- [ ] Rendering never modifies forwarded traffic.
+- [x] Parameter count mismatches return structured errors.
+- [x] Rendering never modifies forwarded traffic.
 
 ## Out Of Scope
 

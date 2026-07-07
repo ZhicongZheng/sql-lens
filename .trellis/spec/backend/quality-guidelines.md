@@ -3475,6 +3475,134 @@ parse_date_strictly_or_panic("0000-00-00")
 SqlParameterValue::Date("0000-00-00".to_owned())
 ```
 
+## Scenario: MySQL Prepared Statement Expanded SQL Rendering Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` renders a readable expanded SQL string for MySQL-compatible prepared statement executions after `COM_STMT_EXECUTE` parameter decoding.
+- This layer is MySQL-local until prepared statement event emission and redaction are implemented.
+- It must not modify forwarded traffic, emit prepared statement `SqlEvent`s, persist expanded SQL, broadcast expanded SQL, normalize SQL, fingerprint SQL, or apply redaction policy.
+
+### 2. Signatures
+
+Expanded SQL rendering lives in `crates/sql-lens-protocol-mysql/src/execute.rs` and is re-exported from the crate root:
+
+```rust
+pub fn render_expanded_sql(
+    template_sql: &str,
+    parameters: &[MysqlDecodedParameter],
+) -> Result<String, MysqlExpandedSqlRenderError>;
+
+pub enum MysqlExpandedSqlRenderError {
+    MissingParameter {
+        placeholder_index: usize,
+        parameter_count: usize,
+    },
+    ExtraParameters {
+        placeholder_count: usize,
+        parameter_count: usize,
+    },
+}
+```
+
+`MysqlStatementExecuteEnvelope` stores the MySQL-local rendered result:
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub parameters: Vec<MysqlDecodedParameter>,
+    pub expanded_sql: Option<String>,
+}
+```
+
+### 3. Contracts
+
+- Rendered SQL is display-oriented debugging output, not an executable replay contract.
+- Rendering replaces `?` placeholders only in normal SQL context.
+- Placeholder scanning must skip `?` inside single-quoted strings, double-quoted strings, backtick-quoted identifiers, `-- ` line comments, `#` line comments, and `/* ... */` block comments.
+- Single-quoted strings support doubled quote escapes such as `''`.
+- Single-quoted and double-quoted strings support backslash escaping while scanning.
+- `SqlParameterValue::Null` renders as `NULL`.
+- `Integer`, `Unsigned`, and `Float` render without quotes.
+- `Boolean` renders as `TRUE` or `FALSE`.
+- `String`, `Date`, `Time`, `Timestamp`, `Json`, `BinarySummary`, and `Unsupported` render as single-quoted display literals.
+- Single quotes inside display literals are escaped by doubling them.
+- Binary values render only the existing binary summary string; raw binary bytes must not be reconstructed or stored.
+- If there are more placeholders than decoded parameters, return `MysqlExpandedSqlRenderError::MissingParameter`.
+- If there are more decoded parameters than placeholders, return `MysqlExpandedSqlRenderError::ExtraParameters`.
+- Known statement IDs with complete decoded parameters and successful rendering store `expanded_sql = Some(...)` on the MySQL-local execute envelope.
+- Unknown statement IDs store `expanded_sql = None`.
+- Unsupported parameter decoding stores `expanded_sql = None`.
+- Render mismatch is non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope` for malformed known-statement payloads.
+- Rendering emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| String contains `'` | Escape as doubled single quote |
+| Parameter is `NULL` | Render `NULL` |
+| Parameter is numeric | Render without quotes |
+| Parameter is boolean | Render `TRUE` or `FALSE` |
+| Parameter is date/time/timestamp/json/binary summary/unsupported | Render as a quoted display literal |
+| `?` inside quoted string, quoted identifier, or comment | Leave unchanged |
+| Placeholder lacks a parameter | Return `MissingParameter` |
+| Extra decoded parameter remains after scanning | Return `ExtraParameters` |
+| Known statement ID with complete parameters | Store expanded SQL on execute envelope; emit zero events |
+| Unknown statement ID | Store `expanded_sql = None`; emit zero events |
+| Rendering would fail after `Authenticated` | Keep phase `Authenticated`; do not update command or execute state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover strings with quotes, `NULL`, numeric, boolean, date/time/timestamp, JSON, binary summaries, skipped placeholders, and count mismatches.
+- Adapter tests drive rendering through real `COM_STMT_PREPARE`, prepare OK, and execute packets.
+- Rendered SQL stays MySQL-local until redaction and event emission tasks define exposure rules.
+
+Base:
+
+- Later prepared statement event emission can copy this rendered string into `SqlEvent.expanded_sql` after redaction policy is applied.
+- Later replay work can use structured parameters instead of treating rendered SQL as an exact replay artifact.
+
+Bad:
+
+- Modifying client-to-backend packet bytes.
+- Emitting, storing, or broadcasting expanded SQL before redaction.
+- Reconstructing raw binary bytes from binary summaries.
+- Treating rendered SQL as dialect-perfect executable SQL.
+- Logging raw SQL templates, raw parameter payloads, or decoded sensitive values.
+
+### 6. Tests Required
+
+For MySQL prepared statement expanded SQL rendering changes:
+
+- Renderer test for quoted and escaped strings.
+- Renderer test for `NULL`.
+- Renderer tests for numeric, boolean, date/time/timestamp, JSON, binary summary, and unsupported values.
+- Renderer test proving placeholders inside strings, identifiers, and comments are skipped.
+- Renderer tests for missing and extra parameter errors.
+- Adapter test proving known statement IDs store expanded SQL while observation remains byte-count only and emits zero events.
+- Regression test coverage that existing numeric, string, binary, temporal, NULL bitmap, execute envelope, prepare, and query behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+packet.payload = render_expanded_sql(template, &parameters)?.into_bytes();
+```
+
+#### Correct
+
+```rust
+let expanded_sql = render_expanded_sql(template, &parameters)?;
+envelope.expanded_sql = Some(expanded_sql);
+```
+
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
 
 ### 1. Scope / Trigger

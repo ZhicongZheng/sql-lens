@@ -36,8 +36,9 @@ pub use command::{
 };
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use execute::{
-    MysqlDecodedParameter, MysqlDecodedParameters, MysqlExecuteParseError, MysqlNullBitmap,
-    MysqlParameterType, decode_null_bitmap, decode_numeric_parameters, decode_parameters,
+    MysqlDecodedParameter, MysqlDecodedParameters, MysqlExecuteParseError,
+    MysqlExpandedSqlRenderError, MysqlNullBitmap, MysqlParameterType, decode_null_bitmap,
+    decode_numeric_parameters, decode_parameters, render_expanded_sql,
 };
 pub use handshake::{
     MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
@@ -216,6 +217,7 @@ pub struct MysqlStatementExecuteEnvelope {
     pub statement: Option<MysqlPreparedStatement>,
     pub null_parameter_indexes: Vec<usize>,
     pub parameters: Vec<MysqlDecodedParameter>,
+    pub expanded_sql: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,36 +424,45 @@ impl MysqlConnectionState {
             }
             MysqlParsedClientCommand::StatementExecute(execute) => {
                 let statement = self.prepared_statement(execute.statement_id).cloned();
-                let (null_parameter_indexes, parameters) = if let Some(statement) = &statement {
-                    let parameter_payload = packet
-                        .payload
-                        .get(MYSQL_COM_STMT_EXECUTE_PARAMETER_PAYLOAD_OFFSET..)
-                        .unwrap_or_default();
-                    let Ok(null_bitmap) =
-                        decode_null_bitmap(parameter_payload, statement.num_params)
-                    else {
-                        return;
-                    };
-                    let null_bitmap_bytes_consumed = null_bitmap.bytes_consumed;
-                    let null_parameter_indexes = null_bitmap.null_parameter_indexes;
-                    let parameter_value_payload = parameter_payload
-                        .get(null_bitmap_bytes_consumed..)
-                        .unwrap_or_default();
-                    let Ok(decoded_parameters) = decode_parameters(
-                        parameter_value_payload,
-                        statement.num_params,
-                        &null_parameter_indexes,
-                    ) else {
-                        return;
-                    };
-                    let parameters = decoded_parameters
-                        .map(|parameters| parameters.parameters)
-                        .unwrap_or_default();
+                let (null_parameter_indexes, parameters, expanded_sql) =
+                    if let Some(statement) = &statement {
+                        let parameter_payload = packet
+                            .payload
+                            .get(MYSQL_COM_STMT_EXECUTE_PARAMETER_PAYLOAD_OFFSET..)
+                            .unwrap_or_default();
+                        let Ok(null_bitmap) =
+                            decode_null_bitmap(parameter_payload, statement.num_params)
+                        else {
+                            return;
+                        };
+                        let null_bitmap_bytes_consumed = null_bitmap.bytes_consumed;
+                        let null_parameter_indexes = null_bitmap.null_parameter_indexes;
+                        let parameter_value_payload = parameter_payload
+                            .get(null_bitmap_bytes_consumed..)
+                            .unwrap_or_default();
+                        let Ok(decoded_parameters) = decode_parameters(
+                            parameter_value_payload,
+                            statement.num_params,
+                            &null_parameter_indexes,
+                        ) else {
+                            return;
+                        };
+                        match decoded_parameters {
+                            Some(decoded_parameters) => {
+                                let parameters = decoded_parameters.parameters;
+                                let Ok(expanded_sql) =
+                                    render_expanded_sql(&statement.template_sql, &parameters)
+                                else {
+                                    return;
+                                };
 
-                    (null_parameter_indexes, parameters)
-                } else {
-                    (Vec::new(), Vec::new())
-                };
+                                (null_parameter_indexes, parameters, Some(expanded_sql))
+                            }
+                            None => (null_parameter_indexes, Vec::new(), None),
+                        }
+                    } else {
+                        (Vec::new(), Vec::new(), None)
+                    };
                 let client_command = MysqlClientCommand {
                     kind: MysqlCommandKind::StatementExecute,
                     sequence_id: packet.header.sequence_id,
@@ -471,6 +482,7 @@ impl MysqlConnectionState {
                     statement,
                     null_parameter_indexes,
                     parameters,
+                    expanded_sql,
                 });
             }
         }
@@ -1335,6 +1347,10 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(
+            envelope.expanded_sql.as_deref(),
+            Some("select numeric_params(-42, NULL, 2.5)")
+        );
         assert!(events.events.is_empty());
     }
 
@@ -1411,6 +1427,12 @@ mod tests {
                     value: SqlParameterValue::String("omega".to_owned()),
                 },
             ]
+        );
+        assert_eq!(
+            envelope.expanded_sql.as_deref(),
+            Some(
+                "select text_binary_params('alpha', 'len=20 hex=000102030405060708090a0b0c0d0e0f...', 'omega')"
+            )
         );
         assert!(events.events.is_empty());
     }
@@ -1540,6 +1562,7 @@ mod tests {
         assert!(envelope.statement.is_none());
         assert!(envelope.null_parameter_indexes.is_empty());
         assert!(envelope.parameters.is_empty());
+        assert!(envelope.expanded_sql.is_none());
         assert!(events.events.is_empty());
     }
 

@@ -2,17 +2,17 @@
 
 ## Checklist
 
-- [ ] Add a MySQL-local expanded SQL renderer module or section in
+- [x] Add a MySQL-local expanded SQL renderer module or section in
       `execute.rs`.
-- [ ] Add `MysqlExpandedSqlRenderError` with structured mismatch variants.
-- [ ] Implement placeholder scanning that skips quoted strings, quoted
+- [x] Add `MysqlExpandedSqlRenderError` with structured mismatch variants.
+- [x] Implement placeholder scanning that skips quoted strings, quoted
       identifiers, and comments.
-- [ ] Implement `SqlParameterValue` literal rendering.
-- [ ] Add `expanded_sql: Option<String>` to
+- [x] Implement `SqlParameterValue` literal rendering.
+- [x] Add `expanded_sql: Option<String>` to
       `MysqlStatementExecuteEnvelope`.
-- [ ] Wire adapter execute-envelope construction to render when decoded
+- [x] Wire adapter execute-envelope construction to render when decoded
       parameters are complete.
-- [ ] Add parser/renderer tests for:
+- [x] Add parser/renderer tests for:
       - strings with quotes
       - `NULL`
       - numeric values
@@ -23,9 +23,9 @@
       - skipped placeholders inside quotes/comments
       - too few parameters
       - too many parameters
-- [ ] Add adapter test proving forwarded observation remains byte-count only and
+- [x] Add adapter test proving forwarded observation remains byte-count only and
       envelope stores expanded SQL.
-- [ ] Update backend spec with the expanded SQL rendering contract.
+- [x] Update backend spec with the expanded SQL rendering contract.
 
 ## Validation
 
