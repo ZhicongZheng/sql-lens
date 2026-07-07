@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines MySQL protocol parser/state contracts and no-core-model-leak constraints."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Defines crate ownership and MySQL-specific state boundaries."}
+{"file":".trellis/tasks/07-07-store-prepared-statement-state/research/protocol-state-close-hook.md","reason":"Documents current absence of protocol close hook and recommended close cleanup interpretation."}

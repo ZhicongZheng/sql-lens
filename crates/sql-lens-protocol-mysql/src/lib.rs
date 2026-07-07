@@ -9,6 +9,7 @@ mod packet;
 mod prepare;
 
 use std::{
+    collections::BTreeMap,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -198,6 +199,15 @@ pub enum MysqlStatementPrepareResponseState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlPreparedStatement {
+    pub statement_id: u32,
+    pub template_sql: String,
+    pub num_columns: u16,
+    pub num_params: u16,
+    pub warning_count: Option<u16>,
+}
+
 #[derive(Debug)]
 pub struct MysqlConnectionState {
     client_bytes_observed: usize,
@@ -211,6 +221,7 @@ pub struct MysqlConnectionState {
     pending_query: Option<MysqlPendingQuery>,
     pending_statement_prepare: Option<MysqlPendingStatementPrepare>,
     last_statement_prepare_outcome: Option<MysqlStatementPrepareOutcome>,
+    prepared_statements: BTreeMap<u32, MysqlPreparedStatement>,
     next_query_sequence: u64,
 }
 
@@ -228,6 +239,7 @@ impl MysqlConnectionState {
             pending_query: None,
             pending_statement_prepare: None,
             last_statement_prepare_outcome: None,
+            prepared_statements: BTreeMap::new(),
             next_query_sequence: 1,
         }
     }
@@ -270,6 +282,14 @@ impl MysqlConnectionState {
 
     pub fn last_statement_prepare_outcome(&self) -> Option<&MysqlStatementPrepareOutcome> {
         self.last_statement_prepare_outcome.as_ref()
+    }
+
+    pub fn prepared_statement(&self, statement_id: u32) -> Option<&MysqlPreparedStatement> {
+        self.prepared_statements.get(&statement_id)
+    }
+
+    pub fn prepared_statement_count(&self) -> usize {
+        self.prepared_statements.len()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -436,22 +456,35 @@ impl MysqlConnectionState {
             return false;
         };
 
-        self.last_statement_prepare_outcome = Some(MysqlStatementPrepareOutcome {
-            command: pending.command,
-            response_sequence_id: packet.header.sequence_id,
-            response: match response {
-                MysqlComStmtPrepareResponse::Ok(ok) => {
-                    MysqlStatementPrepareResponseState::Prepared {
+        let command = pending.command;
+        let response = match response {
+            MysqlComStmtPrepareResponse::Ok(ok) => {
+                self.prepared_statements.insert(
+                    ok.statement_id,
+                    MysqlPreparedStatement {
                         statement_id: ok.statement_id,
+                        template_sql: command.sql.clone(),
                         num_columns: ok.num_columns,
                         num_params: ok.num_params,
                         warning_count: ok.warning_count,
-                    }
+                    },
+                );
+                MysqlStatementPrepareResponseState::Prepared {
+                    statement_id: ok.statement_id,
+                    num_columns: ok.num_columns,
+                    num_params: ok.num_params,
+                    warning_count: ok.warning_count,
                 }
-                MysqlComStmtPrepareResponse::Error(error) => {
-                    MysqlStatementPrepareResponseState::Failed { error }
-                }
-            },
+            }
+            MysqlComStmtPrepareResponse::Error(error) => {
+                MysqlStatementPrepareResponseState::Failed { error }
+            }
+        };
+
+        self.last_statement_prepare_outcome = Some(MysqlStatementPrepareOutcome {
+            command,
+            response_sequence_id: packet.header.sequence_id,
+            response,
         });
 
         true
@@ -631,6 +664,7 @@ mod tests {
         assert!(state.pending_query().is_none());
         assert!(state.pending_statement_prepare().is_none());
         assert!(state.last_statement_prepare_outcome().is_none());
+        assert_eq!(state.prepared_statement_count(), 0);
     }
 
     #[test]
@@ -1116,6 +1150,17 @@ mod tests {
                 warning_count: Some(7),
             }
         );
+        assert_eq!(state.prepared_statement_count(), 1);
+        assert_eq!(
+            state.prepared_statement(0x1122_3344),
+            Some(&MysqlPreparedStatement {
+                statement_id: 0x1122_3344,
+                template_sql: "select * from users where id = ?".to_owned(),
+                num_columns: 3,
+                num_params: 2,
+                warning_count: Some(7),
+            })
+        );
         assert!(events.events.is_empty());
     }
 
@@ -1161,6 +1206,103 @@ mod tests {
                 },
             }
         );
+        assert_eq!(state.prepared_statement_count(), 0);
+        assert!(state.prepared_statement(0x1122_3344).is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_replaces_prepared_statement_mapping_for_same_statement_id() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select old_template(?)", 0),
+                &mut events,
+            )
+            .expect("first COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(42, 0, 1, Some(1), 1),
+                &mut events,
+            )
+            .expect("first prepare OK should be observed");
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select new_template(?, ?)", 0),
+                &mut events,
+            )
+            .expect("second COM_STMT_PREPARE should start pending prepare");
+        let response = prepare_ok_packet(42, 2, 2, None, 1);
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("second prepare OK should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
+        assert_eq!(state.prepared_statement_count(), 1);
+        assert_eq!(
+            state.prepared_statement(42),
+            Some(&MysqlPreparedStatement {
+                statement_id: 42,
+                template_sql: "select new_template(?, ?)".to_owned(),
+                num_columns: 2,
+                num_params: 2,
+                warning_count: None,
+            })
+        );
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_prepared_statement_mappings_connection_local() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut first_state = adapter.create_connection_state(&test_context());
+        let mut second_state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, first_state.as_mut(), &mut events);
+        observe_authenticated_connection(&adapter, second_state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                first_state.as_mut(),
+                &com_stmt_prepare_packet("select first_connection(?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                first_state.as_mut(),
+                &prepare_ok_packet(99, 0, 1, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let first_state = first_state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("first state should downcast");
+        let second_state = second_state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("second state should downcast");
+
+        assert_eq!(first_state.prepared_statement_count(), 1);
+        assert!(first_state.prepared_statement(99).is_some());
+        assert_eq!(second_state.prepared_statement_count(), 0);
+        assert!(second_state.prepared_statement(99).is_none());
         assert!(events.events.is_empty());
     }
 
@@ -1184,6 +1326,7 @@ mod tests {
         assert_eq!(observation, ProtocolObservation::new(response.len(), 0));
         assert!(state.pending_statement_prepare().is_none());
         assert!(state.last_statement_prepare_outcome().is_none());
+        assert_eq!(state.prepared_statement_count(), 0);
         assert!(events.events.is_empty());
     }
 

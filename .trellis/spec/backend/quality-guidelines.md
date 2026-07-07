@@ -2625,6 +2625,7 @@ impl MysqlConnectionState {
 - Valid prepare OK and valid ERR responses consume `pending_statement_prepare`.
 - Malformed, incomplete, unsupported, or unrecognized prepare responses are non-fatal and leave `pending_statement_prepare` intact.
 - Valid prepare response consumption stores `last_statement_prepare_outcome` with the original prepare command and backend response sequence ID.
+- Prepared statement map insertion belongs to the per-connection prepared statement state contract.
 - Prepare response observation emits zero SQL events and does not call query timing logic for consumed prepare responses.
 - Parsed prepare outcome is MySQL-specific and must not be projected into `SqlEvent`, `ConnectionInfo`, storage, API, WebSocket, or plugin contracts in this layer.
 
@@ -2702,6 +2703,112 @@ pub struct MysqlStatementPrepareOutcome {
     pub command: MysqlClientCommand,
     pub response_sequence_id: u8,
     pub response: MysqlStatementPrepareResponseState,
+}
+```
+
+## Scenario: MySQL Prepared Statement State Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` needs to retain successful prepared statement templates for later `COM_STMT_EXECUTE` parsing.
+- This layer stores MySQL statement ID mappings inside a single `MysqlConnectionState`.
+- It must not add a shared protocol close hook, parse execute packets, emit SQL events, expose storage/API/UI/plugin contracts, or update protocol-neutral core models.
+
+### 2. Signatures
+
+Prepared statement state lives in `crates/sql-lens-protocol-mysql/src/lib.rs`:
+
+```rust
+pub struct MysqlPreparedStatement {
+    pub statement_id: u32,
+    pub template_sql: String,
+    pub num_columns: u16,
+    pub num_params: u16,
+    pub warning_count: Option<u16>,
+}
+
+impl MysqlConnectionState {
+    pub fn prepared_statement(&self, statement_id: u32) -> Option<&MysqlPreparedStatement>;
+    pub fn prepared_statement_count(&self) -> usize;
+}
+```
+
+Implementation state uses a standard-library map owned by `MysqlConnectionState`; do not expose mutable map access.
+
+### 3. Contracts
+
+- A new `MysqlConnectionState` starts with zero prepared statements.
+- Successful `COM_STMT_PREPARE` OK response inserts or replaces a prepared statement mapping in the current connection state.
+- The map key is the server-assigned MySQL statement ID.
+- The mapped value stores the statement ID, SQL template, parameter count, column count, and optional warning count.
+- The SQL template comes from the original pending prepare command.
+- Failed prepare responses update failed outcome state but do not insert into the prepared statement map.
+- Reusing the same statement ID in one connection replaces the previous mapping with the latest successful prepare metadata.
+- A separate `MysqlConnectionState` must not observe mappings from another connection state.
+- Connection close cleanup is satisfied by per-connection ownership: when the connection state is dropped, its prepared statement map is dropped.
+- Explicit close hooks, `COM_STMT_CLOSE`, and `COM_STMT_RESET` cleanup belong to later tasks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| New connection state | `prepared_statement_count() == 0` |
+| Successful prepare OK | Insert mapping keyed by `statement_id` |
+| Mapping is read by statement ID | Return stored template and prepare metadata |
+| Prepare ERR | Do not insert a mapping |
+| Same statement ID prepared again in same connection | Replace existing mapping |
+| Same statement ID exists in another connection | No cross-connection visibility |
+| Connection state is dropped | Map is dropped with state ownership |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Adapter tests drive insertion through real `COM_STMT_PREPARE` and prepare OK packets.
+- Failed prepare tests assert the map remains empty.
+- Cross-connection tests create two `MysqlConnectionState` instances and prove isolation.
+
+Base:
+
+- Later `COM_STMT_EXECUTE` parsing can call `prepared_statement(statement_id)` to find the template.
+- Later `COM_STMT_CLOSE` can remove mappings from this map.
+
+Bad:
+
+- Storing prepared statements in a static/global map.
+- Adding statement mappings to `SqlEvent`, `ConnectionInfo`, storage, API, WebSocket, or frontend schemas in this task.
+- Adding a shared protocol close hook just to clear this local map.
+- Logging raw SQL templates or packet payloads.
+
+### 6. Tests Required
+
+For MySQL prepared statement state changes:
+
+- New state starts empty.
+- Successful prepare OK inserts a mapping.
+- Mapping includes statement ID, SQL template, parameter count, column count, and optional warning count.
+- Prepare ERR does not insert a mapping.
+- Same statement ID replacement updates the mapping.
+- Separate connection states do not share mappings.
+- Existing query and prepare response tests remain green.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+static MYSQL_PREPARED_STATEMENTS: Mutex<HashMap<u32, String>> = ...;
+```
+
+#### Correct
+
+```rust
+pub struct MysqlConnectionState {
+    prepared_statements: BTreeMap<u32, MysqlPreparedStatement>,
 }
 ```
 
