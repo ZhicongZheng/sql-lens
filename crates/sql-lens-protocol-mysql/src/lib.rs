@@ -2,6 +2,7 @@
 
 mod authentication;
 mod command;
+mod err;
 mod handshake;
 mod ok;
 mod packet;
@@ -12,8 +13,9 @@ use std::{
 };
 
 use sql_lens_core::{
-    CaptureStatus, ConnectionInfo, DurationMillis, MetadataField, MetadataValue, ProtocolMetadata,
-    ProtocolName, QueryTiming, ResultSummary, SqlEvent, SqlEventId, SqlEventKind, Timestamp,
+    CaptureStatus, ConnectionInfo, DurationMillis, ErrorSummary, MetadataField, MetadataValue,
+    ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent, SqlEventId, SqlEventKind,
+    Timestamp,
 };
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
@@ -28,6 +30,7 @@ pub use command::{
     MYSQL_COM_QUERY, MysqlClientCommand, MysqlComQuery, MysqlCommandKind, MysqlCommandParseError,
     parse_client_command,
 };
+pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use handshake::{
     MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
     MysqlInitialHandshake, parse_client_handshake_response, parse_initial_handshake,
@@ -336,12 +339,17 @@ impl MysqlConnectionState {
         } else {
             None
         };
+        let err_summary = if status == CaptureStatus::Error {
+            parse_err_packet_summary(packet.payload).ok().flatten()
+        } else {
+            None
+        };
 
         let Some(pending) = self.pending_query.take() else {
             return 0;
         };
         let ended = clock.now();
-        let event = self.query_event(pending, ended, status, ok_summary);
+        let event = self.query_event(pending, ended, status, ok_summary, err_summary);
 
         events.emit(event);
 
@@ -354,6 +362,7 @@ impl MysqlConnectionState {
         ended: MysqlObservationTime,
         status: CaptureStatus,
         ok_summary: Option<MysqlOkPacketSummary>,
+        err_summary: Option<MysqlErrPacketSummary>,
     ) -> SqlEvent {
         let duration = duration_millis(pending.started_monotonic, ended.monotonic);
         let event_id = SqlEventId(format!(
@@ -366,6 +375,18 @@ impl MysqlConnectionState {
         let result = ok_summary.map(|summary| ResultSummary {
             affected_rows: Some(summary.affected_rows),
             returned_rows: None,
+        });
+        let error = err_summary.map(|summary| ErrorSummary {
+            code: Some(summary.error_code.to_string()),
+            sql_state: summary.sql_state,
+            message: summary.message,
+            metadata: Some(ProtocolMetadata {
+                protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+                fields: vec![MetadataField {
+                    key: "mysql_error_code".to_owned(),
+                    value: MetadataValue::Unsigned(u64::from(summary.error_code)),
+                }],
+            }),
         });
         let mut metadata_fields = vec![
             MetadataField {
@@ -404,7 +425,7 @@ impl MysqlConnectionState {
             fingerprint: None,
             parameters: Vec::new(),
             result,
-            error: None,
+            error,
             timings: QueryTiming {
                 started_at: pending.started_at,
                 ended_at: Some(ended.timestamp),
@@ -1064,7 +1085,21 @@ mod tests {
         assert_eq!(events.events.len(), 1);
         assert!(state.pending_query().is_none());
         assert_sql_event(event, CaptureStatus::Error, "select bad", "query_error", 32);
-        assert_eq!(event.error, None);
+        assert_eq!(
+            event.error,
+            Some(ErrorSummary {
+                code: Some("1096".to_owned()),
+                sql_state: Some("HY000".to_owned()),
+                message: "No tables used".to_owned(),
+                metadata: Some(ProtocolMetadata {
+                    protocol: ProtocolName("mysql".to_owned()),
+                    fields: vec![MetadataField {
+                        key: "mysql_error_code".to_owned(),
+                        value: MetadataValue::Unsigned(1096),
+                    }],
+                }),
+            })
+        );
         assert_eq!(event.result, None);
         assert_eq!(event.metadata.fields.len(), 2);
     }
@@ -1161,6 +1196,49 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_keeps_malformed_err_summary_non_fatal() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[
+            (10, "query_start"),
+            (42, "query_error"),
+        ]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select malformed err", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let response = malformed_query_err_packet();
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("malformed ERR summary should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(events.events.len(), 1);
+        assert!(state.pending_query().is_none());
+        assert_sql_event(
+            event,
+            CaptureStatus::Error,
+            "select malformed err",
+            "query_error",
+            32,
+        );
+        assert_eq!(event.error, None);
+        assert_eq!(event.result, None);
+        assert_eq!(event.metadata.fields.len(), 2);
+    }
+
+    #[test]
     fn mysql_adapter_rejects_wrong_connection_state() {
         let adapter = MysqlProtocolAdapter::new();
         let mut state = WrongState;
@@ -1237,6 +1315,16 @@ mod tests {
     }
 
     fn query_err_packet() -> Vec<u8> {
+        let mut payload = vec![0xff];
+        payload.extend_from_slice(&1096u16.to_le_bytes());
+        payload.push(b'#');
+        payload.extend_from_slice(b"HY000");
+        payload.extend_from_slice(b"No tables used");
+
+        packet_with_sequence_id(payload, 1)
+    }
+
+    fn malformed_query_err_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![0xff], 1)
     }
 

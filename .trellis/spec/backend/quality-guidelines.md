@@ -2674,6 +2674,134 @@ SqlEvent {
 }
 ```
 
+## Scenario: MySQL ERR Packet Summary Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` decodes command ERR packet fields after `COM_QUERY` timing can emit failed events.
+- This layer populates protocol-neutral `ErrorSummary` and keeps MySQL vendor error-code details in error metadata.
+- It must not implement general SQL/PII redaction, error-code classification, authentication behavior changes, storage, API, WebSocket, or UI behavior.
+
+### 2. Signatures
+
+Public ERR parser contracts live in `crates/sql-lens-protocol-mysql/src/err.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlErrPacketSummary {
+    pub error_code: u16,
+    pub sql_state: Option<String>,
+    pub message: String,
+}
+
+pub fn parse_err_packet_summary(
+    payload: &[u8],
+) -> Result<Option<MysqlErrPacketSummary>, MysqlErrPacketParseError>;
+
+pub enum MysqlErrPacketParseError {
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+}
+```
+
+### 3. Contracts
+
+- Command ERR payloads with header `0xff` parse into `Some(MysqlErrPacketSummary)`.
+- Non-ERR payloads return `Ok(None)`.
+- Empty payloads return `IncompletePayload { field: "header" }`.
+- Error code is decoded as a 2-byte little-endian value.
+- SQLSTATE is decoded only when the payload has `#` followed by five bytes.
+- SQLSTATE bytes are decoded lossily to keep packet observation robust.
+- Error message bytes are decoded with lossy UTF-8.
+- Error message control characters are replaced before storing in `ErrorSummary`.
+- Parser and adapter code must not log raw database error messages or packet payloads.
+- Adapter-level ERR summary parsing is non-fatal: malformed summaries still finalize the pending query as `CaptureStatus::Error`, but leave `SqlEvent.error = None`.
+- Successful ERR summary parsing sets `SqlEvent.error = Some(ErrorSummary { code, sql_state, message, metadata })`.
+- `ErrorSummary.code` stores the MySQL vendor error code as a string.
+- `ErrorSummary.metadata` includes `mysql_error_code` as a MySQL protocol metadata field.
+- Failed query events keep `SqlEvent.result = None`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Payload starts with `0xff`, code, SQLSTATE, message | Return `Some` summary with all fields |
+| Payload starts with `0xff`, code, message without `#` SQLSTATE marker | Return summary with `sql_state = None` |
+| Payload starts with `0x00` | Return `Ok(None)` |
+| Payload is empty | Return `IncompletePayload { field: "header" }` |
+| Payload starts with `0xff` but error code is incomplete | Return `IncompletePayload { field: "error_code" }` |
+| Payload starts with `0xff`, marker `#`, incomplete SQLSTATE | Return `IncompletePayload { field: "sql_state" }` |
+| Message contains invalid UTF-8 bytes | Decode lossily and return a summary |
+| Message contains control characters | Store sanitized message without control characters |
+| COM_QUERY backend ERR summary parses | Emit error event with `ErrorSummary` |
+| COM_QUERY backend ERR summary is malformed | Emit error event with `error = None`; do not fail observation |
+| COM_QUERY backend OK packet is observed | Keep OK result summary behavior unchanged |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover official-style ERR payloads independently of adapter state.
+- Adapter tests assert `ErrorSummary.code`, `sql_state`, sanitized `message`, and `mysql_error_code` metadata.
+- Malformed ERR summaries are covered by an adapter regression test.
+
+Base:
+
+- Later redaction work can add stronger masking before persistence without changing packet field decoding.
+- Later error-code classification can add derived metadata after a product requirement exists.
+
+Bad:
+
+- Adding `mysql_error_code` or `mysql_sql_state` directly to `SqlEvent`.
+- Treating ERR summary parse errors as protocol observation failures.
+- Logging raw database error messages from parser, adapter, tests, or runtime code.
+- Adding broad redaction or error classification engines in the packet-summary task.
+
+### 6. Tests Required
+
+For MySQL ERR packet summary changes:
+
+- Parser test for official-style ERR packet with error code, SQLSTATE, and message.
+- Parser test for ERR packet without SQLSTATE.
+- Parser tests for incomplete header, error code, and SQLSTATE.
+- Parser test for lossy message decoding.
+- Parser test for message control-character sanitization.
+- Adapter test proving failed events include `ErrorSummary`.
+- Adapter test proving malformed ERR summaries stay non-fatal.
+- Adapter test proving OK events keep result summary behavior.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+tracing::error!(message = summary.message, "mysql query failed");
+```
+
+#### Correct
+
+```rust
+SqlEvent {
+    status: CaptureStatus::Error,
+    result: None,
+    error: Some(ErrorSummary {
+        code: Some(summary.error_code.to_string()),
+        sql_state: summary.sql_state,
+        message: summary.message,
+        metadata: Some(ProtocolMetadata {
+            protocol: ProtocolName("mysql".to_owned()),
+            fields: vec![MetadataField {
+                key: "mysql_error_code".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(summary.error_code)),
+            }],
+        }),
+    }),
+    // remaining event fields are protocol-neutral
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger
