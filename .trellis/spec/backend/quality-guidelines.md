@@ -2285,6 +2285,139 @@ pub struct MysqlAuthenticationResult {
 }
 ```
 
+## Scenario: MySQL COM_QUERY Parser Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` parses client-to-backend MySQL command packets after authentication.
+- This layer records safe MySQL-specific command metadata needed by later query timing and SQL event capture tasks.
+- It must not measure duration, inspect backend responses, emit SQL events, normalize SQL, fingerprint SQL, redact SQL, parse prepared statements, or update protocol-neutral core models.
+
+### 2. Signatures
+
+Public command parser types live in `crates/sql-lens-protocol-mysql/src/command.rs` and are re-exported from the crate root:
+
+```rust
+pub const MYSQL_COM_QUERY: u8 = 0x03;
+
+pub enum MysqlCommandKind {
+    Query,
+}
+
+pub struct MysqlComQuery {
+    pub sql: String,
+}
+
+pub struct MysqlClientCommand {
+    pub kind: MysqlCommandKind,
+    pub sequence_id: u8,
+    pub sql: String,
+}
+
+pub fn parse_client_command(
+    payload: &[u8],
+) -> Result<Option<MysqlComQuery>, MysqlCommandParseError>;
+
+pub enum MysqlCommandParseError {
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+    InvalidUtf8 { field: &'static str },
+}
+```
+
+`MysqlConnectionState` exposes the latest parsed command metadata:
+
+```rust
+impl MysqlConnectionState {
+    pub fn last_client_command(&self) -> Option<&MysqlClientCommand>;
+}
+```
+
+### 3. Contracts
+
+- Client command observation happens only when phase is `Authenticated`.
+- `observe_client_bytes` always increments observed client bytes and returns `ProtocolObservation::new(bytes.len(), 0)`.
+- A payload starting with `MYSQL_COM_QUERY` parses the remaining payload bytes as UTF-8 SQL text.
+- Empty SQL text is valid and stored as an empty string; server-side rejection belongs to later response handling.
+- Invalid UTF-8 SQL text returns `MysqlCommandParseError::InvalidUtf8 { field: "sql" }`.
+- Empty command payload returns `MysqlCommandParseError::IncompletePayload { field: "command" }`.
+- Unsupported command bytes return `Ok(None)`.
+- Adapter observation treats unsupported, incomplete, malformed, and invalid-UTF-8 command packets as non-fatal and non-transitioning.
+- Parsed command state is MySQL-specific and must not be projected into `SqlEvent` or `ConnectionInfo` in this task.
+- Command observation emits zero SQL events.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty command payload | Return `IncompletePayload { field: "command" }` |
+| Payload starts with `0x03` and valid UTF-8 SQL | Return `Some(MysqlComQuery)` |
+| Payload is exactly `[0x03]` | Return `Some(MysqlComQuery { sql: "" })` |
+| Payload starts with `0x03` and invalid UTF-8 SQL | Return `InvalidUtf8 { field: "sql" }` |
+| Payload starts with another command byte | Return `Ok(None)` |
+| COM_QUERY before `Authenticated` | Count bytes only; do not update command state; emit zero events |
+| COM_QUERY after `Authenticated` | Store `MysqlClientCommand { kind: Query, sequence_id, sql }`; keep phase `Authenticated`; emit zero events |
+| Unsupported command after `Authenticated` | Keep phase `Authenticated`; do not update command state; emit zero events |
+| Invalid command packet after `Authenticated` | Keep phase `Authenticated`; do not update command state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover valid SQL text, empty SQL text, unsupported commands, empty payloads, and invalid UTF-8.
+- Adapter tests first authenticate the connection, then observe command packets.
+- The packet envelope sequence ID is retained only in MySQL-specific command metadata.
+
+Base:
+
+- Later timing work can replace `last_client_command` with a pending-command slot without changing the standalone parser contract.
+- Later character-set support can refine SQL decoding while preserving non-fatal adapter behavior.
+
+Bad:
+
+- Emitting `SqlEvent` from command parsing before timing and backend response finalization exist.
+- Adding SQL text fields to protocol-neutral connection models.
+- Logging raw SQL text from parser or adapter code.
+- Blocking forwarding on storage, UI, plugin, or capture pipeline work.
+- Parsing prepared statements or other command kinds in the `COM_QUERY` task.
+
+### 6. Tests Required
+
+For MySQL `COM_QUERY` parser changes:
+
+- Parser test for valid `COM_QUERY` SQL text.
+- Parser test for empty `COM_QUERY` SQL text.
+- Parser test for unsupported command byte.
+- Parser tests for empty payload and invalid UTF-8.
+- Adapter test proving `COM_QUERY` before authentication does not update command state.
+- Adapter test proving `COM_QUERY` after authentication stores kind, sequence ID, and SQL text.
+- Adapter test proving unsupported commands after authentication stay non-fatal.
+- Adapter test proving invalid or malformed command packets after authentication stay non-fatal.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct SqlEvent {
+    pub mysql_command: u8,
+    pub sql: String,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlClientCommand {
+    pub kind: MysqlCommandKind,
+    pub sequence_id: u8,
+    pub sql: String,
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

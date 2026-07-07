@@ -1,6 +1,7 @@
 //! MySQL-compatible protocol adapter for SQL Lens.
 
 mod authentication;
+mod command;
 mod handshake;
 mod packet;
 
@@ -13,6 +14,10 @@ use sql_lens_protocol::{
 pub use authentication::{
     MysqlAuthenticationResult, MysqlAuthenticationResultParseError, MysqlAuthenticationStatus,
     parse_authentication_result,
+};
+pub use command::{
+    MYSQL_COM_QUERY, MysqlClientCommand, MysqlComQuery, MysqlCommandKind, MysqlCommandParseError,
+    parse_client_command,
 };
 pub use handshake::{
     MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
@@ -67,6 +72,7 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
         let state = self.state_mut(state)?;
         state.client_bytes_observed += bytes.len();
         state.observe_client_handshake_response(bytes);
+        state.observe_client_command(bytes);
 
         Ok(ProtocolObservation::new(bytes.len(), 0))
     }
@@ -104,6 +110,7 @@ pub struct MysqlConnectionState {
     initial_handshake: Option<MysqlInitialHandshake>,
     client_handshake: Option<MysqlClientHandshakeResponse>,
     authentication_result: Option<MysqlAuthenticationResult>,
+    last_client_command: Option<MysqlClientCommand>,
 }
 
 impl MysqlConnectionState {
@@ -129,6 +136,10 @@ impl MysqlConnectionState {
 
     pub fn authentication_result(&self) -> Option<&MysqlAuthenticationResult> {
         self.authentication_result.as_ref()
+    }
+
+    pub fn last_client_command(&self) -> Option<&MysqlClientCommand> {
+        self.last_client_command.as_ref()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -191,6 +202,26 @@ impl MysqlConnectionState {
             MysqlAuthenticationStatus::Failed => MysqlConnectionPhase::AuthenticationFailed,
         };
         self.authentication_result = Some(result);
+    }
+
+    fn observe_client_command(&mut self, bytes: &[u8]) {
+        if self.phase != MysqlConnectionPhase::Authenticated {
+            return;
+        }
+
+        let Ok(packet) = parse_mysql_packet(bytes) else {
+            return;
+        };
+
+        let Ok(Some(query)) = parse_client_command(packet.payload) else {
+            return;
+        };
+
+        self.last_client_command = Some(MysqlClientCommand {
+            kind: MysqlCommandKind::Query,
+            sequence_id: packet.header.sequence_id,
+            sql: query.sql,
+        });
     }
 }
 
@@ -265,6 +296,7 @@ mod tests {
         assert!(state.initial_handshake().is_none());
         assert!(state.client_handshake().is_none());
         assert!(state.authentication_result().is_none());
+        assert!(state.last_client_command().is_none());
     }
 
     #[test]
@@ -598,6 +630,126 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_does_not_observe_com_query_before_authentication() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake(&adapter, state.as_mut(), &mut events);
+        let packet = com_query_packet("select 1", 0);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("client command bytes should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
+        assert!(state.last_client_command().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_observes_com_query_after_authentication() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = com_query_packet("select * from users", 0);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_QUERY should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("client command should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(command.kind, MysqlCommandKind::Query);
+        assert_eq!(command.sequence_id, 0);
+        assert_eq!(command.sql, "select * from users");
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_authenticated_phase_for_unsupported_command() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = unsupported_command_packet();
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("unsupported command should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert!(state.last_client_command().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_authenticated_phase_for_invalid_utf8_com_query() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = invalid_utf8_com_query_packet();
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("invalid SQL bytes should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert!(state.last_client_command().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_authenticated_phase_for_malformed_command() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = packet_with_sequence_id(Vec::new(), 0);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("malformed command should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert!(state.last_client_command().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_rejects_wrong_connection_state() {
         let adapter = MysqlProtocolAdapter::new();
         let mut state = WrongState;
@@ -665,6 +817,21 @@ mod tests {
         packet_with_sequence_id(vec![0xfe, b'a', b'u', b't', b'h'], 2)
     }
 
+    fn com_query_packet(sql: &str, sequence_id: u8) -> Vec<u8> {
+        let mut payload = vec![MYSQL_COM_QUERY];
+        payload.extend_from_slice(sql.as_bytes());
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn unsupported_command_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![0x01, b'x'], 0)
+    }
+
+    fn invalid_utf8_com_query_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![MYSQL_COM_QUERY, 0xff], 0)
+    }
+
     fn observe_complete_handshake(
         adapter: &MysqlProtocolAdapter,
         state: &mut dyn ProtocolConnectionState,
@@ -676,6 +843,17 @@ mod tests {
         adapter
             .observe_client_bytes(state, &client_handshake_response_packet(), events)
             .expect("client handshake response should be observed");
+    }
+
+    fn observe_authenticated_connection(
+        adapter: &MysqlProtocolAdapter,
+        state: &mut dyn ProtocolConnectionState,
+        events: &mut VecCaptureEventEmitter,
+    ) {
+        observe_complete_handshake(adapter, state, events);
+        adapter
+            .observe_backend_bytes(state, &authentication_ok_packet(), events)
+            .expect("authentication OK should be observed");
     }
 
     fn packet_with_sequence_id(payload: Vec<u8>, sequence_id: u8) -> Vec<u8> {

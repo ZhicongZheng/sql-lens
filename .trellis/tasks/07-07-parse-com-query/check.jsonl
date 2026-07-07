@@ -1,0 +1,4 @@
+{"path":".trellis/tasks/07-07-parse-com-query/prd.md","kind":"task","reason":"Verify acceptance criteria were satisfied."}
+{"path":".trellis/tasks/07-07-parse-com-query/implement.md","kind":"task","reason":"Verify implementation checklist and validation commands."}
+{"path":".trellis/spec/backend/quality-guidelines.md","kind":"spec","reason":"Verify spec update and backend contract compliance."}
+{"path":"crates/sql-lens-protocol-mysql/src/lib.rs","kind":"code","reason":"Review adapter state-machine behavior and event count."}

@@ -1,0 +1,5 @@
+{"path":".trellis/tasks/07-07-parse-com-query/prd.md","kind":"task","reason":"Requirements and acceptance criteria for Issue 043."}
+{"path":".trellis/tasks/07-07-parse-com-query/design.md","kind":"task","reason":"Technical boundary and parser/state design for COM_QUERY."}
+{"path":".trellis/spec/backend/quality-guidelines.md","kind":"spec","reason":"Backend protocol contracts and quality gate expectations."}
+{"path":"crates/sql-lens-protocol-mysql/src/lib.rs","kind":"code","reason":"MySQL adapter and connection state to extend."}
+{"path":"crates/sql-lens-protocol-mysql/src/packet.rs","kind":"code","reason":"Existing packet envelope parser used before command parsing."}
