@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 33
+- **Total Sessions**: 34
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1104 | Active |
+| `journal-1.md` | ~1137 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 34 | 2026-07-07 | Implement SQL WebSocket subscription | `6c7ff2b` | `main` |
 | 33 | 2026-07-07 | Add SQL WebSocket server foundation | `1c35097` | `main` |
 | 32 | 2026-07-07 | Add MySQL packet fixture tests | `99bbb0a` | `main` |
 | 31 | 2026-07-07 | Parse MySQL packet headers | `478373c` | `main` |

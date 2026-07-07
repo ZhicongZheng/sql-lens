@@ -1102,3 +1102,36 @@ Added the /ws/sql WebSocket upgrade route, initial ping heartbeat lifecycle, Web
 ### Next Steps
 
 - None - task complete
+
+
+## Session 34: Implement SQL WebSocket subscription
+
+**Date**: 2026-07-07
+**Task**: Implement SQL WebSocket subscription
+**Branch**: `main`
+
+### Summary
+
+Added API-local SQL event broadcaster, subscribe-gated /ws/sql delivery, sql_event.created WebSocket messages, subscription tests, and updated API/backend documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6c7ff2b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
