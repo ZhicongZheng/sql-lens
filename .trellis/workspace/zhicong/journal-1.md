@@ -970,3 +970,36 @@ Standardized REST API error envelopes, added request ID injection into error bod
 ### Next Steps
 
 - None - task complete
+
+
+## Session 30: Add MySQL protocol adapter foundation
+
+**Date**: 2026-07-07
+**Task**: Add MySQL protocol adapter foundation
+**Branch**: `main`
+
+### Summary
+
+Added the sql-lens-protocol-mysql adapter foundation, mysql registry compatibility tests, no-op byte observation, and backend contract documentation.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bc5ec8f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
