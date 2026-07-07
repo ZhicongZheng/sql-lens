@@ -1135,3 +1135,36 @@ Added API-local SQL event broadcaster, subscribe-gated /ws/sql delivery, sql_eve
 ### Next Steps
 
 - None - task complete
+
+
+## Session 35: Add WebSocket subscription filters
+
+**Date**: 2026-07-07
+**Task**: Add WebSocket subscription filters
+**Branch**: `main`
+
+### Summary
+
+Implemented filtered /ws/sql subscriptions with protocol, status, database, and duration predicates; added subscription.error handling and tests; updated API docs and backend WebSocket contract spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4c7b08b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
