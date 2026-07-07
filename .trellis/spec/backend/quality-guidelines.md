@@ -1704,6 +1704,94 @@ pub trait ProtocolAdapter {
 
 > Gotcha: when downcasting a boxed state in callers or tests, use `state.as_ref().as_any()` or `state.as_mut().as_any_mut()`. Calling `state.as_any()` directly on `Box<dyn ProtocolConnectionState>` can target the box's blanket implementation instead of the inner state.
 
+## Scenario: MySQL Protocol Adapter Foundation
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` provides the first concrete protocol adapter crate.
+- The first MySQL adapter foundation must prove registry integration without implementing packet parsing.
+- MySQL-specific parser state belongs inside `sql-lens-protocol-mysql`, not in protocol-neutral crates.
+
+### 2. Signatures
+
+Public MySQL adapter types live in `crates/sql-lens-protocol-mysql/src/lib.rs`:
+
+```rust
+pub const MYSQL_PROTOCOL_NAME: &str = "mysql";
+
+pub struct MysqlProtocolAdapter;
+
+impl MysqlProtocolAdapter {
+    pub fn new() -> Self;
+}
+
+pub struct MysqlConnectionState;
+
+impl MysqlConnectionState {
+    pub fn client_bytes_observed(&self) -> usize;
+    pub fn backend_bytes_observed(&self) -> usize;
+}
+```
+
+Allowed dependencies:
+
+```toml
+sql-lens-core = { path = "../sql-lens-core" }
+sql-lens-protocol = { path = "../sql-lens-protocol" }
+```
+
+### 3. Contracts
+
+- `MysqlProtocolAdapter::protocol_name()` returns `ProtocolName("mysql")`.
+- `create_connection_state` returns boxed `MysqlConnectionState`.
+- `observe_client_bytes` downcasts to `MysqlConnectionState`, increments observed client bytes, returns `ProtocolObservation::new(bytes.len(), 0)`, and emits no events.
+- `observe_backend_bytes` downcasts to `MysqlConnectionState`, increments observed backend bytes, returns `ProtocolObservation::new(bytes.len(), 0)`, and emits no events.
+- Wrong state type returns `ProtocolAdapterError::InvalidConnectionState { expected: "MysqlConnectionState" }`.
+- The adapter can be registered and resolved through `ProtocolAdapterRegistry`.
+- Packet framing, handshake observation, authentication, commands, prepared statements, parameter decoding, and event emission belong to later MySQL protocol tasks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Adapter protocol name requested | Return `mysql` |
+| Adapter registered in registry | Resolve succeeds for `ProtocolName("mysql")` |
+| Connection state created | State downcasts to `MysqlConnectionState` |
+| Client bytes observed | Return byte count and zero emitted events |
+| Backend bytes observed | Return byte count and zero emitted events |
+| Wrong connection state passed | Return `InvalidConnectionState` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- The adapter is a no-op parser foundation that proves crate wiring and registry compatibility.
+- Tests assert zero emitted events until parsing tasks exist.
+
+Base:
+
+- Future packet parsing can extend `MysqlConnectionState` without changing the shared adapter trait.
+
+Bad:
+
+- Emitting placeholder SQL events from raw bytes before MySQL parsing exists.
+- Adding packet header parsing in the adapter foundation task.
+- Adding dependencies on proxy, capture, storage, API, app, or async runtime crates.
+
+### 6. Tests Required
+
+For MySQL adapter foundation changes:
+
+- Protocol name test.
+- Registry register/resolve test.
+- State downcast test.
+- Client/backend byte observation test.
+- Wrong-state error test.
+- Run `cargo fmt --check`.
+- Run `cargo check --workspace`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

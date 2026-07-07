@@ -579,6 +579,10 @@ dependencies = [
 [[package]]
 name = "sql-lens-protocol-mysql"
 version = "0.1.0"
+dependencies = [
+ "sql-lens-core",
+ "sql-lens-protocol",
+]
 
 [[package]]
 name = "sql-lens-proxy"

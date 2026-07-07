@@ -6,4 +6,5 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-
+sql-lens-core = { path = "../sql-lens-core" }
+sql-lens-protocol = { path = "../sql-lens-protocol" }
