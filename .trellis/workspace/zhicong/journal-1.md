@@ -871,3 +871,36 @@ Added storage-backed connection store, API state connection storage, GET /api/v1
 ### Next Steps
 
 - None - task complete
+
+
+## Session 27: Implement statistics endpoint
+
+**Date**: 2026-07-07
+**Task**: Implement statistics endpoint
+**Branch**: `main`
+
+### Summary
+
+Added the live statistics REST endpoint, exact recent latency percentiles, API state wiring, tests, and updated the API/backend contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c1f6148` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
