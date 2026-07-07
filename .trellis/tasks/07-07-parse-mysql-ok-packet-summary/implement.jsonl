@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend protocol adapter, MySQL COM_QUERY timing, metadata, and test contracts."}
+{"file": ".trellis/tasks/07-07-parse-mysql-ok-packet-summary/research/mysql-ok-packet.md", "reason": "MySQL OK packet layout and length-encoded integer decoding notes for this task."}

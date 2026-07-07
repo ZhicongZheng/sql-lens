@@ -2552,6 +2552,128 @@ SqlEvent {
 }
 ```
 
+## Scenario: MySQL OK Packet Summary Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` decodes basic command OK packet fields after `COM_QUERY` timing can emit successful events.
+- This layer populates protocol-neutral `ResultSummary.affected_rows` and keeps MySQL status flags in metadata.
+- It must not implement result-set lifecycle parsing, EOF-as-OK handling, warning/info/session-state decoding, storage, API, WebSocket, or UI behavior.
+
+### 2. Signatures
+
+Public OK parser contracts live in `crates/sql-lens-protocol-mysql/src/ok.rs` and are re-exported from the crate root:
+
+```rust
+pub struct MysqlOkPacketSummary {
+    pub affected_rows: u64,
+    pub status_flags: Option<u16>,
+}
+
+pub fn parse_ok_packet_summary(
+    payload: &[u8],
+) -> Result<Option<MysqlOkPacketSummary>, MysqlOkPacketParseError>;
+
+pub enum MysqlOkPacketParseError {
+    IncompletePayload { field: &'static str, needed: usize, available: usize },
+    InvalidLengthEncodedInteger { field: &'static str, marker: u8 },
+}
+```
+
+### 3. Contracts
+
+- Command OK payloads with header `0x00` parse into `Some(MysqlOkPacketSummary)`.
+- Non-OK payloads return `Ok(None)`.
+- Empty payloads return `IncompletePayload { field: "header" }`.
+- `affected_rows` is decoded as a MySQL length-encoded integer.
+- `last_insert_id` is decoded only to advance the payload offset; it is not exposed in core models.
+- `status_flags` is decoded as a 2-byte little-endian value when at least two bytes remain.
+- One-byte, `0xfc`, `0xfd`, and `0xfe` length-encoded integer forms are supported.
+- `0xfb` and `0xff` length-encoded integer markers are invalid for OK summary integer fields.
+- Adapter-level OK summary parsing is non-fatal: malformed summaries still finalize the pending query as `CaptureStatus::Ok`, but leave `SqlEvent.result = None`.
+- Successful OK summary parsing sets `SqlEvent.result = Some(ResultSummary { affected_rows: Some(value), returned_rows: None })`.
+- Successful OK summary parsing adds `ok_status_flags` to MySQL metadata when status flags are present.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Payload starts with `0x00`, affected rows `0`, status flags present | Return `Some` summary with `affected_rows = 0` and status flags |
+| Payload starts with `0x00`, affected rows uses `0xfc` | Decode the 2-byte little-endian value |
+| Payload starts with `0xff` | Return `Ok(None)` |
+| Payload is empty | Return `IncompletePayload { field: "header" }` |
+| Length-encoded integer marker is incomplete | Return `IncompletePayload` for the current field |
+| Length-encoded integer marker is `0xfb` or `0xff` | Return `InvalidLengthEncodedInteger` |
+| COM_QUERY backend OK summary parses | Emit OK event with affected rows and metadata status flags |
+| COM_QUERY backend OK summary is malformed | Emit OK event with `result = None`; do not fail observation |
+| COM_QUERY backend ERR packet is observed | Keep `result = None` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover fixture OK payloads independently of adapter state.
+- Adapter tests assert `ResultSummary.affected_rows`, `returned_rows = None`, and `ok_status_flags`.
+- Malformed OK summaries are covered by an adapter regression test.
+
+Base:
+
+- Later OK parser tasks can expose warning count or info through MySQL metadata after a product requirement exists.
+- Later result-set lifecycle work can populate `returned_rows` without changing affected-row OK parsing.
+
+Bad:
+
+- Adding `last_insert_id`, `status_flags`, or warning counts directly to `SqlEvent` or `ResultSummary`.
+- Treating OK summary parse errors as protocol observation failures.
+- Adding a broad MySQL binary codec abstraction before more packet families need it.
+- Parsing packet payloads into logs or error messages.
+
+### 6. Tests Required
+
+For MySQL OK packet summary changes:
+
+- Parser test for official-style OK packet with affected rows `0` and status flags.
+- Parser test for non-zero affected rows.
+- Parser tests for one-byte and `0xfc` length-encoded integer forms.
+- Parser tests for incomplete and invalid length-encoded integer forms.
+- Adapter test proving successful OK events include affected rows and status flag metadata.
+- Adapter test proving malformed OK summaries stay non-fatal.
+- Adapter test proving ERR events keep `result = None`.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct SqlEvent {
+    pub mysql_status_flags: u16,
+    pub last_insert_id: u64,
+}
+```
+
+#### Correct
+
+```rust
+SqlEvent {
+    result: Some(ResultSummary {
+        affected_rows: Some(summary.affected_rows),
+        returned_rows: None,
+    }),
+    metadata: ProtocolMetadata {
+        protocol: ProtocolName("mysql".to_owned()),
+        fields: vec![MetadataField {
+            key: "ok_status_flags".to_owned(),
+            value: MetadataValue::Unsigned(u64::from(status_flags)),
+        }],
+    },
+    // remaining event fields are protocol-neutral
+}
+```
+
 ## Scenario: Proxy Graceful Shutdown Contracts
 
 ### 1. Scope / Trigger

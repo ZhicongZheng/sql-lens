@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Quality gate expectations for backend protocol changes and required Rust checks."}
+{"file": ".trellis/tasks/07-07-parse-mysql-ok-packet-summary/research/mysql-ok-packet.md", "reason": "Verify parser behavior against the documented OK packet field layout."}
