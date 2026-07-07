@@ -220,6 +220,8 @@ Client subscription:
 }
 ```
 
+Current implementation requires a `subscribe` message before sending live events. Filters are part of the documented protocol shape but are applied by a later WebSocket filters task; until then, subscription messages with `filters` are accepted and delivered as an unfiltered live stream.
+
 Server event:
 
 ```json

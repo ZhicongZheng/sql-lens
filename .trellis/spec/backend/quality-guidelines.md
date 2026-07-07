@@ -2245,6 +2245,101 @@ For WebSocket foundation changes:
 - Run `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
+## Scenario: SQL WebSocket Subscription Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` broadcasts live `SqlEvent` values to `/ws/sql` subscribers.
+- This layer owns API-local WebSocket fan-out and message serialization.
+- It must not wire proxy/runtime capture receivers, implement filters, replay history, authenticate users, or add MySQL-specific behavior.
+
+### 2. Signatures
+
+API-local broadcast types live in `crates/sql-lens-api/src/live_sql_events.rs` and are re-exported from `lib.rs`:
+
+```rust
+pub const DEFAULT_SQL_EVENT_BROADCAST_CAPACITY: usize = 1024;
+
+pub struct SqlEventBroadcaster;
+pub struct SqlEventSubscription;
+
+impl SqlEventBroadcaster {
+    pub fn new(capacity: std::num::NonZeroUsize) -> Self;
+    pub fn publish(&self, event: sql_lens_core::SqlEvent) -> SqlEventBroadcastOutcome;
+    pub fn subscribe(&self) -> SqlEventSubscription;
+    pub fn subscriber_count(&self) -> usize;
+    pub fn stats(&self) -> SqlEventBroadcastStats;
+}
+```
+
+Allowed dependency shape:
+
+```toml
+serde_json = "1.0"
+tokio = { version = "1", features = ["net", "sync"] }
+```
+
+Do not add capture, proxy, app runtime, auth, filter engines, OpenAPI, or frontend dependencies for this subscription layer.
+
+### 3. Contracts
+
+- `ApiState` owns a `SqlEventBroadcaster` and exposes a cloneable accessor for tests and future runtime composition.
+- `SqlEventBroadcaster` uses `tokio::sync::broadcast` so multiple WebSocket clients can receive the same live event without blocking publishers.
+- `publish` is non-async and must not wait on WebSocket clients.
+- If there are no subscribers, `publish` returns `NoSubscribers` and records the condition without treating it as a hard error.
+- A socket must send a valid JSON text message with `type = "subscribe"` and `version = 1` before receiving SQL events.
+- Malformed, unsupported, or wrong-version subscription messages are ignored while the socket continues waiting for a valid subscribe.
+- After subscription, server messages are JSON text frames with `type`, `version`, and `payload`.
+- `sql_event.created` payloads reuse `SqlEventSummaryResponse` mapping.
+- Subscriber lag is local to that subscriber; lagged receivers skip missed events and continue with newer retained events.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Publish with one active subscriber | Return `Delivered { subscriber_count: 1 }`; subscriber can receive the event |
+| Publish with no subscribers | Return `NoSubscribers`; do not fail the caller |
+| Subscriber lags beyond broadcast capacity | Report lag locally and continue reading retained events |
+| Socket has not sent valid subscribe | Do not forward SQL events to that socket |
+| Socket sends malformed subscribe text | Ignore and keep waiting |
+| Socket sends valid subscribe | Start forwarding future broadcast SQL events |
+| Socket receives live event | Send `sql_event.created` JSON text with `version: 1` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Tests publish through `ApiState::sql_event_broadcaster()` into a running `/ws/sql` server.
+- WebSocket payloads reuse the REST SQL event summary DTO.
+- Invalid subscribe messages do not close the socket before an error-frame protocol exists.
+
+Base:
+
+- Future `sql-lens-app` runtime fan-out can read from `CaptureEventReceiver` and call `SqlEventBroadcaster::publish`.
+- Future Issue 036 can add filters after the subscribe state exists.
+
+Bad:
+
+- Letting each WebSocket client read directly from the single-consumer capture `mpsc` receiver.
+- Sending historical ring-buffer events as part of live subscription.
+- Blocking publishers until slow WebSocket clients read messages.
+- Adding MySQL-specific fields to WebSocket message envelopes.
+
+### 6. Tests Required
+
+For SQL WebSocket subscription changes:
+
+- Broadcast unit test for delivery to one subscriber.
+- Broadcast unit test for no-subscriber publish behavior.
+- Broadcast lag test.
+- WebSocket test proving events are not sent before valid subscribe.
+- WebSocket test proving invalid subscribe messages are ignored and valid subscribe can still succeed.
+- WebSocket test proving a subscribed client receives `sql_event.created`.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-api`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Scenario: REST Error Response Contracts
 
 ### 1. Scope / Trigger

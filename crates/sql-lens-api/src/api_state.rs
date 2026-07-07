@@ -3,6 +3,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 use sql_lens_storage::{ConnectionStore, LiveStatistics, RingBufferStore};
 use tokio::sync::RwLock;
 
+use crate::SqlEventBroadcaster;
+
 pub const DEFAULT_EVENT_STORE_CAPACITY: usize = 100_000;
 pub const DEFAULT_CONNECTION_STORE_CAPACITY: usize = 10_000;
 
@@ -11,6 +13,7 @@ pub struct ApiState {
     event_store: Arc<RwLock<RingBufferStore>>,
     connection_store: Arc<RwLock<ConnectionStore>>,
     live_statistics: Arc<RwLock<LiveStatistics>>,
+    sql_event_broadcaster: SqlEventBroadcaster,
 }
 
 impl ApiState {
@@ -33,6 +36,7 @@ impl ApiState {
             event_store: Arc::new(RwLock::new(event_store)),
             connection_store: Arc::new(RwLock::new(connection_store)),
             live_statistics: Arc::new(RwLock::new(live_statistics)),
+            sql_event_broadcaster: SqlEventBroadcaster::default(),
         }
     }
 
@@ -46,6 +50,10 @@ impl ApiState {
 
     pub fn live_statistics(&self) -> Arc<RwLock<LiveStatistics>> {
         Arc::clone(&self.live_statistics)
+    }
+
+    pub fn sql_event_broadcaster(&self) -> SqlEventBroadcaster {
+        self.sql_event_broadcaster.clone()
     }
 }
 
