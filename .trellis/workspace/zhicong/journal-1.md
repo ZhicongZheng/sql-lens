@@ -1069,3 +1069,36 @@ Added ASCII hex golden fixtures for MySQL packet framing, fixture-loader unit te
 ### Next Steps
 
 - None - task complete
+
+
+## Session 33: Add SQL WebSocket server foundation
+
+**Date**: 2026-07-07
+**Task**: Add SQL WebSocket server foundation
+**Branch**: `main`
+
+### Summary
+
+Added the /ws/sql WebSocket upgrade route, initial ping heartbeat lifecycle, WebSocket client tests, Axum ws/dev dependencies, and backend quality guidance for the WebSocket foundation contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1c35097` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
