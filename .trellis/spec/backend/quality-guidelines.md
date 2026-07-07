@@ -3115,6 +3115,12 @@ pub fn decode_numeric_parameters(
     parameter_count: u16,
     null_parameter_indexes: &[usize],
 ) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError>;
+
+pub fn decode_parameters(
+    parameter_payload_after_null_bitmap: &[u8],
+    parameter_count: u16,
+    null_parameter_indexes: &[usize],
+) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError>;
 ```
 
 `MysqlConnectionState` exposes decoded numeric parameters only through MySQL-local execute envelope state:
@@ -3122,7 +3128,7 @@ pub fn decode_numeric_parameters(
 ```rust
 pub struct MysqlStatementExecuteEnvelope {
     pub null_parameter_indexes: Vec<usize>,
-    pub numeric_parameters: Vec<MysqlDecodedParameter>,
+    pub parameters: Vec<MysqlDecodedParameter>,
 }
 ```
 
@@ -3141,7 +3147,7 @@ pub struct MysqlStatementExecuteEnvelope {
 - Unsupported type codes are non-fatal unsupported; return `Ok(None)` and do not expose partial decoded parameter state.
 - Truncated bind flag, parameter type metadata, or numeric value bytes return `MysqlExecuteParseError::IncompletePayload`.
 - Adapter-level numeric parsing runs only when the execute statement ID is known and has connection-local `MysqlPreparedStatement` metadata.
-- Unknown statement IDs remain non-fatal and store `numeric_parameters = Vec::new()`.
+- Unknown statement IDs remain non-fatal and store `parameters = Vec::new()`.
 - Malformed numeric payloads are non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope`.
 - Raw parameter payload bytes must not be stored in connection state.
 - Numeric parameter decoding emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
@@ -3174,7 +3180,7 @@ Good:
 
 Base:
 
-- Later string/binary/date/time tasks can add supported type-code branches without changing this numeric contract.
+- String/binary/date/time tasks can add supported type-code branches without changing the NULL bitmap or bind-flag contract.
 - Later expanded SQL rendering can consume MySQL-local decoded parameters or convert them into core `SqlParameter` values.
 - Later per-statement type caching can add support for `new_params_bind_flag = 0`.
 
@@ -3198,7 +3204,7 @@ For MySQL `COM_STMT_EXECUTE` numeric parameter changes:
 - Parser test for `new_params_bind_flag = 0` returning unsupported `None`.
 - Parser test for unsupported type code returning unsupported `None`.
 - Parser tests for missing bind flag, truncated type metadata, and truncated numeric value bytes.
-- Adapter test proving known statement IDs store decoded numeric parameters.
+- Adapter test proving known statement IDs store decoded parameters.
 - Adapter test proving malformed numeric payloads stay non-fatal and do not update execute state.
 - Regression test coverage that existing execute envelope, NULL bitmap, prepare, and query behavior remains unchanged.
 - Run `cargo fmt --check`.
@@ -3222,6 +3228,126 @@ if new_params_bind_flag == 0 {
 if new_params_bind_flag != 1 {
     return Ok(None);
 }
+```
+
+## Scenario: MySQL COM_STMT_EXECUTE String and Binary Parameter Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` decodes common string-like and binary prepared statement parameters inside client-to-backend `COM_STMT_EXECUTE` parameter payloads.
+- This layer records MySQL-local decoded parameter values when prepared statement metadata is known and current-packet parameter type metadata is present.
+- It must not implement cross-execute parameter type caching, date/time/decimal/JSON decoding, expanded SQL rendering, redaction, storage/API/UI contracts, or protocol-neutral event emission.
+
+### 2. Signatures
+
+Common parameter decoding lives in `crates/sql-lens-protocol-mysql/src/execute.rs` and is re-exported from the crate root:
+
+```rust
+pub fn decode_parameters(
+    parameter_payload_after_null_bitmap: &[u8],
+    parameter_count: u16,
+    null_parameter_indexes: &[usize],
+) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError>;
+```
+
+`MysqlStatementExecuteEnvelope` stores decoded values in a protocol-local field:
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub null_parameter_indexes: Vec<usize>,
+    pub parameters: Vec<MysqlDecodedParameter>,
+}
+```
+
+### 3. Contracts
+
+- Decode string and binary values only after NULL bitmap decoding has identified NULL parameter indexes.
+- `new_params_bind_flag = 1` means current-packet parameter type metadata is present and can be decoded.
+- `new_params_bind_flag = 0` remains non-fatal unsupported until a later type-cache task exists.
+- Text type codes are `VARCHAR`, `VAR_STRING`, `STRING`, `ENUM`, and `SET`.
+- Binary summary type codes are `TINY_BLOB`, `MEDIUM_BLOB`, `LONG_BLOB`, `BLOB`, `BIT`, and `GEOMETRY`.
+- Text and binary values are MySQL length-encoded byte strings.
+- Text values decode to `SqlParameterValue::String` with UTF-8 lossy replacement for invalid byte sequences.
+- Binary values decode to `SqlParameterValue::BinarySummary` with total byte length and a short lowercase hex prefix.
+- Binary summaries must not contain full raw binary payloads when the value is longer than the summary prefix.
+- NULL parameter indexes produce `SqlParameterValue::Null` and do not consume value bytes.
+- Unsupported type codes are non-fatal unsupported; return `Ok(None)` and do not expose partial decoded parameter state.
+- Truncated length prefixes or value bytes return `MysqlExecuteParseError::IncompletePayload`.
+- Invalid length-encoded integer markers return `MysqlExecuteParseError::InvalidLengthEncodedInteger`.
+- Adapter-level parameter parsing runs only when the execute statement ID is known and has connection-local `MysqlPreparedStatement` metadata.
+- Unknown statement IDs remain non-fatal and store `parameters = Vec::new()`.
+- Malformed parameter payloads are non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope`.
+- Raw parameter payload bytes must not be stored in connection state.
+- Parameter decoding emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Supported text value with valid UTF-8 | Decode as `SqlParameterValue::String` |
+| Supported text value with invalid UTF-8 | Decode as `SqlParameterValue::String` with replacement characters |
+| Supported binary value | Decode as `SqlParameterValue::BinarySummary` |
+| Binary value exceeds summary prefix | Include `...` and do not include full raw payload |
+| Mixed numeric, text, binary, and NULL values | Preserve parameter order in `parameters` |
+| `new_params_bind_flag = 0` | Return `Ok(None)`; adapter may still store execute envelope and NULL bitmap state |
+| Unsupported type code | Return `Ok(None)` without exposing partial decoded parameter state |
+| Truncated length prefix | Return `IncompletePayload { field: "parameter_value" }` |
+| Truncated text or binary value | Return `IncompletePayload { field: "parameter_value" }` |
+| Known statement ID with valid string/binary payload | Store decoded parameters on execute envelope; emit zero events |
+| Unknown statement ID | Store empty decoded parameters; emit zero events |
+| Malformed payload after `Authenticated` | Keep phase `Authenticated`; do not update command or execute state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover valid text, invalid UTF-8 text, binary summaries, mixed parameters, and truncated length-encoded payloads.
+- Adapter tests drive text and binary decoding through real `COM_STMT_PREPARE`, prepare OK, and execute packets.
+- BLOB-family values are summarized by default because charset metadata is not available in this layer.
+
+Base:
+
+- Later charset-aware decoding can replace UTF-8 lossy decoding once SQL Lens models enough MySQL metadata.
+- Later date/time, decimal, and JSON tasks can add supported type-code branches to `decode_parameters`.
+- Later expanded SQL rendering can consume MySQL-local decoded parameters or convert them into core `SqlParameter` values.
+
+Bad:
+
+- Storing raw binary parameter bytes in `MysqlConnectionState`.
+- Logging raw parameter payload bytes, raw SQL templates, or decoded sensitive values.
+- Treating invalid UTF-8 text as a panic or adapter failure.
+- Decoding BLOB-family values as full strings without charset metadata.
+- Emitting `SqlEvent` from parameter decoding alone.
+- Adding decoded MySQL parameter details directly to shared core models before event emission needs them.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_EXECUTE` string and binary parameter changes:
+
+- Parser test for supported text values.
+- Parser test for invalid UTF-8 text replacement.
+- Parser test for binary summaries with short and long values.
+- Parser test for mixed numeric, text, binary, and NULL parameters.
+- Parser tests for truncated length prefix and truncated value bytes.
+- Adapter test proving known statement IDs store decoded text and binary summary parameters.
+- Regression test coverage that existing numeric, NULL bitmap, execute envelope, prepare, and query behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+SqlParameterValue::String(String::from_utf8(raw_binary_blob).unwrap())
+```
+
+#### Correct
+
+```rust
+SqlParameterValue::BinarySummary(binary_summary(raw_binary_blob))
 ```
 
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts

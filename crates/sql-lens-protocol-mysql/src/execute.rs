@@ -12,6 +12,23 @@ const MYSQL_TYPE_FLOAT: u8 = 0x04;
 const MYSQL_TYPE_DOUBLE: u8 = 0x05;
 const MYSQL_TYPE_LONGLONG: u8 = 0x08;
 const MYSQL_TYPE_INT24: u8 = 0x09;
+const MYSQL_TYPE_VARCHAR: u8 = 0x0f;
+const MYSQL_TYPE_BIT: u8 = 0x10;
+const MYSQL_TYPE_ENUM: u8 = 0xf7;
+const MYSQL_TYPE_SET: u8 = 0xf8;
+const MYSQL_TYPE_TINY_BLOB: u8 = 0xf9;
+const MYSQL_TYPE_MEDIUM_BLOB: u8 = 0xfa;
+const MYSQL_TYPE_LONG_BLOB: u8 = 0xfb;
+const MYSQL_TYPE_BLOB: u8 = 0xfc;
+const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
+const MYSQL_TYPE_STRING: u8 = 0xfe;
+const MYSQL_TYPE_GEOMETRY: u8 = 0xff;
+
+const MYSQL_LENGTH_ENCODED_NULL_MARKER: u8 = 0xfb;
+const MYSQL_LENGTH_ENCODED_U16_MARKER: u8 = 0xfc;
+const MYSQL_LENGTH_ENCODED_U24_MARKER: u8 = 0xfd;
+const MYSQL_LENGTH_ENCODED_U64_MARKER: u8 = 0xfe;
+const BINARY_SUMMARY_HEX_PREFIX_BYTES: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MysqlNullBitmap {
@@ -72,6 +89,18 @@ pub fn decode_numeric_parameters(
     parameter_count: u16,
     null_parameter_indexes: &[usize],
 ) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError> {
+    decode_parameters(
+        parameter_payload_after_null_bitmap,
+        parameter_count,
+        null_parameter_indexes,
+    )
+}
+
+pub fn decode_parameters(
+    parameter_payload_after_null_bitmap: &[u8],
+    parameter_count: u16,
+    null_parameter_indexes: &[usize],
+) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError> {
     if parameter_count == 0 {
         return Ok(Some(MysqlDecodedParameters {
             parameters: Vec::new(),
@@ -108,7 +137,7 @@ pub fn decode_numeric_parameters(
         }
 
         let Some((value, consumed)) =
-            decode_numeric_parameter_value(parameter_type, remaining_values, "parameter_value")?
+            decode_parameter_value(parameter_type, remaining_values, "parameter_value")?
         else {
             return Ok(None);
         };
@@ -146,6 +175,34 @@ fn decode_parameter_types(
             unsigned: chunk[1] & MYSQL_PARAMETER_FLAG_UNSIGNED != 0,
         })
         .collect())
+}
+
+fn decode_parameter_value(
+    parameter_type: MysqlParameterType,
+    bytes: &[u8],
+    field: &'static str,
+) -> Result<Option<(SqlParameterValue, usize)>, MysqlExecuteParseError> {
+    if let Some(decoded) = decode_numeric_parameter_value(parameter_type, bytes, field)? {
+        return Ok(Some(decoded));
+    }
+
+    if is_text_type(parameter_type.type_code) {
+        let (raw, consumed) = read_length_encoded_bytes(bytes, field)?;
+        return Ok(Some((
+            SqlParameterValue::String(String::from_utf8_lossy(raw).into_owned()),
+            consumed,
+        )));
+    }
+
+    if is_binary_summary_type(parameter_type.type_code) {
+        let (raw, consumed) = read_length_encoded_bytes(bytes, field)?;
+        return Ok(Some((
+            SqlParameterValue::BinarySummary(binary_summary(raw)),
+            consumed,
+        )));
+    }
+
+    Ok(None)
 }
 
 fn decode_numeric_parameter_value(
@@ -209,6 +266,69 @@ fn decode_numeric_parameter_value(
     Ok(Some((value, numeric_value_width(parameter_type.type_code))))
 }
 
+fn read_length_encoded_bytes<'a>(
+    bytes: &'a [u8],
+    field: &'static str,
+) -> Result<(&'a [u8], usize), MysqlExecuteParseError> {
+    let (length, prefix_width) = read_length_encoded_integer(bytes, field)?;
+    let length = usize::try_from(length)
+        .map_err(|_| MysqlExecuteParseError::LengthEncodedValueTooLarge { field, length })?;
+    let needed = prefix_width.checked_add(length).ok_or(
+        MysqlExecuteParseError::LengthEncodedValueTooLarge {
+            field,
+            length: u64::try_from(length).unwrap_or(u64::MAX),
+        },
+    )?;
+    let Some(raw) = bytes.get(prefix_width..needed) else {
+        return Err(MysqlExecuteParseError::IncompletePayload {
+            field,
+            needed,
+            available: bytes.len(),
+        });
+    };
+
+    Ok((raw, needed))
+}
+
+fn read_length_encoded_integer(
+    bytes: &[u8],
+    field: &'static str,
+) -> Result<(u64, usize), MysqlExecuteParseError> {
+    let Some((&marker, rest)) = bytes.split_first() else {
+        return Err(MysqlExecuteParseError::IncompletePayload {
+            field,
+            needed: 1,
+            available: 0,
+        });
+    };
+
+    match marker {
+        0x00..=0xfa => Ok((u64::from(marker), 1)),
+        MYSQL_LENGTH_ENCODED_NULL_MARKER => {
+            Err(MysqlExecuteParseError::InvalidLengthEncodedInteger { field, marker })
+        }
+        MYSQL_LENGTH_ENCODED_U16_MARKER => {
+            let raw = read_value_bytes(rest, 2, field)?;
+            Ok((u64::from(u16::from_le_bytes([raw[0], raw[1]])), 3))
+        }
+        MYSQL_LENGTH_ENCODED_U24_MARKER => {
+            let raw = read_value_bytes(rest, 3, field)?;
+            let value = u32::from(raw[0]) | (u32::from(raw[1]) << 8) | (u32::from(raw[2]) << 16);
+            Ok((u64::from(value), 4))
+        }
+        MYSQL_LENGTH_ENCODED_U64_MARKER => {
+            let raw = read_value_bytes(rest, 8, field)?;
+            Ok((
+                u64::from_le_bytes([
+                    raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                ]),
+                9,
+            ))
+        }
+        marker => Err(MysqlExecuteParseError::InvalidLengthEncodedInteger { field, marker }),
+    }
+}
+
 fn read_value_bytes<'a>(
     bytes: &'a [u8],
     needed: usize,
@@ -235,12 +355,57 @@ fn numeric_value_width(type_code: u8) -> usize {
     }
 }
 
+fn is_text_type(type_code: u8) -> bool {
+    matches!(
+        type_code,
+        MYSQL_TYPE_VARCHAR
+            | MYSQL_TYPE_VAR_STRING
+            | MYSQL_TYPE_STRING
+            | MYSQL_TYPE_ENUM
+            | MYSQL_TYPE_SET
+    )
+}
+
+fn is_binary_summary_type(type_code: u8) -> bool {
+    matches!(
+        type_code,
+        MYSQL_TYPE_TINY_BLOB
+            | MYSQL_TYPE_MEDIUM_BLOB
+            | MYSQL_TYPE_LONG_BLOB
+            | MYSQL_TYPE_BLOB
+            | MYSQL_TYPE_BIT
+            | MYSQL_TYPE_GEOMETRY
+    )
+}
+
+fn binary_summary(bytes: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let prefix_len = bytes.len().min(BINARY_SUMMARY_HEX_PREFIX_BYTES);
+    let mut hex = String::with_capacity(prefix_len * 2);
+    for byte in &bytes[..prefix_len] {
+        hex.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+
+    let suffix = if bytes.len() > prefix_len { "..." } else { "" };
+    format!("len={} hex={hex}{suffix}", bytes.len())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MysqlExecuteParseError {
     IncompletePayload {
         field: &'static str,
         needed: usize,
         available: usize,
+    },
+    InvalidLengthEncodedInteger {
+        field: &'static str,
+        marker: u8,
+    },
+    LengthEncodedValueTooLarge {
+        field: &'static str,
+        length: u64,
     },
 }
 
@@ -255,6 +420,14 @@ impl fmt::Display for MysqlExecuteParseError {
                 f,
                 "incomplete MySQL COM_STMT_EXECUTE field `{field}`: needed {needed} bytes, available {available} bytes"
             ),
+            Self::InvalidLengthEncodedInteger { field, marker } => write!(
+                f,
+                "invalid MySQL COM_STMT_EXECUTE length-encoded integer marker `{marker:#04x}` for field `{field}`"
+            ),
+            Self::LengthEncodedValueTooLarge { field, length } => write!(
+                f,
+                "MySQL COM_STMT_EXECUTE length-encoded value for field `{field}` is too large: {length} bytes"
+            ),
         }
     }
 }
@@ -264,6 +437,14 @@ impl Error for MysqlExecuteParseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn length_encoded_value(bytes: &[u8]) -> Vec<u8> {
+        let length = u8::try_from(bytes.len()).expect("test value should use one-byte length");
+        let mut encoded = vec![length];
+        encoded.extend_from_slice(bytes);
+
+        encoded
+    }
 
     #[test]
     fn decodes_mixed_null_and_non_null_parameters() {
@@ -484,6 +665,160 @@ mod tests {
     }
 
     #[test]
+    fn decodes_text_parameters() {
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[
+            MYSQL_TYPE_VARCHAR,
+            0x00,
+            MYSQL_TYPE_VAR_STRING,
+            0x00,
+            MYSQL_TYPE_STRING,
+            0x00,
+            MYSQL_TYPE_ENUM,
+            0x00,
+            MYSQL_TYPE_SET,
+            0x00,
+        ]);
+        payload.extend_from_slice(&length_encoded_value(b"alpha"));
+        payload.extend_from_slice(&length_encoded_value(b"beta"));
+        payload.extend_from_slice(&length_encoded_value(b"gamma"));
+        payload.extend_from_slice(&length_encoded_value(b"one"));
+        payload.extend_from_slice(&length_encoded_value(b"a,b"));
+
+        let decoded = decode_parameters(&payload, 5, &[])
+            .expect("text payload should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::String("alpha".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::String("beta".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::String("gamma".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 3,
+                    value: SqlParameterValue::String("one".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 4,
+                    value: SqlParameterValue::String("a,b".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn represents_invalid_text_without_panicking() {
+        let payload = [
+            MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT,
+            MYSQL_TYPE_VARCHAR,
+            0x00,
+            0x03,
+            0xff,
+            b'a',
+            0xfe,
+        ];
+
+        let decoded = decode_parameters(&payload, 1, &[])
+            .expect("invalid text should be represented safely")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [MysqlDecodedParameter {
+                index: 0,
+                value: SqlParameterValue::String("\u{fffd}a\u{fffd}".to_owned()),
+            }]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn summarizes_binary_parameters() {
+        let long_binary: Vec<u8> = (0..20).collect();
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[MYSQL_TYPE_BLOB, 0x00, MYSQL_TYPE_GEOMETRY, 0x00]);
+        payload.extend_from_slice(&length_encoded_value(&long_binary));
+        payload.extend_from_slice(&length_encoded_value(&[0xab, 0xcd, 0xef]));
+
+        let decoded = decode_parameters(&payload, 2, &[])
+            .expect("binary payload should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::BinarySummary(
+                        "len=20 hex=000102030405060708090a0b0c0d0e0f...".to_owned()
+                    ),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::BinarySummary("len=3 hex=abcdef".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn decodes_mixed_numeric_text_binary_and_null_parameters() {
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[
+            MYSQL_TYPE_LONG,
+            0x00,
+            MYSQL_TYPE_VAR_STRING,
+            0x00,
+            MYSQL_TYPE_BLOB,
+            0x00,
+            MYSQL_TYPE_DOUBLE,
+            0x00,
+        ]);
+        payload.extend_from_slice(&i32::to_le_bytes(7));
+        payload.extend_from_slice(&length_encoded_value(b"ok"));
+        payload.extend_from_slice(&length_encoded_value(&[0x00, 0x01]));
+
+        let decoded = decode_parameters(&payload, 4, &[3])
+            .expect("mixed payload should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Integer(7),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::String("ok".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::BinarySummary("len=2 hex=0001".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 3,
+                    value: SqlParameterValue::Null,
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
     fn returns_none_when_new_params_bind_flag_is_not_present() {
         let decoded =
             decode_numeric_parameters(&[0x00], 2, &[]).expect("flag should parse as unsupported");
@@ -493,9 +828,8 @@ mod tests {
 
     #[test]
     fn returns_none_for_unsupported_parameter_type() {
-        let decoded =
-            decode_numeric_parameters(&[MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT, 0xfd, 0x00], 1, &[])
-                .expect("unsupported type should be non-fatal");
+        let decoded = decode_parameters(&[MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT, 0xf6, 0x00], 1, &[])
+            .expect("unsupported type should be non-fatal");
 
         assert_eq!(decoded, None);
     }
@@ -564,6 +898,82 @@ mod tests {
                 field: "parameter_value",
                 needed: 8,
                 available: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_length_encoded_prefix() {
+        let error = decode_parameters(
+            &[
+                MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT,
+                MYSQL_TYPE_VAR_STRING,
+                0x00,
+                MYSQL_LENGTH_ENCODED_U16_MARKER,
+                0x01,
+            ],
+            1,
+            &[],
+        )
+        .expect_err("length prefix should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlExecuteParseError::IncompletePayload {
+                field: "parameter_value",
+                needed: 2,
+                available: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_text_value_bytes() {
+        let error = decode_parameters(
+            &[
+                MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT,
+                MYSQL_TYPE_VAR_STRING,
+                0x00,
+                0x04,
+                b'a',
+                b'b',
+            ],
+            1,
+            &[],
+        )
+        .expect_err("text value should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlExecuteParseError::IncompletePayload {
+                field: "parameter_value",
+                needed: 5,
+                available: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_binary_value_bytes() {
+        let error = decode_parameters(
+            &[
+                MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT,
+                MYSQL_TYPE_BLOB,
+                0x00,
+                0x03,
+                0xaa,
+            ],
+            1,
+            &[],
+        )
+        .expect_err("binary value should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlExecuteParseError::IncompletePayload {
+                field: "parameter_value",
+                needed: 4,
+                available: 2,
             }
         );
     }

@@ -37,7 +37,7 @@ pub use command::{
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use execute::{
     MysqlDecodedParameter, MysqlDecodedParameters, MysqlExecuteParseError, MysqlNullBitmap,
-    MysqlParameterType, decode_null_bitmap, decode_numeric_parameters,
+    MysqlParameterType, decode_null_bitmap, decode_numeric_parameters, decode_parameters,
 };
 pub use handshake::{
     MysqlClientHandshakeParseError, MysqlClientHandshakeResponse, MysqlHandshakeParseError,
@@ -215,7 +215,7 @@ pub struct MysqlStatementExecuteEnvelope {
     pub has_parameter_payload: bool,
     pub statement: Option<MysqlPreparedStatement>,
     pub null_parameter_indexes: Vec<usize>,
-    pub numeric_parameters: Vec<MysqlDecodedParameter>,
+    pub parameters: Vec<MysqlDecodedParameter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -422,37 +422,36 @@ impl MysqlConnectionState {
             }
             MysqlParsedClientCommand::StatementExecute(execute) => {
                 let statement = self.prepared_statement(execute.statement_id).cloned();
-                let (null_parameter_indexes, numeric_parameters) =
-                    if let Some(statement) = &statement {
-                        let parameter_payload = packet
-                            .payload
-                            .get(MYSQL_COM_STMT_EXECUTE_PARAMETER_PAYLOAD_OFFSET..)
-                            .unwrap_or_default();
-                        let Ok(null_bitmap) =
-                            decode_null_bitmap(parameter_payload, statement.num_params)
-                        else {
-                            return;
-                        };
-                        let null_bitmap_bytes_consumed = null_bitmap.bytes_consumed;
-                        let null_parameter_indexes = null_bitmap.null_parameter_indexes;
-                        let numeric_parameter_payload = parameter_payload
-                            .get(null_bitmap_bytes_consumed..)
-                            .unwrap_or_default();
-                        let Ok(decoded_numeric_parameters) = decode_numeric_parameters(
-                            numeric_parameter_payload,
-                            statement.num_params,
-                            &null_parameter_indexes,
-                        ) else {
-                            return;
-                        };
-                        let numeric_parameters = decoded_numeric_parameters
-                            .map(|parameters| parameters.parameters)
-                            .unwrap_or_default();
-
-                        (null_parameter_indexes, numeric_parameters)
-                    } else {
-                        (Vec::new(), Vec::new())
+                let (null_parameter_indexes, parameters) = if let Some(statement) = &statement {
+                    let parameter_payload = packet
+                        .payload
+                        .get(MYSQL_COM_STMT_EXECUTE_PARAMETER_PAYLOAD_OFFSET..)
+                        .unwrap_or_default();
+                    let Ok(null_bitmap) =
+                        decode_null_bitmap(parameter_payload, statement.num_params)
+                    else {
+                        return;
                     };
+                    let null_bitmap_bytes_consumed = null_bitmap.bytes_consumed;
+                    let null_parameter_indexes = null_bitmap.null_parameter_indexes;
+                    let parameter_value_payload = parameter_payload
+                        .get(null_bitmap_bytes_consumed..)
+                        .unwrap_or_default();
+                    let Ok(decoded_parameters) = decode_parameters(
+                        parameter_value_payload,
+                        statement.num_params,
+                        &null_parameter_indexes,
+                    ) else {
+                        return;
+                    };
+                    let parameters = decoded_parameters
+                        .map(|parameters| parameters.parameters)
+                        .unwrap_or_default();
+
+                    (null_parameter_indexes, parameters)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 let client_command = MysqlClientCommand {
                     kind: MysqlCommandKind::StatementExecute,
                     sequence_id: packet.header.sequence_id,
@@ -471,7 +470,7 @@ impl MysqlConnectionState {
                     has_parameter_payload: execute.has_parameter_payload,
                     statement,
                     null_parameter_indexes,
-                    numeric_parameters,
+                    parameters,
                 });
             }
         }
@@ -1263,7 +1262,7 @@ mod tests {
         assert_eq!(envelope.iteration_count, 1);
         assert!(envelope.has_parameter_payload);
         assert_eq!(envelope.null_parameter_indexes, [0]);
-        assert!(envelope.numeric_parameters.is_empty());
+        assert!(envelope.parameters.is_empty());
         assert_eq!(
             envelope.statement.as_ref(),
             Some(&MysqlPreparedStatement {
@@ -1320,7 +1319,7 @@ mod tests {
         assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
         assert_eq!(envelope.null_parameter_indexes, [1]);
         assert_eq!(
-            envelope.numeric_parameters,
+            envelope.parameters,
             [
                 MysqlDecodedParameter {
                     index: 0,
@@ -1333,6 +1332,83 @@ mod tests {
                 MysqlDecodedParameter {
                     index: 2,
                     value: SqlParameterValue::Float(2.5),
+                },
+            ]
+        );
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_observes_com_stmt_execute_text_and_binary_parameters_with_known_statement_id()
+    {
+        const MYSQL_TYPE_BLOB: u8 = 0xfc;
+        const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
+        const MYSQL_TYPE_STRING: u8 = 0xfe;
+
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select text_binary_params(?, ?, ?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x2233_4455, 0, 3, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let long_binary: Vec<u8> = (0..20).collect();
+        let mut parameter_payload = vec![0x00, 0x01];
+        parameter_payload.extend_from_slice(&[
+            MYSQL_TYPE_VAR_STRING,
+            0x00,
+            MYSQL_TYPE_BLOB,
+            0x00,
+            MYSQL_TYPE_STRING,
+            0x00,
+        ]);
+        parameter_payload.extend_from_slice(&length_encoded_value(b"alpha"));
+        parameter_payload.extend_from_slice(&length_encoded_value(&long_binary));
+        parameter_payload.extend_from_slice(&length_encoded_value(b"omega"));
+        let packet = com_stmt_execute_packet(0x2233_4455, 0, 1, &parameter_payload, 2);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_STMT_EXECUTE should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let envelope = state
+            .last_statement_execute_envelope()
+            .expect("execute envelope should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert!(envelope.null_parameter_indexes.is_empty());
+        assert_eq!(
+            envelope.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::String("alpha".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::BinarySummary(
+                        "len=20 hex=000102030405060708090a0b0c0d0e0f...".to_owned()
+                    ),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::String("omega".to_owned()),
                 },
             ]
         );
@@ -1374,7 +1450,7 @@ mod tests {
         assert!(!envelope.has_parameter_payload);
         assert!(envelope.statement.is_none());
         assert!(envelope.null_parameter_indexes.is_empty());
-        assert!(envelope.numeric_parameters.is_empty());
+        assert!(envelope.parameters.is_empty());
         assert!(events.events.is_empty());
     }
 
@@ -2251,6 +2327,14 @@ mod tests {
         payload.extend_from_slice(parameter_payload);
 
         packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn length_encoded_value(bytes: &[u8]) -> Vec<u8> {
+        let length = u8::try_from(bytes.len()).expect("test value should use one-byte length");
+        let mut encoded = vec![length];
+        encoded.extend_from_slice(bytes);
+
+        encoded
     }
 
     fn unsupported_command_packet() -> Vec<u8> {
