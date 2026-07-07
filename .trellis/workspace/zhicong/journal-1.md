@@ -1498,3 +1498,36 @@ Implemented connection-local MySQL prepared statement mappings. Successful prepa
 ### Next Steps
 
 - None - task complete
+
+
+## Session 46: Parse MySQL COM_STMT_EXECUTE envelope
+
+**Date**: 2026-07-07
+**Task**: Parse MySQL COM_STMT_EXECUTE envelope
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL COM_STMT_EXECUTE envelope parsing, connection-local execute state, known/unknown statement ID handling, backend spec guidance, and validation tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3372a5b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
