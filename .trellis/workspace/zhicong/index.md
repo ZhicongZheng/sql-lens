@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 47
+- **Total Sessions**: 48
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1566 | Active |
+| `journal-1.md` | ~1599 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 48 | 2026-07-07 | Decode MySQL numeric parameters | `8abe11c` | `main` |
 | 47 | 2026-07-07 | Decode MySQL execute NULL bitmap | `0c6634d` | `main` |
 | 46 | 2026-07-07 | Parse MySQL COM_STMT_EXECUTE envelope | `3372a5b` | `main` |
 | 45 | 2026-07-07 | Store MySQL prepared statement state | `ba32397` | `main` |

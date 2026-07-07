@@ -1564,3 +1564,36 @@ Implemented MySQL COM_STMT_EXECUTE NULL bitmap decoding, adapter integration for
 ### Next Steps
 
 - None - task complete
+
+
+## Session 48: Decode MySQL numeric parameters
+
+**Date**: 2026-07-07
+**Task**: Decode MySQL numeric parameters
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL COM_STMT_EXECUTE numeric parameter decoding for current-packet type metadata, including signed and unsigned integers, float and double values, NULL handling, adapter envelope state, non-fatal unsupported/malformed behavior, backend spec guidance, and tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8abe11c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
