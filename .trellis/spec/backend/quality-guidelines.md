@@ -3350,6 +3350,131 @@ SqlParameterValue::String(String::from_utf8(raw_binary_blob).unwrap())
 SqlParameterValue::BinarySummary(binary_summary(raw_binary_blob))
 ```
 
+## Scenario: MySQL COM_STMT_EXECUTE Temporal Parameter Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` decodes MySQL binary protocol date and time prepared statement parameters inside client-to-backend `COM_STMT_EXECUTE` parameter payloads.
+- This layer records MySQL-local decoded temporal parameter values when prepared statement metadata is known and current-packet parameter type metadata is present.
+- It must not implement cross-execute parameter type caching, timezone conversion, strict calendar validation, expanded SQL rendering, redaction, storage/API/UI contracts, or protocol-neutral event emission.
+
+### 2. Signatures
+
+Temporal parameter decoding is part of the shared MySQL parameter decoder in `crates/sql-lens-protocol-mysql/src/execute.rs`:
+
+```rust
+pub fn decode_parameters(
+    parameter_payload_after_null_bitmap: &[u8],
+    parameter_count: u16,
+    null_parameter_indexes: &[usize],
+) -> Result<Option<MysqlDecodedParameters>, MysqlExecuteParseError>;
+```
+
+Temporal values use existing core parameter value variants:
+
+```rust
+SqlParameterValue::Date(String)
+SqlParameterValue::Time(String)
+SqlParameterValue::Timestamp(String)
+```
+
+### 3. Contracts
+
+- Decode temporal values only after NULL bitmap decoding has identified NULL parameter indexes.
+- `new_params_bind_flag = 1` means current-packet parameter type metadata is present and can be decoded.
+- `new_params_bind_flag = 0` remains non-fatal unsupported until a later type-cache task exists.
+- Supported temporal type codes are `DATE`, `NEWDATE`, `TIME`, `DATETIME`, and `TIMESTAMP`.
+- Date and datetime values are MySQL length-prefixed binary values, not text.
+- `DATE` and `NEWDATE` accept lengths `0` and `4`.
+- `DATETIME` and `TIMESTAMP` accept lengths `0`, `4`, `7`, and `11`.
+- `TIME` accepts lengths `0`, `8`, and `12`.
+- `DATE` and `NEWDATE` decode to `SqlParameterValue::Date("YYYY-MM-DD")`.
+- `DATETIME` and `TIMESTAMP` decode to `SqlParameterValue::Timestamp("YYYY-MM-DD HH:MM:SS")`.
+- Temporal values with microsecond payloads append `.ffffff`.
+- `TIME` decodes to `SqlParameterValue::Time("HH:MM:SS")` when days are zero.
+- `TIME` decodes to `SqlParameterValue::Time("D HH:MM:SS")` when days are non-zero.
+- Negative `TIME` values are prefixed with `-`.
+- Zero-length date values decode as `0000-00-00`.
+- Zero-length datetime and timestamp values decode as `0000-00-00 00:00:00`.
+- Zero-length time values decode as `00:00:00`.
+- Unsupported temporal lengths return `MysqlExecuteParseError::InvalidTemporalValueLength`.
+- Truncated temporal payloads return `MysqlExecuteParseError::IncompletePayload`.
+- The parser formats temporal strings but does not validate real calendar dates.
+- Adapter-level temporal parsing runs only when the execute statement ID is known and has connection-local `MysqlPreparedStatement` metadata.
+- Malformed temporal payloads are non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope`.
+- Raw parameter payload bytes must not be stored in connection state.
+- Temporal parameter decoding emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `DATE` or `NEWDATE` with length `4` | Decode as `SqlParameterValue::Date` |
+| `DATE` or `NEWDATE` with length `0` | Decode as zero date |
+| `TIME` with length `8` | Decode as `SqlParameterValue::Time` |
+| `TIME` with length `12` | Decode as `SqlParameterValue::Time` with microseconds |
+| Negative `TIME` | Prefix the formatted value with `-` |
+| `DATETIME` or `TIMESTAMP` with length `4` | Decode as date plus `00:00:00` |
+| `DATETIME` or `TIMESTAMP` with length `7` | Decode date and seconds precision time |
+| `DATETIME` or `TIMESTAMP` with length `11` | Decode date and microsecond precision time |
+| Unsupported temporal length | Return `InvalidTemporalValueLength` |
+| Truncated temporal value | Return `IncompletePayload { field: "parameter_value" }` |
+| Known statement ID with valid temporal payload | Store decoded parameters on execute envelope; emit zero events |
+| Malformed payload after `Authenticated` | Keep phase `Authenticated`; do not update command or execute state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover date, zero temporal values, time, negative time, microsecond time, datetime, timestamp, unsupported temporal length, and truncated temporal payload.
+- Adapter tests drive temporal decoding through real `COM_STMT_PREPARE`, prepare OK, and execute packets.
+- Zero dates remain representable as strings because MySQL can carry values strict date libraries reject.
+
+Base:
+
+- Later expanded SQL rendering can consume these MySQL-local decoded values.
+- Later charset or field metadata tasks do not need to affect temporal decoding.
+- Later type-cache work can add `new_params_bind_flag = 0` support without changing temporal value representation.
+
+Bad:
+
+- Applying timezone conversion in the packet decoder.
+- Rejecting zero dates through strict calendar validation.
+- Logging raw parameter payload bytes, raw SQL templates, or decoded sensitive values.
+- Emitting `SqlEvent` from temporal decoding alone.
+- Adding temporal MySQL details directly to shared core models before event emission needs them.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_EXECUTE` temporal parameter changes:
+
+- Parser test for `DATE` and `NEWDATE`.
+- Parser test for zero-length temporal values.
+- Parser test for `TIME`, negative `TIME`, and microsecond `TIME`.
+- Parser test for `DATETIME` and `TIMESTAMP`.
+- Parser test for unsupported temporal length.
+- Parser test for truncated temporal payload.
+- Adapter test proving known statement IDs store decoded temporal parameters.
+- Regression test coverage that existing numeric, string, binary, NULL bitmap, execute envelope, prepare, and query behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+parse_date_strictly_or_panic("0000-00-00")
+```
+
+#### Correct
+
+```rust
+SqlParameterValue::Date("0000-00-00".to_owned())
+```
+
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
 
 ### 1. Scope / Trigger

@@ -1416,6 +1416,95 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_observes_com_stmt_execute_temporal_parameters_with_known_statement_id() {
+        const MYSQL_TYPE_TIMESTAMP: u8 = 0x07;
+        const MYSQL_TYPE_DATE: u8 = 0x0a;
+        const MYSQL_TYPE_TIME: u8 = 0x0b;
+        const MYSQL_TYPE_DATETIME: u8 = 0x0c;
+
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select temporal_params(?, ?, ?, ?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x3344_5566, 0, 4, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let mut parameter_payload = vec![0x00, 0x01];
+        parameter_payload.extend_from_slice(&[
+            MYSQL_TYPE_DATE,
+            0x00,
+            MYSQL_TYPE_TIME,
+            0x00,
+            MYSQL_TYPE_DATETIME,
+            0x00,
+            MYSQL_TYPE_TIMESTAMP,
+            0x00,
+        ]);
+        parameter_payload.extend_from_slice(&mysql_date_value(2026, 7, 7));
+        parameter_payload.extend_from_slice(&mysql_time_value(true, 1, 2, 3, 4, Some(500)));
+        parameter_payload.extend_from_slice(&mysql_datetime_value(2026, 7, 7, 9, 10, 11, None));
+        parameter_payload.extend_from_slice(&mysql_datetime_value(
+            2026,
+            12,
+            31,
+            23,
+            59,
+            58,
+            Some(123_456),
+        ));
+        let packet = com_stmt_execute_packet(0x3344_5566, 0, 1, &parameter_payload, 2);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_STMT_EXECUTE should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let envelope = state
+            .last_statement_execute_envelope()
+            .expect("execute envelope should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert!(envelope.null_parameter_indexes.is_empty());
+        assert_eq!(
+            envelope.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Date("2026-07-07".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::Time("-1 02:03:04.000500".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::Timestamp("2026-07-07 09:10:11".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 3,
+                    value: SqlParameterValue::Timestamp("2026-12-31 23:59:58.123456".to_owned()),
+                },
+            ]
+        );
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_observes_com_stmt_execute_with_unknown_statement_id() {
         let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
         let mut state = adapter.create_connection_state(&test_context());
@@ -2335,6 +2424,59 @@ mod tests {
         encoded.extend_from_slice(bytes);
 
         encoded
+    }
+
+    fn mysql_date_value(year: u16, month: u8, day: u8) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.extend_from_slice(&year.to_le_bytes());
+        value.push(month);
+        value.push(day);
+
+        length_encoded_value(&value)
+    }
+
+    fn mysql_datetime_value(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        micros: Option<u32>,
+    ) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.extend_from_slice(&year.to_le_bytes());
+        value.push(month);
+        value.push(day);
+        value.push(hour);
+        value.push(minute);
+        value.push(second);
+        if let Some(micros) = micros {
+            value.extend_from_slice(&micros.to_le_bytes());
+        }
+
+        length_encoded_value(&value)
+    }
+
+    fn mysql_time_value(
+        is_negative: bool,
+        days: u32,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        micros: Option<u32>,
+    ) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.push(u8::from(is_negative));
+        value.extend_from_slice(&days.to_le_bytes());
+        value.push(hour);
+        value.push(minute);
+        value.push(second);
+        if let Some(micros) = micros {
+            value.extend_from_slice(&micros.to_le_bytes());
+        }
+
+        length_encoded_value(&value)
     }
 
     fn unsupported_command_packet() -> Vec<u8> {

@@ -35,12 +35,12 @@ protocol-neutral conversion.
 
 ## Acceptance Criteria
 
-- [ ] Common date values decode to `SqlParameterValue::Date`.
-- [ ] Common time values decode to `SqlParameterValue::Time`.
-- [ ] Common datetime and timestamp values decode to
+- [x] Common date values decode to `SqlParameterValue::Date`.
+- [x] Common time values decode to `SqlParameterValue::Time`.
+- [x] Common datetime and timestamp values decode to
       `SqlParameterValue::Timestamp`.
-- [ ] Zero-length and microsecond edge cases are represented clearly.
-- [ ] Tests cover date, time, datetime, timestamp, and malformed payloads.
+- [x] Zero-length and microsecond edge cases are represented clearly.
+- [x] Tests cover date, time, datetime, timestamp, and malformed payloads.
 
 ## Out Of Scope
 

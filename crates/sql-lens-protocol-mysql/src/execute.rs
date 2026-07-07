@@ -10,8 +10,13 @@ const MYSQL_TYPE_SHORT: u8 = 0x02;
 const MYSQL_TYPE_LONG: u8 = 0x03;
 const MYSQL_TYPE_FLOAT: u8 = 0x04;
 const MYSQL_TYPE_DOUBLE: u8 = 0x05;
+const MYSQL_TYPE_TIMESTAMP: u8 = 0x07;
 const MYSQL_TYPE_LONGLONG: u8 = 0x08;
 const MYSQL_TYPE_INT24: u8 = 0x09;
+const MYSQL_TYPE_DATE: u8 = 0x0a;
+const MYSQL_TYPE_TIME: u8 = 0x0b;
+const MYSQL_TYPE_DATETIME: u8 = 0x0c;
+const MYSQL_TYPE_NEWDATE: u8 = 0x0e;
 const MYSQL_TYPE_VARCHAR: u8 = 0x0f;
 const MYSQL_TYPE_BIT: u8 = 0x10;
 const MYSQL_TYPE_ENUM: u8 = 0xf7;
@@ -186,6 +191,10 @@ fn decode_parameter_value(
         return Ok(Some(decoded));
     }
 
+    if let Some(decoded) = decode_temporal_parameter_value(parameter_type, bytes, field)? {
+        return Ok(Some(decoded));
+    }
+
     if is_text_type(parameter_type.type_code) {
         let (raw, consumed) = read_length_encoded_bytes(bytes, field)?;
         return Ok(Some((
@@ -264,6 +273,135 @@ fn decode_numeric_parameter_value(
     };
 
     Ok(Some((value, numeric_value_width(parameter_type.type_code))))
+}
+
+fn decode_temporal_parameter_value(
+    parameter_type: MysqlParameterType,
+    bytes: &[u8],
+    field: &'static str,
+) -> Result<Option<(SqlParameterValue, usize)>, MysqlExecuteParseError> {
+    let Some(type_name) = temporal_type_name(parameter_type.type_code) else {
+        return Ok(None);
+    };
+
+    let (raw, consumed) = read_length_encoded_bytes(bytes, field)?;
+    let value = match parameter_type.type_code {
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => {
+            SqlParameterValue::Date(format_mysql_date(raw, field, type_name)?)
+        }
+        MYSQL_TYPE_TIME => SqlParameterValue::Time(format_mysql_time(raw, field, type_name)?),
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_TIMESTAMP => {
+            SqlParameterValue::Timestamp(format_mysql_datetime(raw, field, type_name)?)
+        }
+        _ => unreachable!("temporal_type_name only returns supported temporal type codes"),
+    };
+
+    Ok(Some((value, consumed)))
+}
+
+fn format_mysql_date(
+    bytes: &[u8],
+    field: &'static str,
+    type_name: &'static str,
+) -> Result<String, MysqlExecuteParseError> {
+    match bytes.len() {
+        0 => Ok("0000-00-00".to_owned()),
+        4 => {
+            let year = read_u16_le(bytes, 0);
+            let month = bytes[2];
+            let day = bytes[3];
+
+            Ok(format!("{year:04}-{month:02}-{day:02}"))
+        }
+        length => Err(MysqlExecuteParseError::InvalidTemporalValueLength {
+            field,
+            type_name,
+            length,
+        }),
+    }
+}
+
+fn format_mysql_datetime(
+    bytes: &[u8],
+    field: &'static str,
+    type_name: &'static str,
+) -> Result<String, MysqlExecuteParseError> {
+    match bytes.len() {
+        0 => Ok("0000-00-00 00:00:00".to_owned()),
+        4 => Ok(format!(
+            "{} 00:00:00",
+            format_mysql_date(bytes, field, type_name)?
+        )),
+        7 | 11 => {
+            let date = format_mysql_date(&bytes[..4], field, type_name)?;
+            let hour = bytes[4];
+            let minute = bytes[5];
+            let second = bytes[6];
+            let mut value = format!("{date} {hour:02}:{minute:02}:{second:02}");
+            if bytes.len() == 11 {
+                let micros = read_u32_le(bytes, 7);
+                value.push_str(&format!(".{micros:06}"));
+            }
+
+            Ok(value)
+        }
+        length => Err(MysqlExecuteParseError::InvalidTemporalValueLength {
+            field,
+            type_name,
+            length,
+        }),
+    }
+}
+
+fn format_mysql_time(
+    bytes: &[u8],
+    field: &'static str,
+    type_name: &'static str,
+) -> Result<String, MysqlExecuteParseError> {
+    match bytes.len() {
+        0 => Ok("00:00:00".to_owned()),
+        8 | 12 => {
+            let is_negative = bytes[0] != 0;
+            let days = read_u32_le(bytes, 1);
+            let hour = bytes[5];
+            let minute = bytes[6];
+            let second = bytes[7];
+            let mut value = if days == 0 {
+                format!("{hour:02}:{minute:02}:{second:02}")
+            } else {
+                format!("{days} {hour:02}:{minute:02}:{second:02}")
+            };
+
+            if bytes.len() == 12 {
+                let micros = read_u32_le(bytes, 8);
+                value.push_str(&format!(".{micros:06}"));
+            }
+
+            if is_negative {
+                value.insert(0, '-');
+            }
+
+            Ok(value)
+        }
+        length => Err(MysqlExecuteParseError::InvalidTemporalValueLength {
+            field,
+            type_name,
+            length,
+        }),
+    }
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
 }
 
 fn read_length_encoded_bytes<'a>(
@@ -355,6 +493,17 @@ fn numeric_value_width(type_code: u8) -> usize {
     }
 }
 
+fn temporal_type_name(type_code: u8) -> Option<&'static str> {
+    match type_code {
+        MYSQL_TYPE_TIMESTAMP => Some("TIMESTAMP"),
+        MYSQL_TYPE_DATE => Some("DATE"),
+        MYSQL_TYPE_TIME => Some("TIME"),
+        MYSQL_TYPE_DATETIME => Some("DATETIME"),
+        MYSQL_TYPE_NEWDATE => Some("NEWDATE"),
+        _ => None,
+    }
+}
+
 fn is_text_type(type_code: u8) -> bool {
     matches!(
         type_code,
@@ -407,6 +556,11 @@ pub enum MysqlExecuteParseError {
         field: &'static str,
         length: u64,
     },
+    InvalidTemporalValueLength {
+        field: &'static str,
+        type_name: &'static str,
+        length: usize,
+    },
 }
 
 impl fmt::Display for MysqlExecuteParseError {
@@ -428,6 +582,14 @@ impl fmt::Display for MysqlExecuteParseError {
                 f,
                 "MySQL COM_STMT_EXECUTE length-encoded value for field `{field}` is too large: {length} bytes"
             ),
+            Self::InvalidTemporalValueLength {
+                field,
+                type_name,
+                length,
+            } => write!(
+                f,
+                "invalid MySQL COM_STMT_EXECUTE {type_name} value length for field `{field}`: {length} bytes"
+            ),
         }
     }
 }
@@ -444,6 +606,59 @@ mod tests {
         encoded.extend_from_slice(bytes);
 
         encoded
+    }
+
+    fn mysql_date_value(year: u16, month: u8, day: u8) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.extend_from_slice(&year.to_le_bytes());
+        value.push(month);
+        value.push(day);
+
+        length_encoded_value(&value)
+    }
+
+    fn mysql_datetime_value(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        micros: Option<u32>,
+    ) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.extend_from_slice(&year.to_le_bytes());
+        value.push(month);
+        value.push(day);
+        value.push(hour);
+        value.push(minute);
+        value.push(second);
+        if let Some(micros) = micros {
+            value.extend_from_slice(&micros.to_le_bytes());
+        }
+
+        length_encoded_value(&value)
+    }
+
+    fn mysql_time_value(
+        is_negative: bool,
+        days: u32,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        micros: Option<u32>,
+    ) -> Vec<u8> {
+        let mut value = Vec::new();
+        value.push(u8::from(is_negative));
+        value.extend_from_slice(&days.to_le_bytes());
+        value.push(hour);
+        value.push(minute);
+        value.push(second);
+        if let Some(micros) = micros {
+            value.extend_from_slice(&micros.to_le_bytes());
+        }
+
+        length_encoded_value(&value)
     }
 
     #[test]
@@ -819,6 +1034,162 @@ mod tests {
     }
 
     #[test]
+    fn decodes_date_parameters() {
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[MYSQL_TYPE_DATE, 0x00, MYSQL_TYPE_NEWDATE, 0x00]);
+        payload.extend_from_slice(&mysql_date_value(2026, 7, 7));
+        payload.extend_from_slice(&mysql_date_value(1999, 12, 31));
+
+        let decoded = decode_parameters(&payload, 2, &[])
+            .expect("date payload should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Date("2026-07-07".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::Date("1999-12-31".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn represents_zero_length_temporal_values() {
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[
+            MYSQL_TYPE_DATE,
+            0x00,
+            MYSQL_TYPE_TIME,
+            0x00,
+            MYSQL_TYPE_DATETIME,
+            0x00,
+            MYSQL_TYPE_TIMESTAMP,
+            0x00,
+        ]);
+        payload.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        let decoded = decode_parameters(&payload, 4, &[])
+            .expect("zero temporal values should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Date("0000-00-00".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::Time("00:00:00".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::Timestamp("0000-00-00 00:00:00".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 3,
+                    value: SqlParameterValue::Timestamp("0000-00-00 00:00:00".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn decodes_time_parameters() {
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[
+            MYSQL_TYPE_TIME,
+            0x00,
+            MYSQL_TYPE_TIME,
+            0x00,
+            MYSQL_TYPE_TIME,
+            0x00,
+        ]);
+        payload.extend_from_slice(&mysql_time_value(false, 0, 1, 2, 3, None));
+        payload.extend_from_slice(&mysql_time_value(true, 2, 3, 4, 5, None));
+        payload.extend_from_slice(&mysql_time_value(false, 0, 6, 7, 8, Some(901_234)));
+
+        let decoded = decode_parameters(&payload, 3, &[])
+            .expect("time payload should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Time("01:02:03".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::Time("-2 03:04:05".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::Time("06:07:08.901234".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
+    fn decodes_datetime_and_timestamp_parameters() {
+        let mut payload = vec![MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT];
+        payload.extend_from_slice(&[
+            MYSQL_TYPE_DATETIME,
+            0x00,
+            MYSQL_TYPE_TIMESTAMP,
+            0x00,
+            MYSQL_TYPE_DATETIME,
+            0x00,
+        ]);
+        payload.extend_from_slice(&mysql_datetime_value(2026, 7, 7, 9, 10, 11, None));
+        payload.extend_from_slice(&mysql_datetime_value(
+            2026,
+            12,
+            31,
+            23,
+            59,
+            58,
+            Some(123_456),
+        ));
+        payload.extend_from_slice(&mysql_date_value(2025, 1, 2));
+
+        let decoded = decode_parameters(&payload, 3, &[])
+            .expect("datetime payload should parse")
+            .expect("type metadata should be present");
+
+        assert_eq!(
+            decoded.parameters,
+            [
+                MysqlDecodedParameter {
+                    index: 0,
+                    value: SqlParameterValue::Timestamp("2026-07-07 09:10:11".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 1,
+                    value: SqlParameterValue::Timestamp("2026-12-31 23:59:58.123456".to_owned()),
+                },
+                MysqlDecodedParameter {
+                    index: 2,
+                    value: SqlParameterValue::Timestamp("2025-01-02 00:00:00".to_owned()),
+                },
+            ]
+        );
+        assert_eq!(decoded.bytes_consumed, payload.len());
+    }
+
+    #[test]
     fn returns_none_when_new_params_bind_flag_is_not_present() {
         let decoded =
             decode_numeric_parameters(&[0x00], 2, &[]).expect("flag should parse as unsupported");
@@ -974,6 +1345,58 @@ mod tests {
                 field: "parameter_value",
                 needed: 4,
                 available: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_temporal_value_length() {
+        let error = decode_parameters(
+            &[
+                MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT,
+                MYSQL_TYPE_DATE,
+                0x00,
+                0x01,
+                0x00,
+            ],
+            1,
+            &[],
+        )
+        .expect_err("temporal length should be unsupported");
+
+        assert_eq!(
+            error,
+            MysqlExecuteParseError::InvalidTemporalValueLength {
+                field: "parameter_value",
+                type_name: "DATE",
+                length: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_temporal_value_bytes() {
+        let error = decode_parameters(
+            &[
+                MYSQL_NEW_PARAMS_BOUND_FLAG_PRESENT,
+                MYSQL_TYPE_DATETIME,
+                0x00,
+                0x07,
+                0xea,
+                0x07,
+                0x07,
+            ],
+            1,
+            &[],
+        )
+        .expect_err("temporal value should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlExecuteParseError::IncompletePayload {
+                field: "parameter_value",
+                needed: 8,
+                available: 4,
             }
         );
     }

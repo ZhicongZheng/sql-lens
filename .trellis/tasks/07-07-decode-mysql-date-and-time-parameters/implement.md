@@ -2,10 +2,10 @@
 
 ## Checklist
 
-- [ ] Add temporal type-code constants to `execute.rs`.
-- [ ] Add temporal parse helpers for date/datetime/timestamp and time payloads.
-- [ ] Extend `decode_parameter_value` with temporal branches.
-- [ ] Add parser tests for:
+- [x] Add temporal type-code constants to `execute.rs`.
+- [x] Add temporal parse helpers for date/datetime/timestamp and time payloads.
+- [x] Extend `decode_parameter_value` with temporal branches.
+- [x] Add parser tests for:
       - `DATE`
       - zero date
       - `TIME`
@@ -16,9 +16,9 @@
       - microsecond datetime/timestamp
       - unsupported temporal length
       - truncated temporal payload
-- [ ] Add adapter coverage proving known statement IDs store decoded temporal
+- [x] Add adapter coverage proving known statement IDs store decoded temporal
       parameters.
-- [ ] Update backend spec with the temporal parameter contract.
+- [x] Update backend spec with the temporal parameter contract.
 
 ## Validation
 
