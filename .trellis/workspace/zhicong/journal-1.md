@@ -772,3 +772,36 @@ Added GET /api/v1/health to sql-lens-api with typed JSON response, uptime tracki
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: Implement SQL event list endpoint
+
+**Date**: 2026-07-07
+**Task**: Implement SQL event list endpoint
+**Branch**: `main`
+
+### Summary
+
+Added GET /api/v1/sql-events with API state, ring-buffer query mapping, cursor pagination, API-shaped DTOs, client_addr/fingerprint storage filters, tests, and backend spec contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c83e679` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
