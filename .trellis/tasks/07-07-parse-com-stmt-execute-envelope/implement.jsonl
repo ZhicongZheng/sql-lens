@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Defines MySQL parser/state contracts and no-event boundaries."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Defines MySQL-specific crate ownership and dependency boundaries."}
+{"file":".trellis/tasks/07-07-parse-com-stmt-execute-envelope/research/mysql-com-stmt-execute-envelope.md","reason":"Captures official COM_STMT_EXECUTE envelope layout and task scope."}

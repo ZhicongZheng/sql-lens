@@ -29,9 +29,9 @@ pub use authentication::{
     parse_authentication_result,
 };
 pub use command::{
-    MYSQL_COM_QUERY, MYSQL_COM_STMT_PREPARE, MysqlClientCommand, MysqlComQuery,
-    MysqlComStmtPrepare, MysqlCommandKind, MysqlCommandParseError, MysqlParsedClientCommand,
-    parse_client_command,
+    MYSQL_COM_QUERY, MYSQL_COM_STMT_EXECUTE, MYSQL_COM_STMT_PREPARE, MysqlClientCommand,
+    MysqlComQuery, MysqlComStmtExecute, MysqlComStmtPrepare, MysqlCommandKind,
+    MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
 };
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use handshake::{
@@ -200,6 +200,16 @@ pub enum MysqlStatementPrepareResponseState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlStatementExecuteEnvelope {
+    pub command: MysqlClientCommand,
+    pub statement_id: u32,
+    pub flags: u8,
+    pub iteration_count: u32,
+    pub has_parameter_payload: bool,
+    pub statement: Option<MysqlPreparedStatement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MysqlPreparedStatement {
     pub statement_id: u32,
     pub template_sql: String,
@@ -222,6 +232,7 @@ pub struct MysqlConnectionState {
     pending_statement_prepare: Option<MysqlPendingStatementPrepare>,
     last_statement_prepare_outcome: Option<MysqlStatementPrepareOutcome>,
     prepared_statements: BTreeMap<u32, MysqlPreparedStatement>,
+    last_statement_execute_envelope: Option<MysqlStatementExecuteEnvelope>,
     next_query_sequence: u64,
 }
 
@@ -240,6 +251,7 @@ impl MysqlConnectionState {
             pending_statement_prepare: None,
             last_statement_prepare_outcome: None,
             prepared_statements: BTreeMap::new(),
+            last_statement_execute_envelope: None,
             next_query_sequence: 1,
         }
     }
@@ -290,6 +302,10 @@ impl MysqlConnectionState {
 
     pub fn prepared_statement_count(&self) -> usize {
         self.prepared_statements.len()
+    }
+
+    pub fn last_statement_execute_envelope(&self) -> Option<&MysqlStatementExecuteEnvelope> {
+        self.last_statement_execute_envelope.as_ref()
     }
 
     fn observe_initial_handshake(&mut self, bytes: &[u8]) {
@@ -393,6 +409,27 @@ impl MysqlConnectionState {
                 self.last_client_command = Some(client_command.clone());
                 self.pending_statement_prepare = Some(MysqlPendingStatementPrepare {
                     command: client_command,
+                });
+            }
+            MysqlParsedClientCommand::StatementExecute(execute) => {
+                let statement = self.prepared_statement(execute.statement_id).cloned();
+                let client_command = MysqlClientCommand {
+                    kind: MysqlCommandKind::StatementExecute,
+                    sequence_id: packet.header.sequence_id,
+                    sql: statement
+                        .as_ref()
+                        .map(|statement| statement.template_sql.clone())
+                        .unwrap_or_default(),
+                };
+
+                self.last_client_command = Some(client_command.clone());
+                self.last_statement_execute_envelope = Some(MysqlStatementExecuteEnvelope {
+                    command: client_command,
+                    statement_id: execute.statement_id,
+                    flags: execute.flags,
+                    iteration_count: execute.iteration_count,
+                    has_parameter_payload: execute.has_parameter_payload,
+                    statement,
                 });
             }
         }
@@ -665,6 +702,7 @@ mod tests {
         assert!(state.pending_statement_prepare().is_none());
         assert!(state.last_statement_prepare_outcome().is_none());
         assert_eq!(state.prepared_statement_count(), 0);
+        assert!(state.last_statement_execute_envelope().is_none());
     }
 
     #[test]
@@ -1018,6 +1056,7 @@ mod tests {
         assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
         assert!(state.last_client_command().is_none());
         assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
         assert!(events.events.is_empty());
     }
 
@@ -1042,6 +1081,31 @@ mod tests {
         assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
         assert!(state.last_client_command().is_none());
         assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_does_not_observe_com_stmt_execute_before_authentication() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake(&adapter, state.as_mut(), &mut events);
+        let packet = com_stmt_execute_packet(0x1122_3344, 0, 1, &[], 0);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("client execute bytes should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
+        assert!(state.last_client_command().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
         assert!(events.events.is_empty());
     }
 
@@ -1105,6 +1169,105 @@ mod tests {
         assert_eq!(command.sql, "select * from users where id = ?");
         assert_eq!(&pending.command, command);
         assert!(state.pending_query().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_observes_com_stmt_execute_with_known_statement_id() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select * from users where id = ?", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x1122_3344, 3, 2, Some(7), 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let packet = com_stmt_execute_packet(0x1122_3344, 0, 1, &[0x01], 2);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_STMT_EXECUTE should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("client command should be stored");
+        let envelope = state
+            .last_statement_execute_envelope()
+            .expect("execute envelope should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(command.kind, MysqlCommandKind::StatementExecute);
+        assert_eq!(command.sequence_id, 2);
+        assert_eq!(command.sql, "select * from users where id = ?");
+        assert_eq!(&envelope.command, command);
+        assert_eq!(envelope.statement_id, 0x1122_3344);
+        assert_eq!(envelope.flags, 0);
+        assert_eq!(envelope.iteration_count, 1);
+        assert!(envelope.has_parameter_payload);
+        assert_eq!(
+            envelope.statement.as_ref(),
+            Some(&MysqlPreparedStatement {
+                statement_id: 0x1122_3344,
+                template_sql: "select * from users where id = ?".to_owned(),
+                num_columns: 3,
+                num_params: 2,
+                warning_count: Some(7),
+            })
+        );
+        assert!(state.pending_query().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_observes_com_stmt_execute_with_unknown_statement_id() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = com_stmt_execute_packet(404, 2, 3, &[], 7);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("unknown statement execute should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("client command should be stored");
+        let envelope = state
+            .last_statement_execute_envelope()
+            .expect("execute envelope should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(command.kind, MysqlCommandKind::StatementExecute);
+        assert_eq!(command.sequence_id, 7);
+        assert_eq!(command.sql, "");
+        assert_eq!(&envelope.command, command);
+        assert_eq!(envelope.statement_id, 404);
+        assert_eq!(envelope.flags, 2);
+        assert_eq!(envelope.iteration_count, 3);
+        assert!(!envelope.has_parameter_payload);
+        assert!(envelope.statement.is_none());
         assert!(events.events.is_empty());
     }
 
@@ -1384,6 +1547,31 @@ mod tests {
         assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
         assert!(state.last_client_command().is_none());
         assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_authenticated_phase_for_malformed_com_stmt_execute() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = malformed_com_stmt_execute_packet();
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("malformed execute command should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert!(state.last_client_command().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
         assert!(events.events.is_empty());
     }
 
@@ -1858,6 +2046,22 @@ mod tests {
         packet_with_sequence_id(payload, sequence_id)
     }
 
+    fn com_stmt_execute_packet(
+        statement_id: u32,
+        flags: u8,
+        iteration_count: u32,
+        parameter_payload: &[u8],
+        sequence_id: u8,
+    ) -> Vec<u8> {
+        let mut payload = vec![MYSQL_COM_STMT_EXECUTE];
+        payload.extend_from_slice(&statement_id.to_le_bytes());
+        payload.push(flags);
+        payload.extend_from_slice(&iteration_count.to_le_bytes());
+        payload.extend_from_slice(parameter_payload);
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
     fn unsupported_command_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![0x01, b'x'], 0)
     }
@@ -1868,6 +2072,10 @@ mod tests {
 
     fn invalid_utf8_com_stmt_prepare_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![MYSQL_COM_STMT_PREPARE, 0xff], 0)
+    }
+
+    fn malformed_com_stmt_execute_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![MYSQL_COM_STMT_EXECUTE, 0x01], 0)
     }
 
     fn assert_sql_event(

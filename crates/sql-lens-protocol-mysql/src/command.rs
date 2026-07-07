@@ -2,11 +2,13 @@ use std::{error::Error, fmt, str};
 
 pub const MYSQL_COM_QUERY: u8 = 0x03;
 pub const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
+pub const MYSQL_COM_STMT_EXECUTE: u8 = 0x17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MysqlCommandKind {
     Query,
     StatementPrepare,
+    StatementExecute,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,9 +22,18 @@ pub struct MysqlComStmtPrepare {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlComStmtExecute {
+    pub statement_id: u32,
+    pub flags: u8,
+    pub iteration_count: u32,
+    pub has_parameter_payload: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MysqlParsedClientCommand {
     Query(MysqlComQuery),
     StatementPrepare(MysqlComStmtPrepare),
+    StatementExecute(MysqlComStmtExecute),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +46,7 @@ pub struct MysqlClientCommand {
 pub fn parse_client_command(
     payload: &[u8],
 ) -> Result<Option<MysqlParsedClientCommand>, MysqlCommandParseError> {
-    let Some((&command, sql_bytes)) = payload.split_first() else {
+    let Some((&command, command_body)) = payload.split_first() else {
         return Err(MysqlCommandParseError::IncompletePayload {
             field: "command",
             needed: 1,
@@ -45,19 +56,55 @@ pub fn parse_client_command(
 
     match command {
         MYSQL_COM_QUERY => {
-            let sql = parse_utf8_field(sql_bytes, "sql")?;
+            let sql = parse_utf8_field(command_body, "sql")?;
 
             Ok(Some(MysqlParsedClientCommand::Query(MysqlComQuery { sql })))
         }
         MYSQL_COM_STMT_PREPARE => {
-            let template_sql = parse_utf8_field(sql_bytes, "template_sql")?;
+            let template_sql = parse_utf8_field(command_body, "template_sql")?;
 
             Ok(Some(MysqlParsedClientCommand::StatementPrepare(
                 MysqlComStmtPrepare { template_sql },
             )))
         }
+        MYSQL_COM_STMT_EXECUTE => Ok(Some(MysqlParsedClientCommand::StatementExecute(
+            parse_com_stmt_execute(command_body)?,
+        ))),
         _ => Ok(None),
     }
+}
+
+fn parse_com_stmt_execute(bytes: &[u8]) -> Result<MysqlComStmtExecute, MysqlCommandParseError> {
+    let statement_id = read_u32_le(bytes, "statement_id")?;
+    let Some((&flags, iteration_count_bytes)) =
+        bytes.get(4..).and_then(|bytes| bytes.split_first())
+    else {
+        return Err(MysqlCommandParseError::IncompletePayload {
+            field: "flags",
+            needed: 1,
+            available: bytes.len().saturating_sub(4),
+        });
+    };
+    let iteration_count = read_u32_le(iteration_count_bytes, "iteration_count")?;
+
+    Ok(MysqlComStmtExecute {
+        statement_id,
+        flags,
+        iteration_count,
+        has_parameter_payload: iteration_count_bytes.len() > 4,
+    })
+}
+
+fn read_u32_le(bytes: &[u8], field: &'static str) -> Result<u32, MysqlCommandParseError> {
+    let Some(value) = bytes.get(..4) else {
+        return Err(MysqlCommandParseError::IncompletePayload {
+            field,
+            needed: 4,
+            available: bytes.len(),
+        });
+    };
+
+    Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
 fn parse_utf8_field(bytes: &[u8], field: &'static str) -> Result<String, MysqlCommandParseError> {
@@ -163,6 +210,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_com_stmt_execute_envelope() {
+        let command = parse_client_command(&[
+            MYSQL_COM_STMT_EXECUTE,
+            0x44,
+            0x33,
+            0x22,
+            0x11,
+            0x02,
+            0x04,
+            0x03,
+            0x02,
+            0x01,
+        ])
+        .expect("command should parse")
+        .expect("COM_STMT_EXECUTE should be supported");
+
+        assert_eq!(
+            command,
+            MysqlParsedClientCommand::StatementExecute(MysqlComStmtExecute {
+                statement_id: 0x1122_3344,
+                flags: 0x02,
+                iteration_count: 0x0102_0304,
+                has_parameter_payload: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_com_stmt_execute_with_parameter_payload_bytes() {
+        let command = parse_client_command(&[
+            MYSQL_COM_STMT_EXECUTE,
+            0x44,
+            0x33,
+            0x22,
+            0x11,
+            0x00,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+        ])
+        .expect("command should parse")
+        .expect("COM_STMT_EXECUTE should be supported");
+
+        assert_eq!(
+            command,
+            MysqlParsedClientCommand::StatementExecute(MysqlComStmtExecute {
+                statement_id: 0x1122_3344,
+                flags: 0x00,
+                iteration_count: 1,
+                has_parameter_payload: true,
+            })
+        );
+    }
+
+    #[test]
     fn returns_none_for_unsupported_command() {
         let command =
             parse_client_command(&[0x01, b'x']).expect("unsupported command should be non-fatal");
@@ -180,6 +284,60 @@ mod tests {
                 field: "command",
                 needed: 1,
                 available: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_com_stmt_execute_missing_statement_id() {
+        let error = parse_client_command(&[MYSQL_COM_STMT_EXECUTE, 0x01])
+            .expect_err("statement ID should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlCommandParseError::IncompletePayload {
+                field: "statement_id",
+                needed: 4,
+                available: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_com_stmt_execute_missing_flags() {
+        let error = parse_client_command(&[MYSQL_COM_STMT_EXECUTE, 0x44, 0x33, 0x22, 0x11])
+            .expect_err("flags should be missing");
+
+        assert_eq!(
+            error,
+            MysqlCommandParseError::IncompletePayload {
+                field: "flags",
+                needed: 1,
+                available: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_com_stmt_execute_missing_iteration_count() {
+        let error = parse_client_command(&[
+            MYSQL_COM_STMT_EXECUTE,
+            0x44,
+            0x33,
+            0x22,
+            0x11,
+            0x00,
+            0x01,
+            0x00,
+        ])
+        .expect_err("iteration count should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlCommandParseError::IncompletePayload {
+                field: "iteration_count",
+                needed: 4,
+                available: 2,
             }
         );
     }

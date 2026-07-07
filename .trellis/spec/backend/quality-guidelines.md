@@ -2812,6 +2812,144 @@ pub struct MysqlConnectionState {
 }
 ```
 
+## Scenario: MySQL COM_STMT_EXECUTE Envelope Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` parses client-to-backend `COM_STMT_EXECUTE` command packets after authentication.
+- This layer records the execute envelope and links a statement ID to connection-local prepared statement metadata when available.
+- It must not decode NULL bitmap bytes, parameter types, parameter values, expanded SQL, SQL events, storage/API/UI contracts, or protocol-neutral core models.
+
+### 2. Signatures
+
+Public execute command parser types live in `crates/sql-lens-protocol-mysql/src/command.rs` and are re-exported from the crate root:
+
+```rust
+pub const MYSQL_COM_STMT_EXECUTE: u8 = 0x17;
+
+pub enum MysqlCommandKind {
+    Query,
+    StatementPrepare,
+    StatementExecute,
+}
+
+pub struct MysqlComStmtExecute {
+    pub statement_id: u32,
+    pub flags: u8,
+    pub iteration_count: u32,
+    pub has_parameter_payload: bool,
+}
+
+pub enum MysqlParsedClientCommand {
+    Query(MysqlComQuery),
+    StatementPrepare(MysqlComStmtPrepare),
+    StatementExecute(MysqlComStmtExecute),
+}
+```
+
+`MysqlConnectionState` exposes the latest MySQL-local execute envelope:
+
+```rust
+pub struct MysqlStatementExecuteEnvelope {
+    pub command: MysqlClientCommand,
+    pub statement_id: u32,
+    pub flags: u8,
+    pub iteration_count: u32,
+    pub has_parameter_payload: bool,
+    pub statement: Option<MysqlPreparedStatement>,
+}
+
+impl MysqlConnectionState {
+    pub fn last_statement_execute_envelope(&self) -> Option<&MysqlStatementExecuteEnvelope>;
+}
+```
+
+### 3. Contracts
+
+- Client command observation happens only when phase is `Authenticated`.
+- A payload starting with `MYSQL_COM_STMT_EXECUTE` parses the fixed command envelope after the command byte.
+- The execute envelope extracts little-endian `statement_id`, one-byte `flags`, and little-endian `iteration_count`.
+- `has_parameter_payload` is `true` when any bytes remain after the fixed execute envelope.
+- Unknown statement IDs are represented non-fatally as an execute envelope with `statement: None`.
+- Known statement IDs clone the current connection-local `MysqlPreparedStatement` into the execute envelope.
+- `MysqlClientCommand.sql` stores the prepared statement template SQL when the statement ID is known and an empty string when unknown.
+- Malformed or incomplete execute packets are non-fatal at adapter level and must not update `last_client_command` or `last_statement_execute_envelope`.
+- Execute parsing emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+- Parsed execute state is MySQL-specific and must not be projected into `SqlEvent`, `ConnectionInfo`, storage, API, WebSocket, or plugin contracts in this layer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Payload starts with `0x17` and has all envelope fields | Return `Some(MysqlParsedClientCommand::StatementExecute(...))` |
+| Execute payload is missing `statement_id` | Return `IncompletePayload { field: "statement_id" }` |
+| Execute payload is missing `flags` | Return `IncompletePayload { field: "flags" }` |
+| Execute payload is missing `iteration_count` | Return `IncompletePayload { field: "iteration_count" }` |
+| Execute payload has bytes after iteration count | Set `has_parameter_payload = true` |
+| `COM_STMT_EXECUTE` before `Authenticated` | Count bytes only; do not update command or execute state; emit zero events |
+| Known statement ID after `Authenticated` | Store command and execute envelope with `statement: Some(...)`; emit zero events |
+| Unknown statement ID after `Authenticated` | Store command and execute envelope with `statement: None`; emit zero events |
+| Malformed execute command after `Authenticated` | Keep phase `Authenticated`; do not update command or execute state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover valid statement ID, flags, iteration count, trailing parameter payload bytes, and incomplete envelope fields.
+- Adapter tests drive known statement linking through real `COM_STMT_PREPARE` and prepare OK packets before execute.
+- Unknown statement ID tests assert a successful envelope with `statement: None`.
+
+Base:
+
+- Later parameter tasks can use `statement.num_params` and `has_parameter_payload` to decode NULL bitmap, parameter type metadata, and parameter values.
+- Later expanded SQL rendering can read the cloned statement template without changing the execute envelope contract.
+- Later `COM_STMT_CLOSE` and `COM_STMT_RESET` cleanup can remove mappings before execute lookup.
+
+Bad:
+
+- Treating unknown statement IDs as `ProtocolAdapterError`.
+- Decoding parameter values in the envelope parser task.
+- Emitting a protocol-neutral SQL event from execute command observation alone.
+- Logging raw SQL templates, parameter bytes, or packet payloads.
+- Adding MySQL execute fields directly to shared core models.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_EXECUTE` envelope changes:
+
+- Parser test for valid statement ID extraction.
+- Parser test for flags extraction.
+- Parser test for iteration count extraction.
+- Parser test for trailing parameter payload detection.
+- Parser tests for incomplete `statement_id`, `flags`, and `iteration_count`.
+- Adapter test proving `COM_STMT_EXECUTE` before authentication does not update state.
+- Adapter test proving known statement IDs link to prepared statement metadata.
+- Adapter test proving unknown statement IDs stay non-fatal with `statement: None`.
+- Adapter test proving malformed execute commands after authentication stay non-fatal.
+- Regression test coverage that existing `COM_QUERY` and `COM_STMT_PREPARE` behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+return Err(ProtocolAdapterError::ObservationFailed("unknown statement id"));
+```
+
+#### Correct
+
+```rust
+MysqlStatementExecuteEnvelope {
+    statement_id,
+    statement: prepared_statement(statement_id).cloned(),
+    // remaining envelope fields...
+}
+```
+
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
 
 ### 1. Scope / Trigger
