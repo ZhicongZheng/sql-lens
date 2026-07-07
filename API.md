@@ -139,7 +139,10 @@ GET /api/v1/statistics
 
 Parameters:
 
-- `window`
+- `window`: optional. Current live endpoint supports `1m` and `60s`; omitted defaults to `1m`.
+
+Planned future filters:
+
 - `protocol`
 - `database_type`
 - `database`
@@ -149,7 +152,7 @@ Response:
 
 ```json
 {
-  "window": "5m",
+  "window": "1m",
   "qps": 120.5,
   "error_rate": 0.01,
   "slow_count": 4,
@@ -314,4 +317,3 @@ Rules:
 - WebSocket messages should be documented with JSON schemas.
 - Breaking changes require a version bump.
 - Generated client types should be possible but not required for v1.
-

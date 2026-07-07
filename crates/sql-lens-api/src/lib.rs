@@ -7,6 +7,7 @@ mod health;
 mod request_id;
 mod server;
 mod sql_events;
+mod statistics;
 
 pub use api_state::{ApiState, DEFAULT_CONNECTION_STORE_CAPACITY, DEFAULT_EVENT_STORE_CAPACITY};
 pub use connections::{
@@ -23,3 +24,4 @@ pub use sql_events::{
     SqlEventListResponse, SqlEventSummaryResponse, SqlParameterResponse,
     SqlParameterValueDataResponse, SqlParameterValueResponse,
 };
+pub use statistics::{LatencyPercentilesResponse, STATISTICS_PATH, StatisticsResponse};

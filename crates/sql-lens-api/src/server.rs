@@ -4,7 +4,7 @@ use axum::{Router, middleware};
 use sql_lens_config::WebConfig;
 use tokio::net::TcpListener;
 
-use crate::{ApiState, connections, health, request_id::attach_request_id, sql_events};
+use crate::{ApiState, connections, health, request_id::attach_request_id, sql_events, statistics};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpServerConfig {
@@ -72,6 +72,7 @@ pub fn router_with_state(state: ApiState) -> Router {
         .merge(health::routes())
         .merge(sql_events::routes())
         .merge(connections::routes())
+        .merge(statistics::routes())
         .layer(axum::Extension(state))
         .layer(middleware::from_fn(attach_request_id))
 }

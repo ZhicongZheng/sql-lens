@@ -14,6 +14,7 @@ pub struct LiveStatistics {
     slow_events: u64,
     latency_bucket_counts: Vec<u64>,
     recent_event_times: VecDeque<Instant>,
+    recent_latency_samples: VecDeque<LatencySample>,
     active_connections: HashSet<ConnectionId>,
 }
 
@@ -25,6 +26,7 @@ impl LiveStatistics {
             slow_events: 0,
             latency_bucket_counts: vec![0; LATENCY_BUCKET_UPPER_BOUNDS_MS.len() + 1],
             recent_event_times: VecDeque::new(),
+            recent_latency_samples: VecDeque::new(),
             active_connections: HashSet::new(),
         }
     }
@@ -46,6 +48,10 @@ impl LiveStatistics {
         let bucket_index = latency_bucket_index(event.duration);
         self.latency_bucket_counts[bucket_index] += 1;
         self.recent_event_times.push_back(recorded_at);
+        self.recent_latency_samples.push_back(LatencySample {
+            recorded_at,
+            duration: event.duration,
+        });
     }
 
     pub fn record_connection_opened(&mut self, connection_id: ConnectionId) {
@@ -70,6 +76,7 @@ impl LiveStatistics {
             qps_window_secs: LIVE_QPS_WINDOW.as_secs(),
             qps: self.recent_event_times.len() as f64 / LIVE_QPS_WINDOW.as_secs_f64(),
             latency_buckets: latency_bucket_counts(&self.latency_bucket_counts),
+            latency_percentiles: latency_percentiles(&self.recent_latency_samples),
             active_connections: self.active_connections.len(),
         }
     }
@@ -79,6 +86,12 @@ impl LiveStatistics {
             now.saturating_duration_since(*recorded_at) > LIVE_QPS_WINDOW
         }) {
             self.recent_event_times.pop_front();
+        }
+
+        while self.recent_latency_samples.front().is_some_and(|sample| {
+            now.saturating_duration_since(sample.recorded_at) > LIVE_QPS_WINDOW
+        }) {
+            self.recent_latency_samples.pop_front();
         }
     }
 }
@@ -111,6 +124,44 @@ fn latency_bucket_counts(counts: &[u64]) -> Vec<LatencyBucketCount> {
         .collect()
 }
 
+fn latency_percentiles(samples: &VecDeque<LatencySample>) -> LatencyPercentiles {
+    if samples.is_empty() {
+        return LatencyPercentiles {
+            p50: 0.0,
+            p95: 0.0,
+            p99: 0.0,
+        };
+    }
+
+    let mut durations = samples
+        .iter()
+        .map(|sample| sample.duration.0)
+        .collect::<Vec<_>>();
+    durations.sort_unstable();
+
+    LatencyPercentiles {
+        p50: percentile(&durations, 50),
+        p95: percentile(&durations, 95),
+        p99: percentile(&durations, 99),
+    }
+}
+
+fn percentile(sorted_values: &[u64], percentile: u64) -> f64 {
+    debug_assert!(!sorted_values.is_empty());
+    debug_assert!(percentile > 0);
+    debug_assert!(percentile <= 100);
+
+    let rank = (sorted_values.len() as u64 * percentile).div_ceil(100);
+    let index = rank.saturating_sub(1) as usize;
+    sorted_values[index] as f64
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LatencySample {
+    recorded_at: Instant,
+    duration: DurationMillis,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LiveStatisticsSnapshot {
     pub total_events: u64,
@@ -119,7 +170,15 @@ pub struct LiveStatisticsSnapshot {
     pub qps_window_secs: u64,
     pub qps: f64,
     pub latency_buckets: Vec<LatencyBucketCount>,
+    pub latency_percentiles: LatencyPercentiles,
     pub active_connections: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatencyPercentiles {
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +313,77 @@ mod tests {
 
         assert_eq!(snapshot.total_events, 2);
         assert!((snapshot.qps - (1.0 / 60.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn live_statistics_returns_zero_latency_percentiles_for_empty_state() {
+        let mut statistics = LiveStatistics::new();
+
+        let snapshot = statistics.snapshot();
+
+        assert_eq!(
+            snapshot.latency_percentiles,
+            LatencyPercentiles {
+                p50: 0.0,
+                p95: 0.0,
+                p99: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn live_statistics_calculates_recent_latency_percentiles() {
+        let mut statistics = LiveStatistics::new();
+        let started_at = Instant::now();
+
+        for (index, duration_ms) in [10, 20, 30, 40].into_iter().enumerate() {
+            statistics.record_sql_event_at(
+                &test_event(
+                    &format!("evt_{index}"),
+                    CaptureStatus::Ok,
+                    DurationMillis(duration_ms),
+                    "conn_1",
+                ),
+                started_at + Duration::from_secs(index as u64),
+            );
+        }
+
+        let snapshot = statistics.snapshot_at(started_at + Duration::from_secs(4));
+
+        assert_eq!(
+            snapshot.latency_percentiles,
+            LatencyPercentiles {
+                p50: 20.0,
+                p95: 40.0,
+                p99: 40.0,
+            }
+        );
+    }
+
+    #[test]
+    fn live_statistics_prunes_latency_samples_outside_recent_window() {
+        let mut statistics = LiveStatistics::new();
+        let started_at = Instant::now();
+
+        statistics.record_sql_event_at(
+            &test_event("evt_1", CaptureStatus::Ok, DurationMillis(1), "conn_1"),
+            started_at,
+        );
+        statistics.record_sql_event_at(
+            &test_event("evt_2", CaptureStatus::Ok, DurationMillis(100), "conn_1"),
+            started_at + Duration::from_secs(30),
+        );
+
+        let snapshot = statistics.snapshot_at(started_at + Duration::from_secs(61));
+
+        assert_eq!(
+            snapshot.latency_percentiles,
+            LatencyPercentiles {
+                p50: 100.0,
+                p95: 100.0,
+                p99: 100.0,
+            }
+        );
     }
 
     #[test]

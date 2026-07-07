@@ -1433,7 +1433,14 @@ pub struct LiveStatisticsSnapshot {
     pub qps_window_secs: u64,
     pub qps: f64,
     pub latency_buckets: Vec<LatencyBucketCount>,
+    pub latency_percentiles: LatencyPercentiles,
     pub active_connections: usize,
+}
+
+pub struct LatencyPercentiles {
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
 }
 
 pub struct LatencyBucketCount {
@@ -1461,13 +1468,15 @@ Do not add async runtime, API, WebSocket, storage persistence, metrics library, 
 - `CaptureStatus::Ok` and `CaptureStatus::Unknown` increment total and latency buckets only.
 - QPS uses a fixed 60-second live window based on ingestion `Instant`, not `SqlEvent.timestamp`.
 - QPS is `recent_events_in_window / 60.0`.
-- Recent event timestamps are pruned on record and snapshot calls.
+- Recent event timestamps and latency samples are pruned on record and snapshot calls.
 - Latency buckets are fixed: `<=1ms`, `<=5ms`, `<=10ms`, `<=50ms`, `<=100ms`, `<=500ms`, `<=1000ms`, `<=5000ms`, and `>5000ms`.
 - The overflow latency bucket uses `upper_bound = None`.
+- `latency_percentiles` are exact p50/p95/p99 values over retained recent live latency samples in the fixed 60-second window.
+- Empty percentile snapshots return `0.0` for p50, p95, and p99.
 - Active connections are explicit lifecycle updates through open/close methods, not inferred from SQL events.
 - Repeated opens for the same `ConnectionId` are idempotent.
 - Closing a missing connection is a no-op.
-- Percentiles, top fingerprints, top users, top databases, persistent statistics, API statistics endpoints, and WebSocket statistics streams belong to later tasks.
+- Top fingerprints, top users, top databases, persistent statistics, historical statistics queries, and WebSocket statistics streams belong to later tasks.
 
 ### 4. Validation & Error Matrix
 
@@ -1479,9 +1488,10 @@ Do not add async runtime, API, WebSocket, storage persistence, metrics library, 
 | Unknown event is recorded | Increment total and one latency bucket only |
 | Event duration is exactly a bucket upper bound | Count it in that upper-bound bucket |
 | Event duration is greater than 5000ms | Count it in the overflow bucket |
-| Snapshot is requested after more than 60 seconds | Prune older recent event timestamps before QPS calculation |
+| Snapshot is requested after more than 60 seconds | Prune older recent event timestamps before QPS calculation and older latency samples before percentile calculation |
 | Same connection opens twice | Active connection count remains one for that ID |
 | Missing connection closes | Active connection count is unchanged |
+| Statistics API receives an unsupported `window` value | Return the standard `BAD_REQUEST` API envelope |
 
 ### 5. Good/Base/Bad Cases
 
@@ -1500,7 +1510,8 @@ Bad:
 
 - Inferring active connections from `SqlEvent.connection_id`.
 - Parsing `SqlEvent.timestamp` for live QPS.
-- Adding percentile or top-N ranking logic to this first counter helper.
+- Approximating percentiles from coarse latency bucket counters.
+- Adding top-N ranking logic to this live counter helper.
 - Blocking packet forwarding on live statistics updates.
 
 ### 6. Tests Required
@@ -1509,8 +1520,11 @@ For live statistics changes:
 
 - OK, slow, and error event counter test.
 - Latency bucket boundary and overflow test.
+- Empty and populated latency percentile tests.
+- Latency percentile window pruning test.
 - Fixed 60-second QPS window test using deterministic `Instant` values.
 - Active connection open/close idempotency test.
+- Statistics API empty, populated, and invalid-window tests when changing the API endpoint.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.
 - Run `cargo test --workspace`.
