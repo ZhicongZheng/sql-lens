@@ -1036,3 +1036,36 @@ Added MySQL packet envelope parsing, parser errors, unit tests, crate re-exports
 ### Next Steps
 
 - None - task complete
+
+
+## Session 32: Add MySQL packet fixture tests
+
+**Date**: 2026-07-07
+**Task**: Add MySQL packet fixture tests
+**Branch**: `main`
+
+### Summary
+
+Added ASCII hex golden fixtures for MySQL packet framing, fixture-loader unit tests for valid and malformed packets, and documented fixture conventions in backend quality guidelines.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `99bbb0a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
