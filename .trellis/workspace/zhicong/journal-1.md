@@ -805,3 +805,36 @@ Added GET /api/v1/sql-events with API state, ring-buffer query mapping, cursor p
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: Implement SQL event detail endpoint
+
+**Date**: 2026-07-07
+**Task**: Implement SQL event detail endpoint
+**Branch**: `main`
+
+### Summary
+
+Added GET /api/v1/sql-events/{id} with full detail DTOs, parameter/timing/error metadata mapping, NOT_FOUND errors, tests, and backend spec contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0f27f0a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

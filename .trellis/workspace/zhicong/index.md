@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 24
+- **Total Sessions**: 25
 - **Last Active**: 2026-07-07
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~807 | Active |
+| `journal-1.md` | ~840 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 25 | 2026-07-07 | Implement SQL event detail endpoint | `0f27f0a` | `main` |
 | 24 | 2026-07-07 | Implement SQL event list endpoint | `c83e679` | `main` |
 | 23 | 2026-07-06 | Implement health endpoint | `00713c7` | `main` |
 | 22 | 2026-07-06 | Add HTTP server foundation | `d2b1e13` | `main` |
