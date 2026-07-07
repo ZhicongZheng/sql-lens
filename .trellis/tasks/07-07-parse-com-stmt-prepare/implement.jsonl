@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend protocol parser and MySQL adapter behavior contracts."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "MySQL-specific parser and state must stay in sql-lens-protocol-mysql."}
+{"file": ".trellis/tasks/07-07-parse-com-stmt-prepare/research/mysql-com-stmt-prepare.md", "reason": "COM_STMT_PREPARE command byte and payload layout."}

@@ -2291,7 +2291,7 @@ pub struct MysqlAuthenticationResult {
 
 - Trigger: `sql-lens-protocol-mysql` parses client-to-backend MySQL command packets after authentication.
 - This layer records safe MySQL-specific command metadata needed by later query timing and SQL event capture tasks.
-- It must not measure duration, inspect backend responses, emit SQL events, normalize SQL, fingerprint SQL, redact SQL, parse prepared statements, or update protocol-neutral core models.
+- It must not measure duration, inspect backend responses, emit SQL events, normalize SQL, fingerprint SQL, redact SQL, or update protocol-neutral core models.
 
 ### 2. Signatures
 
@@ -2299,13 +2299,24 @@ Public command parser types live in `crates/sql-lens-protocol-mysql/src/command.
 
 ```rust
 pub const MYSQL_COM_QUERY: u8 = 0x03;
+pub const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
 
 pub enum MysqlCommandKind {
     Query,
+    StatementPrepare,
 }
 
 pub struct MysqlComQuery {
     pub sql: String,
+}
+
+pub struct MysqlComStmtPrepare {
+    pub template_sql: String,
+}
+
+pub enum MysqlParsedClientCommand {
+    Query(MysqlComQuery),
+    StatementPrepare(MysqlComStmtPrepare),
 }
 
 pub struct MysqlClientCommand {
@@ -2316,7 +2327,7 @@ pub struct MysqlClientCommand {
 
 pub fn parse_client_command(
     payload: &[u8],
-) -> Result<Option<MysqlComQuery>, MysqlCommandParseError>;
+) -> Result<Option<MysqlParsedClientCommand>, MysqlCommandParseError>;
 
 pub enum MysqlCommandParseError {
     IncompletePayload { field: &'static str, needed: usize, available: usize },
@@ -2350,8 +2361,8 @@ impl MysqlConnectionState {
 | Condition | Required behavior |
 | --- | --- |
 | Empty command payload | Return `IncompletePayload { field: "command" }` |
-| Payload starts with `0x03` and valid UTF-8 SQL | Return `Some(MysqlComQuery)` |
-| Payload is exactly `[0x03]` | Return `Some(MysqlComQuery { sql: "" })` |
+| Payload starts with `0x03` and valid UTF-8 SQL | Return `Some(MysqlParsedClientCommand::Query(MysqlComQuery))` |
+| Payload is exactly `[0x03]` | Return `Some(MysqlParsedClientCommand::Query(MysqlComQuery { sql: "" }))` |
 | Payload starts with `0x03` and invalid UTF-8 SQL | Return `InvalidUtf8 { field: "sql" }` |
 | Payload starts with another command byte | Return `Ok(None)` |
 | COM_QUERY before `Authenticated` | Count bytes only; do not update command state; emit zero events |
@@ -2369,7 +2380,7 @@ Good:
 
 Base:
 
-- Later timing work can replace `last_client_command` with a pending-command slot without changing the standalone parser contract.
+- Query timing work stores a separate pending-query slot while preserving the standalone parser contract.
 - Later character-set support can refine SQL decoding while preserving non-fatal adapter behavior.
 
 Bad:
@@ -2378,7 +2389,7 @@ Bad:
 - Adding SQL text fields to protocol-neutral connection models.
 - Logging raw SQL text from parser or adapter code.
 - Blocking forwarding on storage, UI, plugin, or capture pipeline work.
-- Parsing prepared statements or other command kinds in the `COM_QUERY` task.
+- Parsing backend responses or emitting events from the command parser.
 
 ### 6. Tests Required
 
@@ -2415,6 +2426,128 @@ pub struct MysqlClientCommand {
     pub kind: MysqlCommandKind,
     pub sequence_id: u8,
     pub sql: String,
+}
+```
+
+## Scenario: MySQL COM_STMT_PREPARE Parser Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` parses client-to-backend `COM_STMT_PREPARE` command packets after authentication.
+- This layer records the prepared statement SQL template before later backend response parsing can map a server statement ID.
+- It must not parse backend `COM_STMT_PREPARE_OK`, allocate or map statement IDs, parse parameter definition packets, expand parameters, emit SQL events, or update protocol-neutral core models.
+
+### 2. Signatures
+
+Public prepared-statement command parser types live in `crates/sql-lens-protocol-mysql/src/command.rs` and are re-exported from the crate root:
+
+```rust
+pub const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
+
+pub enum MysqlCommandKind {
+    Query,
+    StatementPrepare,
+}
+
+pub struct MysqlComStmtPrepare {
+    pub template_sql: String,
+}
+
+pub enum MysqlParsedClientCommand {
+    Query(MysqlComQuery),
+    StatementPrepare(MysqlComStmtPrepare),
+}
+```
+
+`MysqlConnectionState` exposes MySQL-local pending prepare state:
+
+```rust
+pub struct MysqlPendingStatementPrepare {
+    pub command: MysqlClientCommand,
+}
+
+impl MysqlConnectionState {
+    pub fn pending_statement_prepare(&self) -> Option<&MysqlPendingStatementPrepare>;
+}
+```
+
+### 3. Contracts
+
+- Client command observation happens only when phase is `Authenticated`.
+- A payload starting with `MYSQL_COM_STMT_PREPARE` parses the remaining payload bytes as UTF-8 SQL template text.
+- Empty template text is valid and stored as an empty string; server-side rejection belongs to backend response handling.
+- Invalid UTF-8 template text returns `MysqlCommandParseError::InvalidUtf8 { field: "template_sql" }`.
+- Adapter observation treats unsupported, incomplete, malformed, and invalid-UTF-8 prepare packets as non-fatal and non-transitioning.
+- Valid `COM_STMT_PREPARE` after authentication stores `last_client_command` with `kind = MysqlCommandKind::StatementPrepare`, the packet envelope sequence ID, and the template SQL in the existing `sql` field.
+- Valid `COM_STMT_PREPARE` after authentication stores `MysqlPendingStatementPrepare` and replaces any existing pending prepare record.
+- Prepare command parsing emits zero SQL events and must not call timing-only logic intended for `COM_QUERY`.
+- Parsed prepare state is MySQL-specific and must not be projected into `SqlEvent`, `ConnectionInfo`, storage, API, WebSocket, or plugin contracts in this layer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Payload starts with `0x16` and valid UTF-8 template | Return `Some(MysqlParsedClientCommand::StatementPrepare(MysqlComStmtPrepare))` |
+| Payload is exactly `[0x16]` | Return `Some(MysqlParsedClientCommand::StatementPrepare(MysqlComStmtPrepare { template_sql: "" }))` |
+| Payload starts with `0x16` and invalid UTF-8 template | Return `InvalidUtf8 { field: "template_sql" }` |
+| `COM_STMT_PREPARE` before `Authenticated` | Count bytes only; do not update command or pending prepare state; emit zero events |
+| `COM_STMT_PREPARE` after `Authenticated` | Store command and pending prepare state; keep phase `Authenticated`; emit zero events |
+| Invalid prepare packet after `Authenticated` | Keep phase `Authenticated`; do not update command or pending prepare state; emit zero events |
+| Backend prepare response is observed | Do not consume pending prepare state until a later prepare-response task defines that contract |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover valid template SQL, empty template SQL, and invalid UTF-8 template bytes.
+- Adapter tests cover prepare before authentication, prepare after authentication, and invalid prepare bytes after authentication.
+- The packet envelope sequence ID is retained only in MySQL-specific command metadata.
+
+Base:
+
+- Later backend response parsing can consume `MysqlPendingStatementPrepare` to map a server `statement_id`.
+- Later parameter expansion can use the stored template SQL after `COM_STMT_EXECUTE` decoding exists.
+
+Bad:
+
+- Parsing backend `COM_STMT_PREPARE_OK` in the client command parser.
+- Adding statement IDs before the backend response parser exists.
+- Emitting a protocol-neutral SQL event from prepare command observation alone.
+- Logging raw template SQL text from parser or adapter code.
+- Adding MySQL prepared-statement fields directly to shared core models.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_PREPARE` parser changes:
+
+- Parser test for valid `COM_STMT_PREPARE` template SQL.
+- Parser test for empty `COM_STMT_PREPARE` template SQL.
+- Parser test for invalid UTF-8 template SQL.
+- Adapter test proving `COM_STMT_PREPARE` before authentication does not update state.
+- Adapter test proving `COM_STMT_PREPARE` after authentication stores kind, sequence ID, and template SQL.
+- Adapter test proving invalid prepare command bytes after authentication stay non-fatal.
+- Regression test coverage that existing `COM_QUERY` behavior remains unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub struct MysqlPendingStatementPrepare {
+    pub statement_id: u32,
+    pub template_sql: String,
+}
+```
+
+#### Correct
+
+```rust
+pub struct MysqlPendingStatementPrepare {
+    pub command: MysqlClientCommand,
 }
 ```
 
