@@ -937,3 +937,36 @@ Added the protocol discovery REST endpoint, static supported/planned protocol re
 ### Next Steps
 
 - None - task complete
+
+
+## Session 29: Standardize REST error responses
+
+**Date**: 2026-07-07
+**Task**: Standardize REST error responses
+**Branch**: `main`
+
+### Summary
+
+Standardized REST API error envelopes, added request ID injection into error bodies, added route fallback handling, expanded tests, and documented the backend error contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `006aa21` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
