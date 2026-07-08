@@ -4,9 +4,10 @@
 
 ## Overview
 
-The `web/` app is not present yet. When it is added, it should behave like a
-developer debugging tool: fast to scan, safe with untrusted SQL text, and stable
-under live updates.
+The `web/` app skeleton exists at `crates/sql-lens-app/web/` (Issue 064). It behaves
+like a developer debugging tool: fast to scan, safe with untrusted SQL text, and
+stable under live updates. Feature implementations (live data, charts, replay)
+land in follow-up issues and must keep these qualities.
 
 ## Code Quality
 
@@ -17,6 +18,23 @@ under live updates.
 - Prefer small, explicit components and hooks over broad generic abstractions.
 - Add dependencies only when they are part of the planned stack or justified by
   the task.
+
+## Build & Decoupling Contract (established by Issue 064)
+
+- The frontend must build standalone: `cd crates/sql-lens-app/web && npm run build`
+  exits 0 with no backend running.
+- The skeleton must contain **no concrete backend coupling**: no `fetch(`,
+  `XMLHttpRequest`, or `new WebSocket(...)` calls, and no `/api/v1` literals.
+  Verify before finishing a frontend task:
+  ```bash
+  grep -rnE "fetch\(|XMLHttpRequest|new WebSocket" crates/sql-lens-app/web/src/  # → no matches
+  grep -rn "/api/v1" crates/sql-lens-app/web/src/                                  # → no matches
+  ```
+- The only permitted backend reference is the config-only `apiBaseUrl` reader in
+  `src/lib/api/config.ts` (see directory-structure.md "API base URL wiring").
+- Typed API client functions (Issue 066) and TanStack Query (Issue 067) are the
+  sanctioned homes for runtime calls. Do not scatter `fetch` calls through
+  components or route stubs.
 
 ## User Experience Quality
 
@@ -42,7 +60,8 @@ Before merging UI work:
 - Playwright smoke tests for major flows once routing exists.
 - XSS tests for SQL text, parameters, and database error rendering.
 - Visual screenshots in PRs for significant UI changes.
-- Frontend type-check and lint commands once the toolchain exists.
+- Frontend type-check and build: `cd crates/sql-lens-app/web && npm run build`
+  (runs `tsc -b` strict type-check + `vite build`) must pass.
 
 ## Security Checks
 

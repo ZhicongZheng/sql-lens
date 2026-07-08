@@ -4,10 +4,11 @@
 
 ## Overview
 
-The `web/` frontend does not exist yet. These rules define the planned React and
-TypeScript UI contract from `AGENTS.md` and `CONTRIBUTING.md`; future UI work
-should update this file with real component examples as soon as components are
-created.
+The `web/` skeleton exists at `crates/sql-lens-app/web/` (Issue 064) with the app
+shell (`src/components/layout/`), shadcn/ui primitives (`src/components/ui/`), and
+route stubs (`src/app/routes/`) already in place. These rules define the React and
+TypeScript UI contract; update this file with real component examples as feature
+components are added.
 
 SQL Lens is a developer inspection tool, not a marketing site. Components should
 be dense, calm, and optimized for repeated debugging workflows.
@@ -35,11 +36,15 @@ be dense, calm, and optimized for repeated debugging workflows.
 
 ## Styling Patterns
 
-- Use TailwindCSS and shadcn/ui as the base styling system.
+- Use TailwindCSS v4 and shadcn/ui as the base styling system. The `cn()` helper
+  lives at `src/lib/utils.ts`; the path alias `@/*` resolves to `src/*`.
+- Use the status color tokens (`text-status-ok` / `-slow` / `-error` /
+  `-unknown`) defined in `src/styles/globals.css` — never hardcode `text-red-500`
+  and similar for status. See directory-structure.md "Theme tokens".
 - Keep tool surfaces compact and predictable: tables, split panes, filters,
   tabs, badges, and detail panels are preferred over decorative cards.
 - Use status badges and restrained color to distinguish `ok`, `error`, and
-  in-flight states.
+  in-flight states. Color is never the only signal — pair with text or an icon.
 - Do not render SQL text, parameters, or database errors as HTML.
 
 ## Accessibility
