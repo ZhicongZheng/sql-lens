@@ -1273,6 +1273,114 @@ match publisher.publish(event)? {
 }
 ```
 
+## Scenario: Slow SQL Classification Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-capture` classifies normalized `SqlEvent` values as slow
+  before storage, WebSocket broadcast, live statistics, or API exposure.
+- Classification is protocol-neutral capture enrichment. Protocol adapters
+  still emit `ok` or `error` from backend terminal packets.
+- This layer must not parse SQL text, inspect protocol metadata, write storage,
+  call APIs, or block packet forwarding.
+
+### 2. Signatures
+
+Public slow classification types live in `crates/sql-lens-capture/src/lib.rs`:
+
+```rust
+pub const DEFAULT_SLOW_THRESHOLD_MS: u64 = 500;
+
+pub struct SlowQueryClassifier;
+
+impl SlowQueryClassifier {
+    pub fn new(threshold: sql_lens_core::DurationMillis) -> Self;
+    pub fn threshold(&self) -> sql_lens_core::DurationMillis;
+    pub fn classify(&self, event: sql_lens_core::SqlEvent) -> sql_lens_core::SqlEvent;
+}
+```
+
+Config exposes the global threshold under `[proxy]` while runtime composition is
+still proxy-first:
+
+```toml
+[proxy]
+slow_threshold_ms = 500
+```
+
+### 3. Contracts
+
+- Classification consumes and returns a full `SqlEvent`; it does not mutate
+  shared storage in place.
+- `CaptureStatus::Ok` becomes `CaptureStatus::Slow` when
+  `event.duration >= threshold`.
+- `CaptureStatus::Ok` remains `Ok` below the threshold.
+- `CaptureStatus::Error`, `Unknown`, and already-`Slow` events are unchanged.
+- Threshold `0` is valid and classifies every successful event as slow.
+- App fan-out must classify once before cloning the event to storage,
+  WebSocket broadcast, and live statistics.
+- Storage, API handlers, WebSocket subscriptions, and statistics counters must
+  consume the classified status instead of reimplementing threshold checks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| OK event duration is below threshold | Status remains `Ok` |
+| OK event duration equals threshold | Status becomes `Slow` |
+| OK event duration exceeds threshold | Status becomes `Slow` |
+| Error event exceeds threshold | Status remains `Error` |
+| Unknown event exceeds threshold | Status remains `Unknown` |
+| Already slow event is classified again | Status remains `Slow` |
+| Classified event enters app fan-out | Stored event and live statistics see the classified status |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- `sql-lens-app` classifies once in capture fan-out and then records the same
+  classified event in the ring buffer and live statistics.
+
+Base:
+
+- Unit tests use synthetic `SqlEvent` values with deterministic durations.
+
+Bad:
+
+- MySQL adapter deciding that a successful OK packet should emit `Slow`.
+- API code recalculating slow status from `duration_ms`.
+- Live statistics applying a private threshold instead of counting
+  `CaptureStatus::Slow`.
+
+### 6. Tests Required
+
+- Classifier unit tests for below, equal, and above threshold.
+- Classifier unit tests for error, unknown, and already-slow statuses.
+- Config default and TOML parsing tests for `slow_threshold_ms`.
+- App fan-out test proving storage and live statistics receive classified
+  events.
+- Run `cargo fmt --check`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+if response.status == "ok" && response.duration_ms > 500 {
+    response.status = "slow".to_owned();
+}
+```
+
+#### Correct
+
+```rust
+let event = classifier.classify(event);
+store.append(event.clone());
+statistics.record_sql_event(&event);
+```
+
 ## Scenario: Ring Buffer Storage Contracts
 
 ### 1. Scope / Trigger

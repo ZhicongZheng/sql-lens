@@ -8,6 +8,7 @@ use std::{
 };
 
 use sql_lens_api::{ApiState, HttpServerConfig, HttpServerError, bind_http_server_with_state};
+use sql_lens_capture::SlowQueryClassifier;
 use sql_lens_core::{ConnectionInfo, DatabaseType, ProtocolName, SqlEvent, Timestamp};
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
@@ -314,12 +315,17 @@ async fn store_sql_events(state: &ApiState, events: Vec<SqlEvent>) {
         return;
     }
 
+    let classifier = SlowQueryClassifier::default();
     let broadcaster = state.sql_event_broadcaster();
     let event_store = state.event_store();
+    let live_statistics = state.live_statistics();
     let mut store = event_store.write().await;
+    let mut statistics = live_statistics.write().await;
 
     for event in events {
+        let event = classifier.classify(event);
         let _ = broadcaster.publish(event.clone());
+        statistics.record_sql_event(&event);
         store.append(event);
     }
 }
@@ -359,6 +365,102 @@ struct VecCaptureEventEmitter {
 impl CaptureEventEmitter for VecCaptureEventEmitter {
     fn emit(&mut self, event: SqlEvent) {
         self.events.push(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sql_lens_core::{
+        CaptureStatus, ConnectionId, DurationMillis, ProtocolMetadata, QueryTiming, SqlEventId,
+        SqlEventKind,
+    };
+
+    #[tokio::test]
+    async fn store_sql_events_classifies_slow_events_before_storage_and_statistics() {
+        let state = ApiState::default();
+        let event_id = SqlEventId("evt_slow".to_owned());
+
+        store_sql_events(
+            &state,
+            vec![test_event(
+                event_id.clone(),
+                CaptureStatus::Ok,
+                DurationMillis(sql_lens_capture::DEFAULT_SLOW_THRESHOLD_MS),
+            )],
+        )
+        .await;
+
+        let event_store = state.event_store();
+        let store = event_store.read().await;
+        let stored = store
+            .get(&event_id)
+            .expect("classified event should be stored");
+        assert_eq!(stored.status, CaptureStatus::Slow);
+        drop(store);
+
+        let live_statistics = state.live_statistics();
+        let mut statistics = live_statistics.write().await;
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.total_events, 1);
+        assert_eq!(snapshot.slow_events, 1);
+        assert_eq!(snapshot.error_events, 0);
+    }
+
+    #[tokio::test]
+    async fn store_sql_events_keeps_below_threshold_events_ok() {
+        let state = ApiState::default();
+        let event_id = SqlEventId("evt_ok".to_owned());
+
+        store_sql_events(
+            &state,
+            vec![test_event(
+                event_id.clone(),
+                CaptureStatus::Ok,
+                DurationMillis(sql_lens_capture::DEFAULT_SLOW_THRESHOLD_MS - 1),
+            )],
+        )
+        .await;
+
+        let event_store = state.event_store();
+        let store = event_store.read().await;
+        let stored = store
+            .get(&event_id)
+            .expect("classified event should be stored");
+        assert_eq!(stored.status, CaptureStatus::Ok);
+    }
+
+    fn test_event(id: SqlEventId, status: CaptureStatus, duration: DurationMillis) -> SqlEvent {
+        SqlEvent {
+            id,
+            timestamp: Timestamp("2026-07-06T09:00:00Z".to_owned()),
+            protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+            database_type: DatabaseType("mysql".to_owned()),
+            connection_id: ConnectionId("conn_1".to_owned()),
+            client_addr: "127.0.0.1:51000".to_owned(),
+            backend_addr: "127.0.0.1:3306".to_owned(),
+            user: None,
+            database: None,
+            kind: SqlEventKind::Query,
+            status,
+            duration,
+            original_sql: "SELECT 1".to_owned(),
+            normalized_sql: Some("select 1".to_owned()),
+            expanded_sql: None,
+            fingerprint: Some("select ?".to_owned()),
+            parameters: Vec::new(),
+            result: None,
+            error: None,
+            timings: QueryTiming {
+                started_at: Timestamp("2026-07-06T09:00:00Z".to_owned()),
+                ended_at: Some(Timestamp("2026-07-06T09:00:00Z".to_owned())),
+                duration,
+            },
+            metadata: ProtocolMetadata {
+                protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+                fields: Vec::new(),
+            },
+        }
     }
 }
 

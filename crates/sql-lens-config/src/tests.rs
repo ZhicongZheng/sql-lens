@@ -61,6 +61,7 @@ fn default_config_contains_documented_proxy_and_backend_defaults() {
     assert_eq!(config.proxy.listen, "127.0.0.1:3307");
     assert_eq!(config.proxy.protocol, Protocol::MySql);
     assert_eq!(config.proxy.capture_mode, CaptureMode::Observe);
+    assert_eq!(config.proxy.slow_threshold_ms, 500);
     assert_eq!(config.proxy.max_connections, 512);
     assert_eq!(config.proxy.connect_timeout_ms, 5_000);
     assert_eq!(config.proxy.idle_timeout_ms, 300_000);
@@ -270,6 +271,7 @@ fn valid_toml_file_loads_from_path() {
 listen = "127.0.0.1:4407"
 protocol = "mysql"
 capture_mode = "observe"
+slow_threshold_ms = 250
 max_connections = 32
 connect_timeout_ms = 1000
 idle_timeout_ms = 2000
@@ -335,6 +337,7 @@ timeout_ms = 200
     let config = SqlLensConfig::from_path(&config_file.path).expect("valid config should load");
 
     assert_eq!(config.proxy.listen, "127.0.0.1:4407");
+    assert_eq!(config.proxy.slow_threshold_ms, 250);
     assert_eq!(config.proxy.max_connections, 32);
     assert_eq!(config.proxy.shutdown_timeout_ms, 3_000);
     assert_eq!(config.backend.database_type, DatabaseType::TiDb);
@@ -369,6 +372,7 @@ level = "debug"
     assert_eq!(config.proxy.listen, "127.0.0.1:4408");
     assert_eq!(config.proxy.protocol, Protocol::MySql);
     assert_eq!(config.proxy.capture_mode, CaptureMode::Observe);
+    assert_eq!(config.proxy.slow_threshold_ms, 500);
     assert_eq!(config.proxy.shutdown_timeout_ms, 10_000);
     assert_eq!(config.backend.address, "127.0.0.1:3306");
     assert_eq!(config.storage.capacity, 100_000);

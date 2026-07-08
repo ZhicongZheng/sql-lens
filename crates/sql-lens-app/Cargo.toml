@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 sql-lens-api = { path = "../sql-lens-api" }
+sql-lens-capture = { path = "../sql-lens-capture" }
 sql-lens-config = { path = "../sql-lens-config" }
 sql-lens-core = { path = "../sql-lens-core" }
 sql-lens-protocol = { path = "../sql-lens-protocol" }

@@ -25,6 +25,7 @@ SQL_LENS_
 listen = "127.0.0.1:3307"
 protocol = "mysql"
 capture_mode = "observe"
+slow_threshold_ms = 500
 max_connections = 512
 connect_timeout_ms = 5000
 idle_timeout_ms = 300000
@@ -90,6 +91,8 @@ Fields:
 - `listen`: bind address for database client connections.
 - `protocol`: initial protocol adapter, such as `mysql`.
 - `capture_mode`: `observe` for normal capture.
+- `slow_threshold_ms`: successful SQL at or above this duration is classified
+  as `slow`.
 - `max_connections`: connection limit.
 - `connect_timeout_ms`: backend dial timeout.
 - `idle_timeout_ms`: idle connection timeout.

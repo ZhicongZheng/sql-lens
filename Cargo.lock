@@ -2182,6 +2182,7 @@ dependencies = [
  "mysql_async",
  "reqwest",
  "sql-lens-api",
+ "sql-lens-capture",
  "sql-lens-config",
  "sql-lens-core",
  "sql-lens-protocol",
