@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify StarRocks compatibility coverage preserves shared core/API event contracts and metadata boundaries."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "The smoke test crosses Docker runtime, proxy, protocol adapter, storage, and API boundaries."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Check whether Docker readiness/API polling helpers should be reused or kept local without premature abstraction."}

@@ -358,6 +358,100 @@ SqlEvent {
 }
 ```
 
+## Scenario: MySQL-Compatible Docker Smoke Tests
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` integration tests start live MySQL-compatible
+  databases in Docker and verify traffic through the SQL Lens proxy plus REST
+  API state.
+- These tests prove runtime wiring across app, proxy, MySQL protocol adapter,
+  capture storage, and API. They must stay opt-in because the containers are
+  slow and require Docker access.
+
+### 2. Signatures
+
+Environment gates are one variable per live target:
+
+```text
+SQL_LENS_DOCKER_TESTS=1
+SQL_LENS_STARROCKS_TESTS=1
+SQL_LENS_TIDB_TESTS=1
+SQL_LENS_DORIS_TESTS=1
+```
+
+Shared test URLs must disable socket preference:
+
+```text
+mysql://<user>[:password]@<host>:<port>[/database]?prefer_socket=false
+```
+
+### 3. Contracts
+
+- Default `cargo test` and `cargo test --workspace` must skip Docker smoke
+  tests unless the target environment gate is set.
+- Smoke tests connect through `start_minimal_mysql_runtime`, not directly to
+  the backend for the captured query path.
+- API assertions use `GET /api/v1/sql-events` and, when parameters matter,
+  `GET /api/v1/sql-events/{id}`.
+- Prepared statement smoke coverage should follow the existing MySQL/TiDB
+  `statement_execute` API shape: template SQL in `original_sql`, rendered SQL
+  in `expanded_sql`, and sensitive parameters redacted by storage/API.
+- Docker-mapped localhost connections must set `prefer_socket=false`; otherwise
+  `mysql_async` may query `@@socket`, which is unsupported by some
+  MySQL-compatible targets such as StarRocks.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Environment gate is unset | Test prints a skip message and returns success |
+| Backend port opens before query readiness | Keep polling a small `SELECT 1` readiness query until timeout |
+| MySQL-compatible target lacks `@@socket` | Use `prefer_socket=false`; do not add product runtime workarounds |
+| Captured event does not appear in API | Fail the smoke test with a timeout |
+| Target prepared statements are outside first-smoke scope | Document the gap in the task or a follow-up issue |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A TiDB smoke test runs text query and prepared execute through SQL Lens, then
+  asserts API summary and detail fields.
+
+Base:
+
+- StarRocks and Doris first-smoke tests run stable text queries through SQL
+  Lens and assert API capture, while documenting prepared statement gaps.
+
+Bad:
+
+- Running Docker containers in default test execution.
+- Connecting directly to the backend for the query that should be captured.
+- Removing `prefer_socket=false` from localhost Docker test URLs.
+
+### 6. Tests Required
+
+- `rtk cargo fmt --check`.
+- `rtk cargo test -p sql-lens-app`.
+- Target-specific env-gated Docker smoke command for each new live target.
+- Existing MySQL Docker smoke command when shared helpers change.
+- `rtk cargo test --workspace`.
+- `rtk cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let url = format!("mysql://root@{address}");
+```
+
+#### Correct
+
+```rust
+let url = format!("mysql://root@{address}?prefer_socket=false");
+```
+
 ## Scenario: Config Validation Contracts
 
 ### 1. Scope / Trigger
