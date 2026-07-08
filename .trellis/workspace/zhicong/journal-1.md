@@ -1762,3 +1762,36 @@ Implemented Issue 057 by parsing COM_STMT_CLOSE, removing connection-local prepa
 ### Next Steps
 
 - None - task complete
+
+
+## Session 54: Observe COM_PING and COM_QUIT
+
+**Date**: 2026-07-08
+**Task**: Observe COM_PING and COM_QUIT
+**Branch**: `main`
+
+### Summary
+
+Implemented Issue 058 by parsing MySQL COM_PING and COM_QUIT, updating MySQL-local connection activity/state without SQL event emission, adding focused parser/adapter tests, and documenting the command observation contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d7067bb` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
