@@ -1961,3 +1961,36 @@ Implemented backend slow SQL classification for normalized capture events. Added
 ### Next Steps
 
 - None - task complete
+
+
+## Session 60: Issue 064: React web app skeleton
+
+**Date**: 2026-07-08
+**Task**: Issue 064: React web app skeleton
+**Branch**: `main`
+
+### Summary
+
+Built the React+TypeScript web UI skeleton at crates/sql-lens-app/web/ (Vite 6 + React 18 + TailwindCSS v4 + shadcn/ui + React Router v7). App shell with sidebar/topbar/main, six primary nav routes from UI.md as stubs, light/dark theme provider persisting to localStorage, status color tokens. Fully backend-decoupled (no fetch/XHR/WebSocket, no /api/v1 literals); apiBaseUrl is config-only via VITE_API_BASE_URL. Verified by trellis-check: npm run build passes, grep for backend coupling is empty. Updated frontend specs (directory-structure, quality-guidelines, component-guidelines) with the verified layout, API base URL env contract, theme token contract, and the build/decoupling contract with grep assertions. Deferred API client (066), TanStack Query (067), Monaco, ECharts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2e49ecc` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
