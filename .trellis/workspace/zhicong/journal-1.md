@@ -1895,3 +1895,36 @@ Implemented MySQL prepared statement execute event emission, added protocol cove
 ### Next Steps
 
 - None - task complete
+
+
+## Session 58: Add MySQL-compatible Docker smoke tests
+
+**Date**: 2026-07-08
+**Task**: Add MySQL-compatible Docker smoke tests
+**Branch**: `main`
+
+### Summary
+
+Implemented env-gated Docker smoke tests for StarRocks, TiDB, and Doris through the SQL Lens MySQL-compatible proxy/API path. Refactored MySQL live test helpers, disabled mysql_async socket probing for Docker-mapped compatibility targets, documented the convention in backend quality specs, validated StarRocks/TiDB/Doris/MySQL gated tests plus workspace tests and clippy.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d4930be` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

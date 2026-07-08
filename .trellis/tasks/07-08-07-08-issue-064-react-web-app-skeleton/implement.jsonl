@@ -1,0 +1,4 @@
+{"file": "UI.md", "reason": "Stack, information architecture (6 primary nav routes), desktop/mobile layout, theme requirements, and the 'Recommended React Structure' the skeleton must match."}
+{"file": "ARCHITECTURE.md", "reason": "Confirms web UI is served by sql-lens-app, API listener default 127.0.0.1:5173, and module boundaries the frontend must stay decoupled from."}
+{"file": "API.md", "reason": "API contract the skeleton must NOT couple to now (Issue 064 = no backend coupling) but must align with later in Issue 066. Defines base path /api/v1 and error model."}
+{"file": "ISSUES.md", "reason": "Issue 064 definition, acceptance criteria, dependencies; boundaries of follow-up issues 066 (API client) and 067 (TanStack Query) that this skeleton must not scope-creep into."}

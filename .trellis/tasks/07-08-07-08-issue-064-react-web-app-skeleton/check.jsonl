@@ -1,0 +1,3 @@
+{"file": "UI.md", "reason": "Verify directory layout matches 'Recommended React Structure'; verify the six primary nav routes and layout shell are present; verify light/dark theme and status color tokens."}
+{"file": "ISSUES.md", "reason": "Verify Issue 064 acceptance criteria: app builds, layout matches UI.md, no backend coupling hardcoded."}
+{"file": "API.md", "reason": "Confirm no concrete endpoint coupling leaked into the skeleton (grep for /api/v1, fetch, WebSocket)."}
