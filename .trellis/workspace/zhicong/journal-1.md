@@ -1928,3 +1928,36 @@ Implemented env-gated Docker smoke tests for StarRocks, TiDB, and Doris through 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 59: Add slow SQL classification
+
+**Date**: 2026-07-08
+**Task**: Add slow SQL classification
+**Branch**: `main`
+
+### Summary
+
+Implemented backend slow SQL classification for normalized capture events. Added proxy slow_threshold_ms config, a sql-lens-capture SlowQueryClassifier, app fan-out classification before broadcast/storage/statistics, tests for classifier/config/app behavior, and backend spec documentation. Validated fmt, targeted tests, workspace tests, and clippy.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `294789d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

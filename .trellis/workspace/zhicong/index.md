@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 58
+- **Total Sessions**: 59
 - **Last Active**: 2026-07-08
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1930 | Active |
+| `journal-1.md` | ~1963 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 59 | 2026-07-08 | Add slow SQL classification | `294789d` | `main` |
 | 58 | 2026-07-08 | Add MySQL-compatible Docker smoke tests | `d4930be` | `main` |
 | 57 | 2026-07-08 | Issue 060 prepared statement live capture | `ffd3708`,  `ff5e45e` | `main` |
 | 56 | 2026-07-08 | Issue 059 Docker MySQL live capture | `76156c7` | `main` |
