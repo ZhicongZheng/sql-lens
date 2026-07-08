@@ -11,6 +11,17 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+sql-lens-api = { path = "../sql-lens-api" }
 sql-lens-config = { path = "../sql-lens-config" }
+sql-lens-core = { path = "../sql-lens-core" }
+sql-lens-protocol = { path = "../sql-lens-protocol" }
+sql-lens-protocol-mysql = { path = "../sql-lens-protocol-mysql" }
+sql-lens-proxy = { path = "../sql-lens-proxy" }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[dev-dependencies]
+mysql_async = "0.37"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+testcontainers = "0.25"

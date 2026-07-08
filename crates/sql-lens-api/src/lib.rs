@@ -26,7 +26,8 @@ pub use live_sql_events::{
 pub use protocols::{PROTOCOLS_PATH, ProtocolListResponse, ProtocolResponse};
 pub use request_id::{REQUEST_ID_HEADER, RequestId};
 pub use server::{
-    BoundHttpServer, HttpServerConfig, HttpServerError, bind_http_server, router, router_with_state,
+    BoundHttpServer, HttpServerConfig, HttpServerError, bind_http_server,
+    bind_http_server_with_state, router, router_with_state,
 };
 pub use sql_events::{
     ErrorSummaryResponse, MetadataValueResponse, ProtocolMetadataResponse, QueryTimingResponse,

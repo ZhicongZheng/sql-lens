@@ -50,6 +50,13 @@ impl BoundHttpServer {
 pub async fn bind_http_server(
     config: &HttpServerConfig,
 ) -> Result<BoundHttpServer, HttpServerError> {
+    bind_http_server_with_state(config, ApiState::default()).await
+}
+
+pub async fn bind_http_server_with_state(
+    config: &HttpServerConfig,
+    state: ApiState,
+) -> Result<BoundHttpServer, HttpServerError> {
     let listener =
         TcpListener::bind(&config.listen)
             .await
@@ -61,7 +68,7 @@ pub async fn bind_http_server(
 
     Ok(BoundHttpServer {
         listener,
-        router: router(),
+        router: router_with_state(state),
         local_addr,
     })
 }
