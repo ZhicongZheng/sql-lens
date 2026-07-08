@@ -241,6 +241,123 @@ pub fn load_config(path: impl AsRef<std::path::Path>) -> Result<SqlLensConfig, C
 }
 ```
 
+## Scenario: MySQL Prepared Statement Capture Events
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` turns `COM_STMT_EXECUTE` traffic into
+  cross-layer `SqlEvent` records consumed by storage, REST API, WebSocket, and
+  future UI surfaces.
+- Prepared statement execution events are public debugging data. MySQL-only
+  details must stay in protocol metadata, not top-level core fields.
+
+### 2. Signatures
+
+Prepared execute events use the existing core model:
+
+```rust
+SqlEvent {
+    kind: SqlEventKind::StatementExecute,
+    protocol: ProtocolName("mysql".to_owned()),
+    original_sql: "<prepared template SQL>".to_owned(),
+    expanded_sql: Some("<rendered SQL with parameters>".to_owned()),
+    parameters: Vec<SqlParameter>,
+    metadata: ProtocolMetadata { protocol, fields },
+    ..
+}
+```
+
+Required MySQL metadata fields:
+
+- `command = "COM_STMT_EXECUTE"`
+- `command_sequence_id`
+- `statement_id`
+- `flags`
+- `iteration_count`
+- `ok_status_flags` when present on OK packets
+
+### 3. Contracts
+
+- Client `COM_STMT_EXECUTE` observation may store decoded parameters and
+  expanded SQL on MySQL connection-local state.
+- Backend OK/ERR terminal packets complete that stored execute envelope and
+  emit exactly one `SqlEventKind::StatementExecute` event.
+- The event's `original_sql` is the prepared template SQL when the statement ID
+  is known.
+- The event's `expanded_sql` comes from the MySQL execute renderer.
+- Storage redaction remains the owner of masking before API exposure. Protocol
+  code may provide parameter names inferred from safe template context such as
+  `password = ?`, but must not implement a second redaction policy.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Execute envelope exists and backend OK arrives | Emit `StatementExecute` with `status = Ok`, result summary, parameters, expanded SQL, and metadata |
+| Execute envelope exists and backend ERR arrives | Emit `StatementExecute` with `status = Error` and sanitized `ErrorSummary` |
+| Backend response is unsupported or incomplete | Keep the envelope and return without emitting |
+| Client execute packet is malformed or parameter decoding fails | Stay non-fatal and do not create an execute envelope |
+| Sensitive parameter name matches default policy | Ring buffer stores/API returns masked parameter value and masked expanded SQL |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- `UPDATE users SET name = ?, password = ? WHERE id = 42` emits a
+  `statement_execute` API detail response with `password` redacted by storage.
+
+Base:
+
+- Unknown statement IDs may still produce a MySQL execute envelope, but the
+  event should not invent template SQL or parameters.
+
+Bad:
+
+- Adding `mysql_statement_id` directly to `SqlEvent`.
+- Redacting values inside the MySQL adapter instead of letting storage apply the
+  configured redaction policy.
+- Dropping prepared execute events because resultset capture is not implemented;
+  OK/ERR terminal paths should still be captured.
+
+### 6. Tests Required
+
+- Protocol unit test: prepared execute + backend OK emits
+  `SqlEventKind::StatementExecute` with template SQL, decoded parameters,
+  expanded SQL, result summary, and MySQL metadata.
+- Docker integration test: real MySQL driver prepared statement through the
+  proxy appears in `GET /api/v1/sql-events` and detail endpoint.
+- Redaction assertion: API-visible sensitive parameter value and expanded SQL
+  are masked after storage retention.
+- Regression checks: existing COM_QUERY live coverage and MySQL protocol unit
+  tests remain green.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+SqlEvent {
+    kind: SqlEventKind::Query,
+    original_sql: expanded_sql,
+    parameters: Vec::new(),
+    metadata: ProtocolMetadata { fields: Vec::new(), .. },
+    ..
+}
+```
+
+#### Correct
+
+```rust
+SqlEvent {
+    kind: SqlEventKind::StatementExecute,
+    original_sql: template_sql,
+    expanded_sql: Some(expanded_sql),
+    parameters,
+    metadata: mysql_execute_metadata,
+    ..
+}
+```
+
 ## Scenario: Config Validation Contracts
 
 ### 1. Scope / Trigger

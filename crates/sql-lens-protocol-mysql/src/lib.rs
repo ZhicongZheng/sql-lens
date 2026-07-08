@@ -18,7 +18,7 @@ use std::{
 use sql_lens_core::{
     CaptureStatus, ConnectionInfo, ConnectionState, DurationMillis, ErrorSummary, MetadataField,
     MetadataValue, ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent,
-    SqlEventId, SqlEventKind, Timestamp,
+    SqlEventId, SqlEventKind, SqlParameter, Timestamp,
 };
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
@@ -131,6 +131,12 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
         let prepare_response_consumed = state.observe_backend_statement_prepare_response(bytes);
         let events_emitted = if prepare_response_consumed {
             0
+        } else if state.observe_backend_statement_execute_response(
+            bytes,
+            events,
+            self.clock.as_ref(),
+        ) {
+            1
         } else {
             state.observe_backend_query_response(bytes, events, self.clock.as_ref())
         };
@@ -211,6 +217,8 @@ pub enum MysqlStatementPrepareResponseState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MysqlStatementExecuteEnvelope {
     pub command: MysqlClientCommand,
+    pub started_at: Timestamp,
+    pub started_monotonic: Instant,
     pub statement_id: u32,
     pub flags: u8,
     pub iteration_count: u32,
@@ -478,6 +486,7 @@ impl MysqlConnectionState {
                     } else {
                         (Vec::new(), Vec::new(), None)
                     };
+                let time = clock.now();
                 let client_command = MysqlClientCommand {
                     kind: MysqlCommandKind::StatementExecute,
                     sequence_id: packet.header.sequence_id,
@@ -490,6 +499,8 @@ impl MysqlConnectionState {
                 self.last_client_command = Some(client_command.clone());
                 self.last_statement_execute_envelope = Some(MysqlStatementExecuteEnvelope {
                     command: client_command,
+                    started_at: time.timestamp,
+                    started_monotonic: time.monotonic,
                     statement_id: execute.statement_id,
                     flags: execute.flags,
                     iteration_count: execute.iteration_count,
@@ -561,6 +572,47 @@ impl MysqlConnectionState {
         1
     }
 
+    fn observe_backend_statement_execute_response(
+        &mut self,
+        bytes: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+        clock: &dyn MysqlObservationClock,
+    ) -> bool {
+        if self.phase != MysqlConnectionPhase::Authenticated
+            || self.last_statement_execute_envelope.is_none()
+        {
+            return false;
+        }
+
+        let Ok(packet) = parse_mysql_packet(bytes) else {
+            return false;
+        };
+
+        let Some(status) = query_terminal_status(packet.payload) else {
+            return false;
+        };
+        let ok_summary = if status == CaptureStatus::Ok {
+            parse_ok_packet_summary(packet.payload).ok().flatten()
+        } else {
+            None
+        };
+        let err_summary = if status == CaptureStatus::Error {
+            parse_err_packet_summary(packet.payload).ok().flatten()
+        } else {
+            None
+        };
+
+        let Some(envelope) = self.last_statement_execute_envelope.take() else {
+            return false;
+        };
+        let ended = clock.now();
+        let event = self.statement_execute_event(envelope, ended, status, ok_summary, err_summary);
+
+        events.emit(event);
+
+        true
+    }
+
     fn observe_backend_statement_prepare_response(&mut self, bytes: &[u8]) -> bool {
         if self.phase != MysqlConnectionPhase::Authenticated
             || self.pending_statement_prepare.is_none()
@@ -614,6 +666,101 @@ impl MysqlConnectionState {
         true
     }
 
+    fn statement_execute_event(
+        &mut self,
+        envelope: MysqlStatementExecuteEnvelope,
+        ended: MysqlObservationTime,
+        status: CaptureStatus,
+        ok_summary: Option<MysqlOkPacketSummary>,
+        err_summary: Option<MysqlErrPacketSummary>,
+    ) -> SqlEvent {
+        let duration = duration_millis(envelope.started_monotonic, ended.monotonic);
+        let event_id = SqlEventId(format!(
+            "{}_statement_execute_{}",
+            self.connection.id.0, self.next_query_sequence
+        ));
+        self.next_query_sequence += 1;
+        let result = ok_summary.map(|summary| ResultSummary {
+            affected_rows: Some(summary.affected_rows),
+            returned_rows: None,
+        });
+        let error = err_summary.map(mysql_error_summary);
+        let template_sql = envelope
+            .statement
+            .as_ref()
+            .map(|statement| statement.template_sql.as_str());
+        let parameters = envelope
+            .parameters
+            .into_iter()
+            .map(|parameter| SqlParameter {
+                index: parameter.index,
+                name: statement_parameter_name(template_sql, parameter.index),
+                value: parameter.value,
+                redacted: false,
+            })
+            .collect();
+        let mut metadata_fields = vec![
+            MetadataField {
+                key: "command".to_owned(),
+                value: MetadataValue::String("COM_STMT_EXECUTE".to_owned()),
+            },
+            MetadataField {
+                key: "command_sequence_id".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(envelope.command.sequence_id)),
+            },
+            MetadataField {
+                key: "statement_id".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(envelope.statement_id)),
+            },
+            MetadataField {
+                key: "flags".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(envelope.flags)),
+            },
+            MetadataField {
+                key: "iteration_count".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(envelope.iteration_count)),
+            },
+        ];
+
+        if let Some(status_flags) = ok_summary.and_then(|summary| summary.status_flags) {
+            metadata_fields.push(MetadataField {
+                key: "ok_status_flags".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(status_flags)),
+            });
+        }
+
+        SqlEvent {
+            id: event_id,
+            timestamp: envelope.started_at.clone(),
+            protocol: self.connection.protocol.clone(),
+            database_type: self.connection.database_type.clone(),
+            connection_id: self.connection.id.clone(),
+            client_addr: self.connection.client_addr.clone(),
+            backend_addr: self.connection.backend_addr.clone(),
+            user: self.connection.user.clone(),
+            database: self.connection.database.clone(),
+            kind: SqlEventKind::StatementExecute,
+            status,
+            duration,
+            original_sql: envelope.command.sql,
+            normalized_sql: None,
+            expanded_sql: envelope.expanded_sql,
+            fingerprint: None,
+            parameters,
+            result,
+            error,
+            timings: QueryTiming {
+                started_at: envelope.started_at,
+                ended_at: Some(ended.timestamp),
+                duration,
+            },
+            metadata: ProtocolMetadata {
+                protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+                fields: metadata_fields,
+            },
+        }
+    }
+
     fn query_event(
         &mut self,
         pending: MysqlPendingQuery,
@@ -634,18 +781,7 @@ impl MysqlConnectionState {
             affected_rows: Some(summary.affected_rows),
             returned_rows: None,
         });
-        let error = err_summary.map(|summary| ErrorSummary {
-            code: Some(summary.error_code.to_string()),
-            sql_state: summary.sql_state,
-            message: summary.message,
-            metadata: Some(ProtocolMetadata {
-                protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
-                fields: vec![MetadataField {
-                    key: "mysql_error_code".to_owned(),
-                    value: MetadataValue::Unsigned(u64::from(summary.error_code)),
-                }],
-            }),
-        });
+        let error = err_summary.map(mysql_error_summary);
         let mut metadata_fields = vec![
             MetadataField {
                 key: "command".to_owned(),
@@ -694,6 +830,50 @@ impl MysqlConnectionState {
                 fields: metadata_fields,
             },
         }
+    }
+}
+
+fn mysql_error_summary(summary: MysqlErrPacketSummary) -> ErrorSummary {
+    ErrorSummary {
+        code: Some(summary.error_code.to_string()),
+        sql_state: summary.sql_state,
+        message: summary.message,
+        metadata: Some(ProtocolMetadata {
+            protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+            fields: vec![MetadataField {
+                key: "mysql_error_code".to_owned(),
+                value: MetadataValue::Unsigned(u64::from(summary.error_code)),
+            }],
+        }),
+    }
+}
+
+fn statement_parameter_name(template_sql: Option<&str>, parameter_index: u16) -> Option<String> {
+    let template_sql = template_sql?;
+    let placeholder_index = usize::from(parameter_index);
+    let placeholder_position = nth_placeholder_position(template_sql, placeholder_index)?;
+    assignment_identifier_before_placeholder(&template_sql[..placeholder_position])
+}
+
+fn nth_placeholder_position(template_sql: &str, placeholder_index: usize) -> Option<usize> {
+    template_sql
+        .match_indices('?')
+        .nth(placeholder_index)
+        .map(|(position, _)| position)
+}
+
+fn assignment_identifier_before_placeholder(prefix: &str) -> Option<String> {
+    let before_equals = prefix.trim_end().strip_suffix('=')?.trim_end();
+    let identifier_end = before_equals.len();
+    let identifier_start = before_equals[..identifier_end]
+        .rfind(|value: char| !(value.is_ascii_alphanumeric() || value == '_'))
+        .map_or(0, |position| position + 1);
+    let identifier = before_equals[identifier_start..identifier_end].trim_matches('`');
+
+    if identifier.is_empty() {
+        None
+    } else {
+        Some(identifier.to_owned())
     }
 }
 
@@ -1261,7 +1441,7 @@ mod tests {
 
     #[test]
     fn mysql_adapter_observes_com_stmt_execute_with_known_statement_id() {
-        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "execute_start")]));
         let mut state = adapter.create_connection_state(&test_context());
         let mut events = VecCaptureEventEmitter::default();
         observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
@@ -1325,7 +1505,7 @@ mod tests {
 
     #[test]
     fn mysql_adapter_observes_com_stmt_execute_numeric_parameters_with_known_statement_id() {
-        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "execute_start")]));
         let mut state = adapter.create_connection_state(&test_context());
         let mut events = VecCaptureEventEmitter::default();
         observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
@@ -1395,7 +1575,7 @@ mod tests {
         const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
         const MYSQL_TYPE_STRING: u8 = 0xfe;
 
-        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "execute_start")]));
         let mut state = adapter.create_connection_state(&test_context());
         let mut events = VecCaptureEventEmitter::default();
         observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
@@ -1472,13 +1652,121 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_emits_statement_execute_event_when_backend_ok_finalizes_execute() {
+        const MYSQL_TYPE_VAR_STRING: u8 = 0xfd;
+
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[
+            (10, "execute_start"),
+            (42, "execute_end"),
+        ]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet(
+                    "update users set name = ?, password = ? where id = 42",
+                    0,
+                ),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x5566_7788, 0, 2, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let mut parameter_payload = vec![0x00, 0x01];
+        parameter_payload.extend_from_slice(&[
+            MYSQL_TYPE_VAR_STRING,
+            0x00,
+            MYSQL_TYPE_VAR_STRING,
+            0x00,
+        ]);
+        parameter_payload.extend_from_slice(&length_encoded_value(b"alice"));
+        parameter_payload.extend_from_slice(&length_encoded_value(b"s3cr3t"));
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_execute_packet(0x5566_7788, 0, 1, &parameter_payload, 2),
+                &mut events,
+            )
+            .expect("COM_STMT_EXECUTE should be observed");
+
+        let response = query_ok_packet();
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("backend OK should finalize statement execute");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(events.events.len(), 1);
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert_eq!(
+            event.id,
+            SqlEventId("conn_1_statement_execute_1".to_owned())
+        );
+        assert_eq!(event.timestamp, Timestamp("execute_start".to_owned()));
+        assert_eq!(event.kind, SqlEventKind::StatementExecute);
+        assert_eq!(event.status, CaptureStatus::Ok);
+        assert_eq!(event.duration, DurationMillis(32));
+        assert_eq!(
+            event.original_sql,
+            "update users set name = ?, password = ? where id = 42"
+        );
+        assert_eq!(
+            event.expanded_sql.as_deref(),
+            Some("update users set name = 'alice', password = 's3cr3t' where id = 42")
+        );
+        assert_eq!(event.parameters.len(), 2);
+        assert_eq!(event.parameters[0].index, 0);
+        assert_eq!(event.parameters[0].name.as_deref(), Some("name"));
+        assert_eq!(
+            event.parameters[0].value,
+            SqlParameterValue::String("alice".to_owned())
+        );
+        assert_eq!(event.parameters[1].index, 1);
+        assert_eq!(event.parameters[1].name.as_deref(), Some("password"));
+        assert_eq!(
+            event.parameters[1].value,
+            SqlParameterValue::String("s3cr3t".to_owned())
+        );
+        assert_eq!(
+            event.result,
+            Some(ResultSummary {
+                affected_rows: Some(0),
+                returned_rows: None,
+            })
+        );
+        assert_eq!(event.metadata.fields[0].key, "command");
+        assert_eq!(
+            event.metadata.fields[0].value,
+            MetadataValue::String("COM_STMT_EXECUTE".to_owned())
+        );
+        assert_eq!(event.metadata.fields[2].key, "statement_id");
+        assert_eq!(
+            event.metadata.fields[2].value,
+            MetadataValue::Unsigned(0x5566_7788)
+        );
+    }
+
+    #[test]
     fn mysql_adapter_observes_com_stmt_execute_temporal_parameters_with_known_statement_id() {
         const MYSQL_TYPE_TIMESTAMP: u8 = 0x07;
         const MYSQL_TYPE_DATE: u8 = 0x0a;
         const MYSQL_TYPE_TIME: u8 = 0x0b;
         const MYSQL_TYPE_DATETIME: u8 = 0x0c;
 
-        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "execute_start")]));
         let mut state = adapter.create_connection_state(&test_context());
         let mut events = VecCaptureEventEmitter::default();
         observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
@@ -1562,7 +1850,7 @@ mod tests {
 
     #[test]
     fn mysql_adapter_observes_com_stmt_execute_with_unknown_statement_id() {
-        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "execute_start")]));
         let mut state = adapter.create_connection_state(&test_context());
         let mut events = VecCaptureEventEmitter::default();
         observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
