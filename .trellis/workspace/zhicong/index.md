@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 51
-- **Last Active**: 2026-07-07
+- **Total Sessions**: 52
+- **Last Active**: 2026-07-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1698 | Active |
+| `journal-1.md` | ~1731 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 52 | 2026-07-08 | Redact SQL events before sinks | `90a561a` | `main` |
 | 51 | 2026-07-07 | Render MySQL prepared statement SQL | `9829b9b` | `main` |
 | 50 | 2026-07-07 | Decode MySQL temporal parameters | `89e6884` | `main` |
 | 49 | 2026-07-07 | Decode MySQL string and binary parameters | `dcbbacb` | `main` |

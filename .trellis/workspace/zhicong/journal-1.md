@@ -1696,3 +1696,36 @@ Implemented Issue 055 with MySQL-local expanded SQL rendering, placeholder scann
 ### Next Steps
 
 - None - task complete
+
+
+## Session 52: Redact SQL events before sinks
+
+**Date**: 2026-07-08
+**Task**: Redact SQL events before sinks
+**Branch**: `main`
+
+### Summary
+
+Implemented Issue 056 by adding protocol-neutral SQL event redaction, default sensitive names, ring buffer and WebSocket sink-boundary redaction, focused tests, and backend spec coverage.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `90a561a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
