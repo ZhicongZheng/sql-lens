@@ -3603,6 +3603,169 @@ let expanded_sql = render_expanded_sql(template, &parameters)?;
 envelope.expanded_sql = Some(expanded_sql);
 ```
 
+## Scenario: SQL Event Redaction Before Storage And Broadcast
+
+### 1. Scope / Trigger
+
+- Trigger: SQL events are about to cross a retention or live delivery boundary.
+- `sql-lens-core` owns the protocol-neutral redaction policy and event
+  transformation.
+- `sql-lens-storage` applies redaction before retaining events in the ring
+  buffer.
+- `sql-lens-api` applies redaction before publishing events to WebSocket
+  subscribers.
+- This layer must not parse SQL, add regex dependencies, classify PII, call
+  plugins, mutate forwarded traffic, or change API response schemas.
+
+### 2. Signatures
+
+Core redaction APIs live in `crates/sql-lens-core/src/redaction.rs` and are
+re-exported from the crate root:
+
+```rust
+pub const DEFAULT_REDACTION_MASK: &str = "***";
+pub const DEFAULT_REDACTION_PARAMETER_NAMES: &[&str];
+
+pub struct RedactionPolicy {
+    pub enabled: bool,
+    pub mask: String,
+    pub parameter_names: Vec<String>,
+    pub sql_patterns: Vec<String>,
+}
+
+pub fn redact_sql_event(event: SqlEvent, policy: &RedactionPolicy) -> SqlEvent;
+```
+
+Sink-boundary constructors must keep their default constructor and provide an
+explicit policy constructor:
+
+```rust
+impl RingBufferStore {
+    pub fn new(capacity: NonZeroUsize) -> Self;
+    pub fn with_redaction_policy(
+        capacity: NonZeroUsize,
+        redaction_policy: RedactionPolicy,
+    ) -> Self;
+}
+
+impl SqlEventBroadcaster {
+    pub fn new(capacity: NonZeroUsize) -> Self;
+    pub fn with_redaction_policy(
+        capacity: NonZeroUsize,
+        redaction_policy: RedactionPolicy,
+    ) -> Self;
+}
+```
+
+### 3. Contracts
+
+- Redaction is enabled by default.
+- The default mask is `***`.
+- Default sensitive names are `password`, `passwd`, `token`, `secret`,
+  `api_key`, `access_key`, and `refresh_token`.
+- Parameter-name matching is case-insensitive exact matching.
+- Empty configured parameter names are ignored.
+- When a parameter name matches, set `redacted = true` and replace the value
+  with `SqlParameterValue::String(mask)`.
+- Parameters that arrive with `redacted = true` must stay redacted and must not
+  retain their original value after sink-boundary redaction.
+- Empty SQL patterns and empty sensitive values are ignored.
+- SQL patterns are literal substring replacements across `original_sql`,
+  `normalized_sql`, and `expanded_sql`.
+- Redacted parameter values are also removed from `original_sql`,
+  `normalized_sql`, and `expanded_sql` where simple display-value replacement
+  can identify them.
+- String-like parameter values should replace both raw text and single-quoted
+  display literals using doubled single-quote escaping.
+- `NULL` has no SQL text replacement candidate but the parameter value itself is
+  still masked when the parameter is sensitive.
+- `RingBufferStore::append` must call `redact_sql_event` before retaining the
+  event.
+- `SqlEventBroadcaster::publish` must call `redact_sql_event` before sending
+  the event to subscribers.
+- REST SQL event responses inherit storage redaction and must not duplicate
+  redaction logic at serialization time in this layer.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Policy disabled | Return the event unchanged |
+| Parameter name matches with different case | Redact the parameter |
+| Parameter already has `redacted = true` | Replace its value with the policy mask |
+| SQL pattern is configured | Replace the literal pattern in all SQL text fields |
+| SQL pattern is empty | Ignore it |
+| Sensitive parameter value is empty | Do not replace whole SQL strings |
+| Sensitive string value appears in expanded SQL | Replace it with the mask |
+| Sensitive quoted display literal appears in expanded SQL | Replace it with quoted mask |
+| Storage append receives sensitive event | Retain only the redacted event |
+| WebSocket broadcaster receives sensitive event | Deliver only the redacted event |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Redaction rules are implemented once in `sql-lens-core`.
+- Storage and WebSocket broadcast call the shared redactor at their sink
+  boundaries.
+- Tests assert the retained or delivered event no longer contains the raw
+  sensitive value.
+
+Base:
+
+- Later app composition can convert `RedactionConfig` into `RedactionPolicy`.
+- Later central capture fan-out can redact once before cloning events to
+  storage, WebSocket, exporters, and statistics.
+- Later security work can add SQL parsing, regex, classifiers, plugin rules, or
+  RBAC-aware response redaction behind a new task design.
+
+Bad:
+
+- Adding `serde_json`, regex, SQL parser, async, database, or HTTP dependencies
+  to `sql-lens-core` for this layer.
+- Reimplementing separate redaction behavior in storage, API serializers, and
+  WebSocket message builders.
+- Logging raw SQL, parameters, authentication payloads, or database errors from
+  redaction code.
+- Changing `SqlEvent`, `SqlParameter`, or API response field names for masking.
+- Treating redacted expanded SQL as executable replay SQL.
+
+### 6. Tests Required
+
+For SQL event redaction changes:
+
+- Core tests for disabled policy, case-insensitive parameter-name matching,
+  already-redacted parameters, SQL pattern replacement, quoted display literal
+  replacement, and empty values.
+- Config default tests proving the sensitive-name defaults match
+  `SECURITY.md`.
+- Storage tests proving `RingBufferStore::append` retains redacted parameters
+  and redacted expanded SQL.
+- Broadcaster or WebSocket tests proving live subscribers receive redacted
+  events.
+- Regression coverage that existing storage timeline/query behavior and
+  WebSocket subscription behavior remain unchanged.
+- Run `cargo fmt --check`.
+- Run targeted crate tests for core, config, storage, and API.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+store.append(event);
+broadcaster.publish(event.clone());
+```
+
+#### Correct
+
+```rust
+let event = redact_sql_event(event, &self.redaction_policy);
+self.events.push_back(RingBufferEntry { sequence, event });
+```
+
 ## Scenario: MySQL COM_QUERY Timing and Event Emission Contracts
 
 ### 1. Scope / Trigger

@@ -104,8 +104,12 @@ fn default_config_contains_documented_security_and_extension_defaults() {
         config.redaction.parameter_names,
         vec![
             "password".to_owned(),
+            "passwd".to_owned(),
             "token".to_owned(),
-            "secret".to_owned()
+            "secret".to_owned(),
+            "api_key".to_owned(),
+            "access_key".to_owned(),
+            "refresh_token".to_owned()
         ]
     );
     assert!(!config.auth.enabled);

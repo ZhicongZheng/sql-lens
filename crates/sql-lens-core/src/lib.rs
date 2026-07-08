@@ -4,6 +4,7 @@ mod error;
 mod event;
 mod ids;
 mod metadata;
+mod redaction;
 mod time;
 
 pub use error::{ApiError, ApiErrorCode, ErrorSummary};
@@ -13,6 +14,9 @@ pub use event::{
 };
 pub use ids::{ConnectionId, RequestId, SqlEventId, StatementId};
 pub use metadata::{DatabaseType, MetadataField, MetadataValue, ProtocolMetadata, ProtocolName};
+pub use redaction::{
+    DEFAULT_REDACTION_MASK, DEFAULT_REDACTION_PARAMETER_NAMES, RedactionPolicy, redact_sql_event,
+};
 pub use time::{DurationMillis, Timestamp};
 
 #[cfg(test)]
@@ -160,5 +164,6 @@ mod tests {
         assert_serde::<SqlParameter>();
         assert_serde::<ProtocolMetadata>();
         assert_serde::<ApiError>();
+        assert_serde::<RedactionPolicy>();
     }
 }

@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use sql_lens_core::SqlEvent;
+use sql_lens_core::{RedactionPolicy, SqlEvent, redact_sql_event};
 use tokio::sync::broadcast;
 
 pub const DEFAULT_SQL_EVENT_BROADCAST_CAPACITY: usize = 1024;
@@ -17,19 +17,30 @@ pub const DEFAULT_SQL_EVENT_BROADCAST_CAPACITY: usize = 1024;
 pub struct SqlEventBroadcaster {
     sender: broadcast::Sender<SqlEvent>,
     counters: Arc<SqlEventBroadcastCounters>,
+    redaction_policy: RedactionPolicy,
 }
 
 impl SqlEventBroadcaster {
     pub fn new(capacity: NonZeroUsize) -> Self {
+        Self::with_redaction_policy(capacity, RedactionPolicy::default())
+    }
+
+    pub fn with_redaction_policy(
+        capacity: NonZeroUsize,
+        redaction_policy: RedactionPolicy,
+    ) -> Self {
         let (sender, _) = broadcast::channel(capacity.get());
 
         Self {
             sender,
             counters: Arc::new(SqlEventBroadcastCounters::default()),
+            redaction_policy,
         }
     }
 
     pub fn publish(&self, event: SqlEvent) -> SqlEventBroadcastOutcome {
+        let event = redact_sql_event(event, &self.redaction_policy);
+
         match self.sender.send(event) {
             Ok(subscriber_count) => {
                 self.counters.increment_published_events();
@@ -150,6 +161,8 @@ impl SqlEventBroadcastCounters {
 mod tests {
     use std::num::NonZeroUsize;
 
+    use sql_lens_core::SqlParameterValue;
+
     use crate::test_support::test_event;
 
     use super::{SqlEventBroadcastOutcome, SqlEventBroadcaster, SqlEventSubscriptionError};
@@ -185,6 +198,42 @@ mod tests {
         );
         assert_eq!(event.id.0, "evt_1");
         assert_eq!(broadcaster.stats().published_events, 1);
+    }
+
+    #[tokio::test]
+    async fn publish_redacts_events_before_delivery() {
+        let broadcaster = SqlEventBroadcaster::new(capacity(1));
+        let mut subscription = broadcaster.subscribe();
+        let mut event = test_event("evt_secret");
+        event.parameters[0].name = Some("password".to_owned());
+        event.parameters[0].value = SqlParameterValue::String("s3cr3t".to_owned());
+        event.original_sql = "SELECT * FROM users WHERE password = ?".to_owned();
+        event.expanded_sql = Some("SELECT * FROM users WHERE password = 's3cr3t'".to_owned());
+
+        assert_eq!(
+            broadcaster.publish(event),
+            SqlEventBroadcastOutcome::Delivered {
+                subscriber_count: 1
+            }
+        );
+        let event = subscription.recv().await.expect("event should be received");
+
+        assert!(event.parameters[0].redacted);
+        assert_eq!(
+            event.parameters[0].value,
+            SqlParameterValue::String("***".to_owned())
+        );
+        assert_eq!(
+            event.expanded_sql.as_deref(),
+            Some("SELECT * FROM users WHERE password = '***'")
+        );
+        assert!(
+            !event
+                .expanded_sql
+                .as_deref()
+                .expect("expanded SQL should be present")
+                .contains("s3cr3t")
+        );
     }
 
     #[tokio::test]

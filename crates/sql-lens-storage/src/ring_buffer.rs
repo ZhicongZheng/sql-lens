@@ -1,11 +1,13 @@
 use sql_lens_core::{
-    CaptureStatus, DatabaseType, DurationMillis, ProtocolName, SqlEvent, SqlEventId, Timestamp,
+    CaptureStatus, DatabaseType, DurationMillis, ProtocolName, RedactionPolicy, SqlEvent,
+    SqlEventId, Timestamp, redact_sql_event,
 };
 use std::{collections::VecDeque, error::Error, fmt, num::NonZeroUsize};
 
 #[derive(Debug, Clone)]
 pub struct RingBufferStore {
     capacity: NonZeroUsize,
+    redaction_policy: RedactionPolicy,
     events: VecDeque<RingBufferEntry>,
     next_sequence: u64,
     total_appended: u64,
@@ -20,8 +22,16 @@ struct RingBufferEntry {
 
 impl RingBufferStore {
     pub fn new(capacity: NonZeroUsize) -> Self {
+        Self::with_redaction_policy(capacity, RedactionPolicy::default())
+    }
+
+    pub fn with_redaction_policy(
+        capacity: NonZeroUsize,
+        redaction_policy: RedactionPolicy,
+    ) -> Self {
         Self {
             capacity,
+            redaction_policy,
             events: VecDeque::with_capacity(capacity.get()),
             next_sequence: 0,
             total_appended: 0,
@@ -31,6 +41,7 @@ impl RingBufferStore {
 
     pub fn append(&mut self, event: SqlEvent) -> RingBufferAppendOutcome {
         let stored_event_id = event.id.clone();
+        let event = redact_sql_event(event, &self.redaction_policy);
         let evicted_event_id = if self.events.len() == self.capacity.get() {
             let evicted = self.events.pop_front();
 
@@ -331,7 +342,9 @@ pub struct RingBufferStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sql_lens_core::{ConnectionId, ProtocolMetadata, QueryTiming, SqlEventKind, Timestamp};
+    use sql_lens_core::{
+        ConnectionId, ProtocolMetadata, QueryTiming, SqlEventKind, SqlParameterValue, Timestamp,
+    };
 
     fn capacity(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test capacity should be non-zero")
@@ -419,6 +432,42 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert!(!store.is_empty());
         assert_eq!(store.snapshot(), vec![event]);
+    }
+
+    #[test]
+    fn ring_buffer_redacts_events_before_retention() {
+        let mut store = RingBufferStore::new(capacity(2));
+        let mut event = test_event("evt_secret");
+        event.parameters.push(sql_lens_core::SqlParameter {
+            index: 0,
+            name: Some("password".to_owned()),
+            value: SqlParameterValue::String("s3cr3t".to_owned()),
+            redacted: false,
+        });
+        event.original_sql = "SELECT * FROM users WHERE password = ?".to_owned();
+        event.expanded_sql = Some("SELECT * FROM users WHERE password = 's3cr3t'".to_owned());
+
+        store.append(event);
+        let retained = store
+            .get(&SqlEventId("evt_secret".to_owned()))
+            .expect("retained event should be found");
+
+        assert!(retained.parameters[0].redacted);
+        assert_eq!(
+            retained.parameters[0].value,
+            SqlParameterValue::String("***".to_owned())
+        );
+        assert_eq!(
+            retained.expanded_sql.as_deref(),
+            Some("SELECT * FROM users WHERE password = '***'")
+        );
+        assert!(
+            !retained
+                .expanded_sql
+                .as_deref()
+                .expect("expanded SQL should be present")
+                .contains("s3cr3t")
+        );
     }
 
     #[test]

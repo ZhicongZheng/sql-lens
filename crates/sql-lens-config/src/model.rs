@@ -164,8 +164,12 @@ impl Default for RedactionConfig {
             mask: "***".to_owned(),
             parameter_names: vec![
                 "password".to_owned(),
+                "passwd".to_owned(),
                 "token".to_owned(),
                 "secret".to_owned(),
+                "api_key".to_owned(),
+                "access_key".to_owned(),
+                "refresh_token".to_owned(),
             ],
             sql_patterns: Vec::new(),
         }
