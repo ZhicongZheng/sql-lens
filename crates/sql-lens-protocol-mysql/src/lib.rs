@@ -16,9 +16,9 @@ use std::{
 };
 
 use sql_lens_core::{
-    CaptureStatus, ConnectionInfo, DurationMillis, ErrorSummary, MetadataField, MetadataValue,
-    ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent, SqlEventId, SqlEventKind,
-    Timestamp,
+    CaptureStatus, ConnectionInfo, ConnectionState, DurationMillis, ErrorSummary, MetadataField,
+    MetadataValue, ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent,
+    SqlEventId, SqlEventKind, Timestamp,
 };
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
@@ -30,9 +30,10 @@ pub use authentication::{
     parse_authentication_result,
 };
 pub use command::{
-    MYSQL_COM_QUERY, MYSQL_COM_STMT_CLOSE, MYSQL_COM_STMT_EXECUTE, MYSQL_COM_STMT_PREPARE,
-    MysqlClientCommand, MysqlComQuery, MysqlComStmtClose, MysqlComStmtExecute, MysqlComStmtPrepare,
-    MysqlCommandKind, MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
+    MYSQL_COM_PING, MYSQL_COM_QUERY, MYSQL_COM_QUIT, MYSQL_COM_STMT_CLOSE, MYSQL_COM_STMT_EXECUTE,
+    MYSQL_COM_STMT_PREPARE, MysqlClientCommand, MysqlComPing, MysqlComQuery, MysqlComQuit,
+    MysqlComStmtClose, MysqlComStmtExecute, MysqlComStmtPrepare, MysqlCommandKind,
+    MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
 };
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use execute::{
@@ -279,6 +280,10 @@ impl MysqlConnectionState {
         self.phase
     }
 
+    pub fn connection(&self) -> &ConnectionInfo {
+        &self.connection
+    }
+
     pub fn initial_handshake(&self) -> Option<&MysqlInitialHandshake> {
         self.initial_handshake.as_ref()
     }
@@ -410,6 +415,16 @@ impl MysqlConnectionState {
                     started_monotonic: time.monotonic,
                 });
             }
+            MysqlParsedClientCommand::Ping(_) => {
+                let time = clock.now();
+
+                self.connection.last_activity_at = Some(time.timestamp);
+                self.last_client_command = Some(MysqlClientCommand {
+                    kind: MysqlCommandKind::Ping,
+                    sequence_id: packet.header.sequence_id,
+                    sql: String::new(),
+                });
+            }
             MysqlParsedClientCommand::StatementPrepare(prepare) => {
                 let client_command = MysqlClientCommand {
                     kind: MysqlCommandKind::StatementPrepare,
@@ -489,6 +504,17 @@ impl MysqlConnectionState {
                 self.prepared_statements.remove(&close.statement_id);
                 self.last_client_command = Some(MysqlClientCommand {
                     kind: MysqlCommandKind::StatementClose,
+                    sequence_id: packet.header.sequence_id,
+                    sql: String::new(),
+                });
+            }
+            MysqlParsedClientCommand::Quit(_) => {
+                let time = clock.now();
+
+                self.connection.last_activity_at = Some(time.timestamp);
+                self.connection.state = ConnectionState::Closing;
+                self.last_client_command = Some(MysqlClientCommand {
+                    kind: MysqlCommandKind::Quit,
                     sequence_id: packet.header.sequence_id,
                     sql: String::new(),
                 });
@@ -2169,6 +2195,78 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_updates_activity_for_com_ping_without_sql_event() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "ping_at")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = com_ping_packet(4);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_PING should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("ping command should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(
+            state.connection().last_activity_at,
+            Some(Timestamp("ping_at".to_owned()))
+        );
+        assert_eq!(state.connection().state, ConnectionState::BackendConnected);
+        assert_eq!(command.kind, MysqlCommandKind::Ping);
+        assert_eq!(command.sequence_id, 4);
+        assert_eq!(command.sql, "");
+        assert!(state.pending_query().is_none());
+        assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_marks_connection_closing_for_com_quit_without_sql_event() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "quit_at")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+        let packet = com_quit_packet(7);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_QUIT should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("quit command should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(
+            state.connection().last_activity_at,
+            Some(Timestamp("quit_at".to_owned()))
+        );
+        assert_eq!(state.connection().state, ConnectionState::Closing);
+        assert_eq!(command.kind, MysqlCommandKind::Quit);
+        assert_eq!(command.sequence_id, 7);
+        assert_eq!(command.sql, "");
+        assert!(state.pending_query().is_none());
+        assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_starts_pending_query_for_com_query_after_authentication() {
         let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start")]));
         let mut state = adapter.create_connection_state(&test_context());
@@ -2520,6 +2618,10 @@ mod tests {
         packet_with_sequence_id(vec![0x01], 1)
     }
 
+    fn com_quit_packet(sequence_id: u8) -> Vec<u8> {
+        packet_with_sequence_id(vec![MYSQL_COM_QUIT], sequence_id)
+    }
+
     fn prepare_ok_packet(
         statement_id: u32,
         num_columns: u16,
@@ -2558,6 +2660,10 @@ mod tests {
         payload.extend_from_slice(sql.as_bytes());
 
         packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn com_ping_packet(sequence_id: u8) -> Vec<u8> {
+        packet_with_sequence_id(vec![MYSQL_COM_PING], sequence_id)
     }
 
     fn com_stmt_prepare_packet(sql: &str, sequence_id: u8) -> Vec<u8> {
@@ -2652,7 +2758,7 @@ mod tests {
     }
 
     fn unsupported_command_packet() -> Vec<u8> {
-        packet_with_sequence_id(vec![0x01, b'x'], 0)
+        packet_with_sequence_id(vec![0x7f, b'x'], 0)
     }
 
     fn invalid_utf8_com_query_packet() -> Vec<u8> {

@@ -1,16 +1,20 @@
 use std::{error::Error, fmt, str};
 
 pub const MYSQL_COM_QUERY: u8 = 0x03;
+pub const MYSQL_COM_PING: u8 = 0x0e;
 pub const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
 pub const MYSQL_COM_STMT_EXECUTE: u8 = 0x17;
 pub const MYSQL_COM_STMT_CLOSE: u8 = 0x19;
+pub const MYSQL_COM_QUIT: u8 = 0x01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MysqlCommandKind {
     Query,
+    Ping,
     StatementPrepare,
     StatementExecute,
     StatementClose,
+    Quit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,11 +41,19 @@ pub struct MysqlComStmtClose {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlComPing;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlComQuit;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MysqlParsedClientCommand {
     Query(MysqlComQuery),
+    Ping(MysqlComPing),
     StatementPrepare(MysqlComStmtPrepare),
     StatementExecute(MysqlComStmtExecute),
     StatementClose(MysqlComStmtClose),
+    Quit(MysqlComQuit),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,11 +75,13 @@ pub fn parse_client_command(
     };
 
     match command {
+        MYSQL_COM_QUIT => Ok(Some(MysqlParsedClientCommand::Quit(MysqlComQuit))),
         MYSQL_COM_QUERY => {
             let sql = parse_utf8_field(command_body, "sql")?;
 
             Ok(Some(MysqlParsedClientCommand::Query(MysqlComQuery { sql })))
         }
+        MYSQL_COM_PING => Ok(Some(MysqlParsedClientCommand::Ping(MysqlComPing))),
         MYSQL_COM_STMT_PREPARE => {
             let template_sql = parse_utf8_field(command_body, "template_sql")?;
 
@@ -167,6 +181,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_com_quit() {
+        let command = parse_client_command(&[MYSQL_COM_QUIT])
+            .expect("command should parse")
+            .expect("COM_QUIT should be supported");
+
+        assert_eq!(command, MysqlParsedClientCommand::Quit(MysqlComQuit));
+    }
+
+    #[test]
     fn parses_com_query_sql_text() {
         let mut payload = vec![MYSQL_COM_QUERY];
         payload.extend_from_slice(b"select 1");
@@ -193,6 +216,15 @@ mod tests {
             command,
             MysqlParsedClientCommand::Query(MysqlComQuery { sql: String::new() })
         );
+    }
+
+    #[test]
+    fn parses_com_ping() {
+        let command = parse_client_command(&[MYSQL_COM_PING])
+            .expect("command should parse")
+            .expect("COM_PING should be supported");
+
+        assert_eq!(command, MysqlParsedClientCommand::Ping(MysqlComPing));
     }
 
     #[test]
@@ -300,7 +332,7 @@ mod tests {
     #[test]
     fn returns_none_for_unsupported_command() {
         let command =
-            parse_client_command(&[0x01, b'x']).expect("unsupported command should be non-fatal");
+            parse_client_command(&[0x7f, b'x']).expect("unsupported command should be non-fatal");
 
         assert_eq!(command, None);
     }

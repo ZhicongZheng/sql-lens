@@ -5501,6 +5501,110 @@ For protocols endpoint changes:
 - Run `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
+## Scenario: MySQL Client Command Observation
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` parses or observes MySQL client command bytes.
+- Command parsing is protocol-local. Shared `SqlEvent`, storage, API, and UI contracts should change only when a task explicitly asks for a new captured event surface.
+- Connection activity commands such as `COM_PING` and `COM_QUIT` are not SQL statements.
+
+### 2. Signatures
+
+Parser contracts live in:
+
+```rust
+pub fn parse_client_command(
+    payload: &[u8],
+) -> Result<Option<MysqlParsedClientCommand>, MysqlCommandParseError>;
+
+pub enum MysqlParsedClientCommand {
+    Query(MysqlComQuery),
+    Ping(MysqlComPing),
+    StatementPrepare(MysqlComStmtPrepare),
+    StatementExecute(MysqlComStmtExecute),
+    StatementClose(MysqlComStmtClose),
+    Quit(MysqlComQuit),
+}
+```
+
+Adapter state exposes read-only connection state for focused tests:
+
+```rust
+impl MysqlConnectionState {
+    pub fn connection(&self) -> &ConnectionInfo;
+}
+```
+
+### 3. Contracts
+
+- Unsupported command bytes return `Ok(None)` and remain non-fatal.
+- Malformed supported commands return `MysqlCommandParseError`; adapter observation treats parse failure as non-fatal.
+- `COM_QUERY` starts a pending SQL query and may emit a `SqlEvent` after a terminal backend response.
+- `COM_PING` updates `ConnectionInfo.last_activity_at` using the observation clock and must not start a pending query or emit a SQL event.
+- `COM_QUIT` updates `ConnectionInfo.last_activity_at`, sets `ConnectionInfo.state` to `ConnectionState::Closing`, and must not start a pending query or emit a SQL event.
+- Prepared statement lifecycle commands mutate only MySQL-local prepared statement state unless a later task adds a public event contract.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty command payload | Return `IncompletePayload { field: "command" }` |
+| Unsupported command byte | Return `Ok(None)` |
+| `COM_PING` after authentication | Store last command, update `last_activity_at`, emit no events |
+| `COM_QUIT` after authentication | Store last command, update `last_activity_at`, mark connection `Closing`, emit no events |
+| Ping or quit before authentication | Ignore command-specific observation |
+| Ping or quit with backend OK packet | Do not create or finalize a SQL event |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Adding a new MySQL command starts with parser tests plus adapter state tests.
+- Connection-activity commands use empty SQL strings only in MySQL-local `MysqlClientCommand`, never in shared `SqlEvent`.
+
+Base:
+
+- `COM_QUERY`, `COM_STMT_PREPARE`, `COM_STMT_EXECUTE`, and `COM_STMT_CLOSE` keep their existing behavior after adding a command variant.
+
+Bad:
+
+- Storing `COM_PING` as `SqlEventKind::Query`.
+- Incrementing query counters or mutating prepared statement maps for ping or quit.
+- Adding MySQL-only command fields to protocol-neutral core structs.
+
+### 6. Tests Required
+
+For MySQL command observation changes:
+
+- Parser unit tests for each new supported command byte.
+- Adapter tests for authenticated-state behavior.
+- Regression tests proving non-SQL commands do not create `pending_query` or emit `SqlEvent`s.
+- Existing query, prepare, execute, and close tests continue to pass.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+MysqlParsedClientCommand::Ping(_) => {
+    self.pending_query = Some(MysqlPendingQuery { ... });
+}
+```
+
+#### Correct
+
+```rust
+MysqlParsedClientCommand::Ping(_) => {
+    let time = clock.now();
+    self.connection.last_activity_at = Some(time.timestamp);
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

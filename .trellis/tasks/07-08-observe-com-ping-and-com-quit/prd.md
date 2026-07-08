@@ -51,16 +51,16 @@ Dependencies: Issue 042
 
 ## Acceptance Criteria
 
-- [ ] Parser tests cover `COM_PING`.
-- [ ] Parser tests cover `COM_QUIT`.
-- [ ] Adapter tests prove ping updates `last_activity_at`.
-- [ ] Adapter tests prove quit moves connection state to `Closing`.
-- [ ] Adapter tests prove ping is not stored as SQL and emits no SQL event.
-- [ ] Existing query, prepare, execute, and close tests continue to pass.
-- [ ] `rtk cargo fmt --check` passes.
-- [ ] `rtk cargo test -p sql-lens-protocol-mysql` passes.
-- [ ] `rtk cargo test --workspace` passes.
-- [ ] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] Parser tests cover `COM_PING`.
+- [x] Parser tests cover `COM_QUIT`.
+- [x] Adapter tests prove ping updates `last_activity_at`.
+- [x] Adapter tests prove quit moves connection state to `Closing`.
+- [x] Adapter tests prove ping is not stored as SQL and emits no SQL event.
+- [x] Existing query, prepare, execute, and close tests continue to pass.
+- [x] `rtk cargo fmt --check` passes.
+- [x] `rtk cargo test -p sql-lens-protocol-mysql` passes.
+- [x] `rtk cargo test --workspace` passes.
+- [x] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Out Of Scope
 
