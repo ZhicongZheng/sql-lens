@@ -1828,3 +1828,36 @@ Completed the bootstrap guidelines task by filling backend database and error-ha
 ### Next Steps
 
 - None - task complete
+
+
+## Session 56: Issue 059 Docker MySQL live capture
+
+**Date**: 2026-07-08
+**Task**: Issue 059 Docker MySQL live capture
+**Branch**: `main`
+
+### Summary
+
+Added a Docker-gated MySQL live integration test plus minimal app runtime glue that forwards through the proxy, observes MySQL protocol bytes, writes captured events into shared ApiState, and verifies them through the SQL events API.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `76156c7` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
