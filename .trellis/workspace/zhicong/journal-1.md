@@ -1729,3 +1729,36 @@ Implemented Issue 056 by adding protocol-neutral SQL event redaction, default se
 ### Next Steps
 
 - None - task complete
+
+
+## Session 53: Clean up MySQL statement close
+
+**Date**: 2026-07-08
+**Task**: Clean up MySQL statement close
+**Branch**: `main`
+
+### Summary
+
+Implemented Issue 057 by parsing COM_STMT_CLOSE, removing connection-local prepared statement mappings, keeping unknown and malformed close commands harmless, adding parser and adapter tests, and updating backend specs.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `29e6d3c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
