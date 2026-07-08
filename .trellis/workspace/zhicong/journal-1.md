@@ -1861,3 +1861,37 @@ Added a Docker-gated MySQL live integration test plus minimal app runtime glue t
 ### Next Steps
 
 - None - task complete
+
+
+## Session 57: Issue 060 prepared statement live capture
+
+**Date**: 2026-07-08
+**Task**: Issue 060 prepared statement live capture
+**Branch**: `main`
+
+### Summary
+
+Implemented MySQL prepared statement execute event emission, added protocol coverage, added Docker-gated live prepared statement capture/redaction API test, updated backend spec, and archived the Trellis task.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ffd3708` | (see git log) |
+| `ff5e45e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
