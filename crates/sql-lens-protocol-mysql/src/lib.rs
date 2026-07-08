@@ -30,9 +30,9 @@ pub use authentication::{
     parse_authentication_result,
 };
 pub use command::{
-    MYSQL_COM_QUERY, MYSQL_COM_STMT_EXECUTE, MYSQL_COM_STMT_PREPARE, MysqlClientCommand,
-    MysqlComQuery, MysqlComStmtExecute, MysqlComStmtPrepare, MysqlCommandKind,
-    MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
+    MYSQL_COM_QUERY, MYSQL_COM_STMT_CLOSE, MYSQL_COM_STMT_EXECUTE, MYSQL_COM_STMT_PREPARE,
+    MysqlClientCommand, MysqlComQuery, MysqlComStmtClose, MysqlComStmtExecute, MysqlComStmtPrepare,
+    MysqlCommandKind, MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
 };
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use execute::{
@@ -483,6 +483,14 @@ impl MysqlConnectionState {
                     null_parameter_indexes,
                     parameters,
                     expanded_sql,
+                });
+            }
+            MysqlParsedClientCommand::StatementClose(close) => {
+                self.prepared_statements.remove(&close.statement_id);
+                self.last_client_command = Some(MysqlClientCommand {
+                    kind: MysqlCommandKind::StatementClose,
+                    sequence_id: packet.header.sequence_id,
+                    sql: String::new(),
                 });
             }
         }
@@ -1765,6 +1773,97 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_removes_prepared_statement_on_com_stmt_close() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select close_me(?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x1122_3344, 0, 1, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let packet = com_stmt_close_packet(0x1122_3344, 3);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_STMT_CLOSE should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("close command should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(state.prepared_statement_count(), 0);
+        assert!(state.prepared_statement(0x1122_3344).is_none());
+        assert_eq!(command.kind, MysqlCommandKind::StatementClose);
+        assert_eq!(command.sequence_id, 3);
+        assert_eq!(command.sql, "");
+        assert!(state.pending_query().is_none());
+        assert!(state.pending_statement_prepare().is_none());
+        assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_existing_statements_when_closing_unknown_statement() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select keep_me(?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x1122_3344, 0, 1, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let packet = com_stmt_close_packet(404, 3);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("unknown COM_STMT_CLOSE should remain harmless");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("close command should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.prepared_statement_count(), 1);
+        assert!(state.prepared_statement(0x1122_3344).is_some());
+        assert_eq!(command.kind, MysqlCommandKind::StatementClose);
+        assert_eq!(command.sequence_id, 3);
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
     fn mysql_adapter_ignores_prepare_response_without_pending_prepare() {
         let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
         let mut state = adapter.create_connection_state(&test_context());
@@ -1867,6 +1966,49 @@ mod tests {
         assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
         assert!(state.last_client_command().is_none());
         assert!(state.last_statement_execute_envelope().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_keeps_authenticated_phase_for_malformed_com_stmt_close() {
+        let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_stmt_prepare_packet("select keep_after_malformed_close(?)", 0),
+                &mut events,
+            )
+            .expect("COM_STMT_PREPARE should start pending prepare");
+        adapter
+            .observe_backend_bytes(
+                state.as_mut(),
+                &prepare_ok_packet(0x1122_3344, 0, 1, None, 1),
+                &mut events,
+            )
+            .expect("prepare OK should be observed");
+        let packet = malformed_com_stmt_close_packet();
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("malformed close command should remain non-fatal");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("prepare command should remain the last stored command");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(state.phase(), MysqlConnectionPhase::Authenticated);
+        assert_eq!(state.prepared_statement_count(), 1);
+        assert!(state.prepared_statement(0x1122_3344).is_some());
+        assert_eq!(command.kind, MysqlCommandKind::StatementPrepare);
         assert!(events.events.is_empty());
     }
 
@@ -2441,6 +2583,13 @@ mod tests {
         packet_with_sequence_id(payload, sequence_id)
     }
 
+    fn com_stmt_close_packet(statement_id: u32, sequence_id: u8) -> Vec<u8> {
+        let mut payload = vec![MYSQL_COM_STMT_CLOSE];
+        payload.extend_from_slice(&statement_id.to_le_bytes());
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
     fn length_encoded_value(bytes: &[u8]) -> Vec<u8> {
         let length = u8::try_from(bytes.len()).expect("test value should use one-byte length");
         let mut encoded = vec![length];
@@ -2516,6 +2665,10 @@ mod tests {
 
     fn malformed_com_stmt_execute_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![MYSQL_COM_STMT_EXECUTE, 0x01], 0)
+    }
+
+    fn malformed_com_stmt_close_packet() -> Vec<u8> {
+        packet_with_sequence_id(vec![MYSQL_COM_STMT_CLOSE, 0x01], 0)
     }
 
     fn assert_sql_event(

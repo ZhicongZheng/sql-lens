@@ -50,17 +50,17 @@ Dependencies: Issue 049
 
 ## Acceptance Criteria
 
-- [ ] A known prepared statement is removed after observing `COM_STMT_CLOSE`.
-- [ ] Closing an unknown statement does not panic and does not change existing
+- [x] A known prepared statement is removed after observing `COM_STMT_CLOSE`.
+- [x] Closing an unknown statement does not panic and does not change existing
       statement state.
-- [ ] Malformed or incomplete close packets do not mutate state.
-- [ ] Tests cover parse-level close command behavior.
-- [ ] Tests cover adapter/state-level cleanup behavior.
-- [ ] Existing prepare and execute tests continue to pass.
-- [ ] `rtk cargo fmt --check` passes.
-- [ ] `rtk cargo test -p sql-lens-protocol-mysql` passes.
-- [ ] `rtk cargo test --workspace` passes.
-- [ ] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] Malformed or incomplete close packets do not mutate state.
+- [x] Tests cover parse-level close command behavior.
+- [x] Tests cover adapter/state-level cleanup behavior.
+- [x] Existing prepare and execute tests continue to pass.
+- [x] `rtk cargo fmt --check` passes.
+- [x] `rtk cargo test -p sql-lens-protocol-mysql` passes.
+- [x] `rtk cargo test --workspace` passes.
+- [x] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Out Of Scope
 

@@ -2746,7 +2746,8 @@ Implementation state uses a standard-library map owned by `MysqlConnectionState`
 - Reusing the same statement ID in one connection replaces the previous mapping with the latest successful prepare metadata.
 - A separate `MysqlConnectionState` must not observe mappings from another connection state.
 - Connection close cleanup is satisfied by per-connection ownership: when the connection state is dropped, its prepared statement map is dropped.
-- Explicit close hooks, `COM_STMT_CLOSE`, and `COM_STMT_RESET` cleanup belong to later tasks.
+- `COM_STMT_CLOSE` removes a mapping from the current connection state when the close command is observed.
+- Explicit shared close hooks and `COM_STMT_RESET` cleanup belong to later tasks.
 
 ### 4. Validation & Error Matrix
 
@@ -2759,6 +2760,7 @@ Implementation state uses a standard-library map owned by `MysqlConnectionState`
 | Same statement ID prepared again in same connection | Replace existing mapping |
 | Same statement ID exists in another connection | No cross-connection visibility |
 | Connection state is dropped | Map is dropped with state ownership |
+| Known statement ID is closed with `COM_STMT_CLOSE` | Remove that mapping |
 
 ### 5. Good/Base/Bad Cases
 
@@ -2771,7 +2773,7 @@ Good:
 Base:
 
 - Later `COM_STMT_EXECUTE` parsing can call `prepared_statement(statement_id)` to find the template.
-- Later `COM_STMT_CLOSE` can remove mappings from this map.
+- Later `COM_STMT_RESET` can reset mappings or statement state when that command is implemented.
 
 Bad:
 
@@ -2903,7 +2905,8 @@ Base:
 
 - Later parameter tasks can use `statement.num_params` and `has_parameter_payload` to decode NULL bitmap, parameter type metadata, and parameter values.
 - Later expanded SQL rendering can read the cloned statement template without changing the execute envelope contract.
-- Later `COM_STMT_CLOSE` and `COM_STMT_RESET` cleanup can remove mappings before execute lookup.
+- `COM_STMT_CLOSE` cleanup removes mappings before execute lookup; later
+  `COM_STMT_RESET` cleanup can add reset-specific behavior.
 
 Bad:
 
@@ -2949,6 +2952,114 @@ MysqlStatementExecuteEnvelope {
     // remaining envelope fields...
 }
 ```
+
+## Scenario: MySQL COM_STMT_CLOSE Cleanup Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-protocol-mysql` observes a client-to-backend
+  `COM_STMT_CLOSE` command after authentication.
+- This layer removes the closed statement ID from the current
+  `MysqlConnectionState` prepared statement map.
+- `COM_STMT_CLOSE` has no backend OK/ERR response, so cleanup happens during
+  client command observation.
+- It must not emit SQL events, touch storage/API/WebSocket/UI contracts, modify
+  forwarded traffic, or add a shared protocol close hook.
+
+### 2. Signatures
+
+Close command parser types live in `crates/sql-lens-protocol-mysql/src/command.rs`
+and are re-exported from the crate root:
+
+```rust
+pub const MYSQL_COM_STMT_CLOSE: u8 = 0x19;
+
+pub enum MysqlCommandKind {
+    Query,
+    StatementPrepare,
+    StatementExecute,
+    StatementClose,
+}
+
+pub struct MysqlComStmtClose {
+    pub statement_id: u32,
+}
+
+pub enum MysqlParsedClientCommand {
+    Query(MysqlComQuery),
+    StatementPrepare(MysqlComStmtPrepare),
+    StatementExecute(MysqlComStmtExecute),
+    StatementClose(MysqlComStmtClose),
+}
+```
+
+### 3. Contracts
+
+- Client command observation happens only when phase is `Authenticated`.
+- A payload starting with `MYSQL_COM_STMT_CLOSE` parses the fixed close payload
+  after the command byte.
+- The close payload extracts little-endian `statement_id`.
+- Known statement IDs are removed from the current connection-local prepared
+  statement map immediately.
+- Unknown statement IDs are harmless: do not panic and do not alter existing
+  mappings.
+- Malformed or incomplete close packets are non-fatal at adapter level and must
+  not update `last_client_command` or prepared statement state.
+- Successful close observation stores `last_client_command.kind =
+  MysqlCommandKind::StatementClose` with empty SQL.
+- Close cleanup emits zero SQL events and must not call timing-only logic
+  intended for `COM_QUERY`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Payload starts with `0x19` and has four statement ID bytes | Return `Some(MysqlParsedClientCommand::StatementClose(...))` |
+| Close payload is missing `statement_id` | Return `IncompletePayload { field: "statement_id" }` |
+| `COM_STMT_CLOSE` before `Authenticated` | Count bytes only; do not update statement state; emit zero events |
+| Known statement ID after `Authenticated` | Remove mapping and store close command; emit zero events |
+| Unknown statement ID after `Authenticated` | Keep existing mappings and store close command; emit zero events |
+| Malformed close command after `Authenticated` | Keep phase `Authenticated`; do not update command or statement state; emit zero events |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Parser tests cover statement ID extraction and incomplete statement ID
+  payloads.
+- Adapter tests prepare a statement, close it, and assert the mapping is gone.
+- Unknown close tests assert other mappings remain intact.
+
+Base:
+
+- Later event-emission work can decide whether statement close should become a
+  protocol-neutral `SqlEventKind::StatementClose`.
+- Later `COM_STMT_RESET` work can add reset semantics without changing close
+  parsing.
+
+Bad:
+
+- Waiting for a backend response before removing the mapping.
+- Treating unknown statement IDs as `ProtocolAdapterError`.
+- Clearing all prepared statements for one close command.
+- Emitting storage/API/WebSocket-visible close events in this task.
+- Logging raw SQL templates or packet payloads.
+
+### 6. Tests Required
+
+For MySQL `COM_STMT_CLOSE` cleanup changes:
+
+- Parser test for valid statement ID extraction.
+- Parser test for missing statement ID.
+- Adapter test proving a known statement ID is removed after close.
+- Adapter test proving an unknown close leaves existing mappings intact.
+- Adapter test proving malformed close packets do not mutate state.
+- Regression coverage that existing prepare and execute behavior remains
+  unchanged.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-protocol-mysql`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ## Scenario: MySQL COM_STMT_EXECUTE NULL Bitmap Contracts
 

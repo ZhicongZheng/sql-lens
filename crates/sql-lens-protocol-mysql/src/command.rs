@@ -3,12 +3,14 @@ use std::{error::Error, fmt, str};
 pub const MYSQL_COM_QUERY: u8 = 0x03;
 pub const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
 pub const MYSQL_COM_STMT_EXECUTE: u8 = 0x17;
+pub const MYSQL_COM_STMT_CLOSE: u8 = 0x19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MysqlCommandKind {
     Query,
     StatementPrepare,
     StatementExecute,
+    StatementClose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,10 +32,16 @@ pub struct MysqlComStmtExecute {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlComStmtClose {
+    pub statement_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MysqlParsedClientCommand {
     Query(MysqlComQuery),
     StatementPrepare(MysqlComStmtPrepare),
     StatementExecute(MysqlComStmtExecute),
+    StatementClose(MysqlComStmtClose),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +78,9 @@ pub fn parse_client_command(
         MYSQL_COM_STMT_EXECUTE => Ok(Some(MysqlParsedClientCommand::StatementExecute(
             parse_com_stmt_execute(command_body)?,
         ))),
+        MYSQL_COM_STMT_CLOSE => Ok(Some(MysqlParsedClientCommand::StatementClose(
+            parse_com_stmt_close(command_body)?,
+        ))),
         _ => Ok(None),
     }
 }
@@ -92,6 +103,12 @@ fn parse_com_stmt_execute(bytes: &[u8]) -> Result<MysqlComStmtExecute, MysqlComm
         flags,
         iteration_count,
         has_parameter_payload: iteration_count_bytes.len() > 4,
+    })
+}
+
+fn parse_com_stmt_close(bytes: &[u8]) -> Result<MysqlComStmtClose, MysqlCommandParseError> {
+    Ok(MysqlComStmtClose {
+        statement_id: read_u32_le(bytes, "statement_id")?,
     })
 }
 
@@ -267,6 +284,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_com_stmt_close_statement_id() {
+        let command = parse_client_command(&[MYSQL_COM_STMT_CLOSE, 0x44, 0x33, 0x22, 0x11])
+            .expect("command should parse")
+            .expect("COM_STMT_CLOSE should be supported");
+
+        assert_eq!(
+            command,
+            MysqlParsedClientCommand::StatementClose(MysqlComStmtClose {
+                statement_id: 0x1122_3344,
+            })
+        );
+    }
+
+    #[test]
     fn returns_none_for_unsupported_command() {
         let command =
             parse_client_command(&[0x01, b'x']).expect("unsupported command should be non-fatal");
@@ -314,6 +345,21 @@ mod tests {
                 field: "flags",
                 needed: 1,
                 available: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_com_stmt_close_missing_statement_id() {
+        let error = parse_client_command(&[MYSQL_COM_STMT_CLOSE, 0x44, 0x33])
+            .expect_err("statement ID should be incomplete");
+
+        assert_eq!(
+            error,
+            MysqlCommandParseError::IncompletePayload {
+                field: "statement_id",
+                needed: 4,
+                available: 2,
             }
         );
     }
