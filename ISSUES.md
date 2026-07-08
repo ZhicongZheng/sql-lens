@@ -1059,6 +1059,23 @@ Difficulty: Medium
 Estimated Time: 5h
 Dependencies: Issue 028, Issue 064
 
+## Issue 108: Add frontend multi-target proxy support
+
+Description: Adapt the frontend for SQL Lens installations with multiple configured proxy targets, such as MySQL and StarRocks listeners running in one process.
+
+Acceptance Criteria:
+
+- API client and UI types can represent target identity when the backend exposes it.
+- SQL event lists and details show which configured target captured the event.
+- Filters can narrow SQL events by target without replacing protocol or database type filters.
+- Empty, loading, and error states handle deployments with zero, one, or many targets.
+
+Labels: `area:frontend`, `area:api`, `type:feature`
+Priority: P1
+Difficulty: Medium
+Estimated Time: 5h
+Dependencies: Issue 066, Add multi-target proxy configuration and runtime fan-out
+
 ## Issue 067: Add TanStack Query providers
 
 Description: Configure TanStack Query for server state.
@@ -1762,4 +1779,3 @@ Priority: P2
 Difficulty: Easy
 Estimated Time: 3h
 Dependencies: None
-

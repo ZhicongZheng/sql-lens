@@ -50,6 +50,33 @@ Member packages inherit shared package metadata instead of repeating it.
 - `sql-lens-plugin`: hook traits, exporter traits, plugin lifecycle, and plugin safety boundaries.
 - `sql-lens-app`: CLI, config loading, logging setup, runtime startup, and graceful shutdown.
 
+## Multi-Target Proxy Architecture
+
+SQL Lens may run multiple explicitly configured proxy targets in one process.
+Each target owns exactly one listener and one backend address. This supports
+debugging applications that talk to several MySQL-compatible surfaces, such as
+MySQL and StarRocks, without making SQL Lens a database middleware.
+
+Backend ownership rules:
+
+- `sql-lens-config` owns the target configuration shape and validation.
+- `sql-lens-app` owns expanding effective targets and starting one listener task
+  per target.
+- `sql-lens-proxy` remains a TCP listener/dialer/forwarding crate; it must not
+  choose a backend dynamically from SQL text, user, database, SNI, or packet
+  contents.
+- Protocol adapters remain per-connection observers and must not own target
+  routing policy.
+- Storage/API consume already-classified target identity from shared event or
+  metadata contracts; they must not infer target identity from port strings.
+
+Forbidden for multi-target support:
+
+- SQL rewrite, sharding, read/write splitting, failover, load balancing, or
+  backend policy enforcement.
+- One listener multiplexing arbitrary client traffic to multiple backends.
+- MySQL-specific target identity fields in protocol-neutral core models.
+
 ## Crate Root Convention
 
 `src/lib.rs` should stay thin once a crate has more than one real responsibility. Prefer:

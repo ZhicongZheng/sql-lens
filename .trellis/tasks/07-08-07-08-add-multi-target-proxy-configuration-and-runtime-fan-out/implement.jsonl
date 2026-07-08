@@ -1,1 +1,4 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Config, proxy listener, backend dialing, app runtime, and event contract guidance apply to multi-target proxy runtime."}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "The change crosses config, proxy, app runtime, storage/API state, and protocol-neutral event boundaries."}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Frontend architecture must represent target identity in future API types and SQL event views."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Target identity flows from config through runtime connection info into storage/API-visible events."}
