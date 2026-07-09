@@ -401,3 +401,36 @@ Added a configured SQL event read source so SQLite mode serves persisted list/de
 ### Next Steps
 
 - None - task complete
+
+
+## Session 73: Issue 094 Rust CI
+
+**Date**: 2026-07-09
+**Task**: Issue 094 Rust CI
+**Branch**: `main`
+
+### Summary
+
+Added a GitHub Actions Rust CI workflow for format, clippy, and workspace tests with Cargo caching; validated fmt, tests, and clippy locally.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d5b2615` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

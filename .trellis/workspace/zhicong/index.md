@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 72
+- **Total Sessions**: 73
 - **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~403 | Active |
+| `journal-2.md` | ~436 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 73 | 2026-07-09 | Issue 094 Rust CI | `d5b2615` | `main` |
 | 72 | 2026-07-09 | Issue 113 SQLite-backed API event reads | `dd4a91a` | `main` |
 | 71 | 2026-07-09 | Issue 099 OpenAPI generation | `2676f19` | `main` |
 | 70 | 2026-07-09 | Issue 112 SQLite runtime storage | `18a7d34` | `main` |
