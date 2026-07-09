@@ -732,6 +732,7 @@ impl MysqlConnectionState {
         SqlEvent {
             id: event_id,
             timestamp: envelope.started_at.clone(),
+            target_name: self.connection.target_name.clone(),
             protocol: self.connection.protocol.clone(),
             database_type: self.connection.database_type.clone(),
             connection_id: self.connection.id.clone(),
@@ -803,6 +804,7 @@ impl MysqlConnectionState {
         SqlEvent {
             id: event_id,
             timestamp: pending.started_at.clone(),
+            target_name: self.connection.target_name.clone(),
             protocol: self.connection.protocol.clone(),
             database_type: self.connection.database_type.clone(),
             connection_id: self.connection.id.clone(),
@@ -1716,6 +1718,8 @@ mod tests {
             SqlEventId("conn_1_statement_execute_1".to_owned())
         );
         assert_eq!(event.timestamp, Timestamp("execute_start".to_owned()));
+        assert_eq!(event.target_name.as_deref(), Some("mysql-local"));
+        assert_eq!(event.database_type, DatabaseType("mysql".to_owned()));
         assert_eq!(event.kind, SqlEventKind::StatementExecute);
         assert_eq!(event.status, CaptureStatus::Ok);
         assert_eq!(event.duration, DurationMillis(32));
@@ -2836,6 +2840,7 @@ mod tests {
     fn test_context() -> ProtocolConnectionContext {
         ProtocolConnectionContext::new(ConnectionInfo {
             id: ConnectionId("conn_1".to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             client_addr: "127.0.0.1:51000".to_owned(),
@@ -3073,6 +3078,7 @@ mod tests {
         expected_duration_ms: u64,
     ) {
         assert_eq!(event.timestamp, Timestamp("query_start".to_owned()));
+        assert_eq!(event.target_name.as_deref(), Some("mysql-local"));
         assert_eq!(event.protocol, ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()));
         assert_eq!(event.database_type, DatabaseType("mysql".to_owned()));
         assert_eq!(event.connection_id, ConnectionId("conn_1".to_owned()));

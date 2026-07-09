@@ -35,6 +35,24 @@ shutdown_timeout_ms = 10000
 address = "127.0.0.1:3306"
 database_type = "mysql"
 
+# Optional multi-target form. When present, SQL Lens starts one proxy listener
+# per target and ignores the legacy [proxy] + [backend] pair for runtime target
+# expansion.
+#
+# [[targets]]
+# name = "mysql-local"
+# listen = "127.0.0.1:3307"
+# protocol = "mysql"
+# database_type = "mysql"
+# backend_address = "127.0.0.1:3306"
+#
+# [[targets]]
+# name = "starrocks-local"
+# listen = "127.0.0.1:9037"
+# protocol = "mysql"
+# database_type = "starrocks"
+# backend_address = "127.0.0.1:9030"
+
 [tls]
 mode = "passthrough"
 client_cert_path = ""
@@ -107,6 +125,23 @@ Fields:
 - `address`: host and port.
 - `database_type`: `mysql`, `starrocks`, `tidb`, `doris`, or future values.
 - `tls_server_name`: optional backend TLS name.
+
+### `targets`
+
+Optional multi-target proxy configuration. Use this when one SQL Lens process
+should observe multiple explicit database surfaces, such as MySQL and
+StarRocks, at the same time.
+
+Each `[[targets]]` entry owns exactly one listener and one backend:
+
+- `name`: stable protocol-neutral target name exposed in API events.
+- `listen`: bind address for this target's database client connections.
+- `protocol`: currently supported value is `mysql`.
+- `database_type`: `mysql`, `starrocks`, `tidb`, `doris`, or future values.
+- `backend_address`: upstream host and port for this target.
+
+The legacy `[proxy]` plus `[backend]` shape remains valid and expands to one
+effective target named `default` when `[[targets]]` is absent.
 
 ### `tls`
 
@@ -200,6 +235,10 @@ SQL_LENS_LOGGING_LEVEL=debug
 - `proxy.listen` is required.
 - `backend.address` is required for proxy mode.
 - `proxy.protocol` must match an installed adapter.
+- When `[[targets]]` is present, every target requires `name`, `listen`, and
+  `backend_address`.
+- Target names and listen addresses must be unique.
+- Target protocol must be `mysql` in the current build.
 - `storage.capacity` must be positive for ring buffer.
 - TLS certificate paths are required for TLS termination.
 - `auth.enabled=true` requires a configured auth mode.

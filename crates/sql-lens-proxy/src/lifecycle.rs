@@ -34,6 +34,7 @@ pub struct ConnectionLifecycleRecord {
 impl ConnectionLifecycleRecord {
     pub fn accepted(
         id: ConnectionId,
+        target_name: Option<String>,
         protocol: ProtocolName,
         database_type: DatabaseType,
         client_addr: impl Into<String>,
@@ -42,6 +43,7 @@ impl ConnectionLifecycleRecord {
     ) -> Self {
         let info = ConnectionInfo {
             id,
+            target_name,
             protocol,
             database_type,
             client_addr: client_addr.into(),

@@ -9,6 +9,7 @@ use std::{
 
 use sql_lens_api::{ApiState, HttpServerConfig, HttpServerError, bind_http_server_with_state};
 use sql_lens_capture::SlowQueryClassifier;
+use sql_lens_config::{DatabaseType as ConfigDatabaseType, ProxyTargetConfig};
 use sql_lens_core::{ConnectionInfo, DatabaseType, ProtocolName, SqlEvent, Timestamp};
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
@@ -31,11 +32,61 @@ const DEFAULT_BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub struct MinimalMysqlRuntime {
     pub proxy_addr: SocketAddr,
+    pub proxy_targets: Vec<MinimalMysqlRuntimeTarget>,
     pub api_addr: SocketAddr,
     api_shutdown_tx: oneshot::Sender<()>,
     proxy_shutdown_tx: watch::Sender<bool>,
     api_task: tokio::task::JoinHandle<Result<(), HttpServerError>>,
-    proxy_task: tokio::task::JoinHandle<()>,
+    proxy_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinimalMysqlRuntimeTarget {
+    pub name: String,
+    pub proxy_addr: SocketAddr,
+    pub database_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinimalMysqlTargetConfig {
+    pub name: String,
+    pub listen: String,
+    pub backend_address: String,
+    pub database_type: String,
+}
+
+impl MinimalMysqlTargetConfig {
+    pub fn new(
+        name: impl Into<String>,
+        listen: impl Into<String>,
+        backend_address: impl Into<String>,
+        database_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            listen: listen.into(),
+            backend_address: backend_address.into(),
+            database_type: database_type.into(),
+        }
+    }
+}
+
+impl From<&ProxyTargetConfig> for MinimalMysqlTargetConfig {
+    fn from(target: &ProxyTargetConfig) -> Self {
+        Self {
+            name: target.name.clone(),
+            listen: target.listen.clone(),
+            backend_address: target.backend_address.clone(),
+            database_type: config_database_type_value(target.database_type).to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MysqlProxyTargetRuntimeConfig {
+    name: String,
+    database_type: DatabaseType,
+    backend_config: BackendDialConfig,
 }
 
 impl MinimalMysqlRuntime {
@@ -46,9 +97,9 @@ impl MinimalMysqlRuntime {
         self.api_task
             .await
             .map_err(MinimalMysqlRuntimeError::Join)??;
-        self.proxy_task
-            .await
-            .map_err(MinimalMysqlRuntimeError::Join)?;
+        for proxy_task in self.proxy_tasks {
+            proxy_task.await.map_err(MinimalMysqlRuntimeError::Join)?;
+        }
 
         Ok(())
     }
@@ -57,6 +108,22 @@ impl MinimalMysqlRuntime {
 pub async fn start_minimal_mysql_runtime(
     backend_address: impl Into<String>,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
+    start_minimal_mysql_runtime_with_targets(vec![MinimalMysqlTargetConfig::new(
+        "default",
+        "127.0.0.1:0",
+        backend_address,
+        MYSQL_PROTOCOL_NAME,
+    )])
+    .await
+}
+
+pub async fn start_minimal_mysql_runtime_with_targets(
+    targets: Vec<MinimalMysqlTargetConfig>,
+) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
+    if targets.is_empty() {
+        return Err(MinimalMysqlRuntimeError::NoProxyTargets);
+    }
+
     let state = ApiState::default();
     let http_server = bind_http_server_with_state(
         &HttpServerConfig {
@@ -67,9 +134,31 @@ pub async fn start_minimal_mysql_runtime(
     )
     .await?;
     let api_addr = http_server.local_addr();
-    let proxy_listener = TcpProxyListener::bind(ProxyListenerConfig::new("127.0.0.1:0")).await?;
-    let proxy_addr = proxy_listener.local_addr()?;
-    let backend_config = BackendDialConfig::new(backend_address, DEFAULT_BACKEND_CONNECT_TIMEOUT);
+    let mut bound_targets = Vec::with_capacity(targets.len());
+    let mut proxy_targets = Vec::with_capacity(targets.len());
+
+    for target in targets {
+        let proxy_listener =
+            TcpProxyListener::bind(ProxyListenerConfig::new(target.listen.clone())).await?;
+        let proxy_addr = proxy_listener.local_addr()?;
+        let runtime_config = MysqlProxyTargetRuntimeConfig {
+            name: target.name.clone(),
+            database_type: DatabaseType(target.database_type.clone()),
+            backend_config: BackendDialConfig::new(
+                target.backend_address,
+                DEFAULT_BACKEND_CONNECT_TIMEOUT,
+            ),
+        };
+
+        proxy_targets.push(MinimalMysqlRuntimeTarget {
+            name: target.name,
+            proxy_addr,
+            database_type: target.database_type,
+        });
+        bound_targets.push((proxy_listener, runtime_config));
+    }
+
+    let proxy_addr = proxy_targets[0].proxy_addr;
 
     let (api_shutdown_tx, api_shutdown_rx) = oneshot::channel::<()>();
     let (proxy_shutdown_tx, proxy_shutdown_rx) = watch::channel(false);
@@ -77,26 +166,32 @@ pub async fn start_minimal_mysql_runtime(
     let api_task = tokio::spawn(http_server.serve_with_shutdown(async move {
         let _ = api_shutdown_rx.await;
     }));
-    let proxy_task = tokio::spawn(run_mysql_proxy(
-        proxy_listener,
-        backend_config,
-        state,
-        proxy_shutdown_rx,
-    ));
+    let proxy_tasks = bound_targets
+        .into_iter()
+        .map(|(proxy_listener, runtime_config)| {
+            tokio::spawn(run_mysql_proxy(
+                proxy_listener,
+                runtime_config,
+                state.clone(),
+                proxy_shutdown_rx.clone(),
+            ))
+        })
+        .collect();
 
     Ok(MinimalMysqlRuntime {
         proxy_addr,
+        proxy_targets,
         api_addr,
         api_shutdown_tx,
         proxy_shutdown_tx,
         api_task,
-        proxy_task,
+        proxy_tasks,
     })
 }
 
 async fn run_mysql_proxy(
     listener: TcpProxyListener,
-    backend_config: BackendDialConfig,
+    target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -120,7 +215,7 @@ async fn run_mysql_proxy(
                     Ok(accepted) => {
                         handle_accepted_mysql_client(
                             accepted,
-                            backend_config.clone(),
+                            target_config.clone(),
                             state.clone(),
                             id_generator.next_id(),
                         )
@@ -137,16 +232,18 @@ async fn run_mysql_proxy(
 
 async fn handle_accepted_mysql_client(
     accepted: AcceptedClient,
-    backend_config: BackendDialConfig,
+    target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
     connection_id: sql_lens_core::ConnectionId,
 ) {
     let client_peer_addr = accepted.peer_addr();
 
-    match BackendDialer::dial(accepted, &backend_config).await {
+    match BackendDialer::dial(accepted, &target_config.backend_config).await {
         Ok(connection) => {
             let connection_info = runtime_connection_info(
                 connection_id,
+                target_config.name,
+                target_config.database_type,
                 client_peer_addr,
                 connection.backend_address().to_owned(),
             );
@@ -166,19 +263,26 @@ async fn handle_accepted_mysql_client(
 
 fn runtime_connection_info(
     connection_id: sql_lens_core::ConnectionId,
+    target_name: String,
+    database_type: DatabaseType,
     client_addr: SocketAddr,
     backend_addr: String,
 ) -> ConnectionInfo {
     let record = ConnectionLifecycleRecord::accepted(
         connection_id,
+        Some(target_name),
         ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
-        DatabaseType(MYSQL_PROTOCOL_NAME.to_owned()),
+        database_type,
         client_addr.to_string(),
         backend_addr,
         runtime_timestamp(),
     );
 
     record.into_info()
+}
+
+fn config_database_type_value(database_type: ConfigDatabaseType) -> &'static str {
+    database_type.config_value()
 }
 
 async fn forward_mysql_connection(
@@ -376,6 +480,83 @@ mod tests {
         SqlEventKind,
     };
 
+    #[test]
+    fn runtime_connection_info_carries_target_identity() {
+        let info = runtime_connection_info(
+            ConnectionId("conn_1".to_owned()),
+            "starrocks-local".to_owned(),
+            DatabaseType("starrocks".to_owned()),
+            "127.0.0.1:51000".parse().expect("valid client address"),
+            "127.0.0.1:9030".to_owned(),
+        );
+
+        assert_eq!(info.target_name.as_deref(), Some("starrocks-local"));
+        assert_eq!(info.database_type, DatabaseType("starrocks".to_owned()));
+        assert_eq!(info.protocol, ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()));
+        assert_eq!(info.backend_addr, "127.0.0.1:9030");
+    }
+
+    #[test]
+    fn minimal_target_config_uses_configured_proxy_target_values() {
+        let target = ProxyTargetConfig {
+            name: "starrocks-local".to_owned(),
+            listen: "127.0.0.1:9037".to_owned(),
+            protocol: sql_lens_config::Protocol::MySql,
+            database_type: ConfigDatabaseType::StarRocks,
+            backend_address: "127.0.0.1:9030".to_owned(),
+        };
+
+        assert_eq!(
+            MinimalMysqlTargetConfig::from(&target),
+            MinimalMysqlTargetConfig {
+                name: "starrocks-local".to_owned(),
+                listen: "127.0.0.1:9037".to_owned(),
+                backend_address: "127.0.0.1:9030".to_owned(),
+                database_type: "starrocks".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_binds_multiple_proxy_targets() {
+        let runtime = start_minimal_mysql_runtime_with_targets(vec![
+            MinimalMysqlTargetConfig::new("mysql-local", "127.0.0.1:0", "127.0.0.1:3306", "mysql"),
+            MinimalMysqlTargetConfig::new(
+                "starrocks-local",
+                "127.0.0.1:0",
+                "127.0.0.1:9030",
+                "starrocks",
+            ),
+        ])
+        .await
+        .expect("multi-target runtime should bind ephemeral listeners");
+
+        assert_eq!(runtime.proxy_targets.len(), 2);
+        assert_eq!(runtime.proxy_targets[0].name, "mysql-local");
+        assert_eq!(runtime.proxy_targets[0].database_type, "mysql");
+        assert_eq!(runtime.proxy_targets[1].name, "starrocks-local");
+        assert_eq!(runtime.proxy_targets[1].database_type, "starrocks");
+        assert_ne!(
+            runtime.proxy_targets[0].proxy_addr,
+            runtime.proxy_targets[1].proxy_addr
+        );
+        assert_eq!(runtime.proxy_addr, runtime.proxy_targets[0].proxy_addr);
+
+        runtime
+            .shutdown()
+            .await
+            .expect("runtime should shut down all proxy tasks");
+    }
+
+    #[tokio::test]
+    async fn minimal_runtime_rejects_empty_proxy_targets() {
+        let error = start_minimal_mysql_runtime_with_targets(Vec::new())
+            .await
+            .expect_err("empty target list should fail");
+
+        assert!(matches!(error, MinimalMysqlRuntimeError::NoProxyTargets));
+    }
+
     #[tokio::test]
     async fn store_sql_events_classifies_slow_events_before_storage_and_statistics() {
         let state = ApiState::default();
@@ -434,6 +615,7 @@ mod tests {
         SqlEvent {
             id,
             timestamp: Timestamp("2026-07-06T09:00:00Z".to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             connection_id: ConnectionId("conn_1".to_owned()),
@@ -466,6 +648,7 @@ mod tests {
 
 #[derive(Debug)]
 pub enum MinimalMysqlRuntimeError {
+    NoProxyTargets,
     Http(HttpServerError),
     ProxyListener(ProxyListenerError),
     BackendDial(BackendDialError),
@@ -475,6 +658,10 @@ pub enum MinimalMysqlRuntimeError {
 impl fmt::Display for MinimalMysqlRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NoProxyTargets => write!(
+                f,
+                "minimal MySQL runtime requires at least one proxy target"
+            ),
             Self::Http(source) => write!(f, "minimal MySQL runtime HTTP server failed: {source}"),
             Self::ProxyListener(source) => {
                 write!(f, "minimal MySQL runtime proxy listener failed: {source}")
@@ -490,6 +677,7 @@ impl fmt::Display for MinimalMysqlRuntimeError {
 impl Error for MinimalMysqlRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::NoProxyTargets => None,
             Self::Http(source) => Some(source),
             Self::ProxyListener(source) => Some(source),
             Self::BackendDial(source) => Some(source),

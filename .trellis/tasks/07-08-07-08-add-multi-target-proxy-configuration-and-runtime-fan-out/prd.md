@@ -43,23 +43,23 @@ database surface without running a separate SQL Lens process per backend.
 
 ## Acceptance Criteria
 
-- [ ] Config supports multiple named proxy targets.
-- [ ] Existing single-target config continues to load and validate.
-- [ ] Duplicate target names are rejected.
-- [ ] Duplicate target listen addresses are rejected.
-- [ ] Unsupported target protocol is rejected.
-- [ ] Runtime can bind and run multiple listeners sharing one API state.
-- [ ] Events captured through different targets have correct database type.
-- [ ] Target identity is exposed through a stable backend-owned event/API design.
-- [ ] Backend architecture spec documents explicit multi-target listener fan-out
+- [x] Config supports multiple named proxy targets.
+- [x] Existing single-target config continues to load and validate.
+- [x] Duplicate target names are rejected.
+- [x] Duplicate target listen addresses are rejected.
+- [x] Unsupported target protocol is rejected.
+- [x] Runtime can bind and run multiple listeners sharing one API state.
+- [x] Events captured through different targets have correct database type.
+- [x] Target identity is exposed through a stable backend-owned event/API design.
+- [x] Backend architecture spec documents explicit multi-target listener fan-out
       and forbidden middleware behaviors.
-- [ ] Frontend architecture spec documents target-aware UI/API type expectations
+- [x] Frontend architecture spec documents target-aware UI/API type expectations
       without requiring frontend implementation in this task.
-- [ ] `ISSUES.md` contains a frontend follow-up issue for target selection /
+- [x] `ISSUES.md` contains a frontend follow-up issue for target selection /
       multi-target display adaptation.
-- [ ] `rtk cargo fmt --check` passes.
-- [ ] `rtk cargo test --workspace` passes.
-- [ ] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] `rtk cargo fmt --check` passes.
+- [x] `rtk cargo test --workspace` passes.
+- [x] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Out Of Scope
 
@@ -71,8 +71,9 @@ database surface without running a separate SQL Lens process per backend.
 - Persistent storage schema changes unless needed for target identity in the
   in-memory/API contract.
 
-## Planning Status
+## Implementation Status
 
-The desired product direction is resolved: implement explicit multi-target proxy
-fan-out, not middleware routing. Planning artifacts and architecture specs must
-be reviewed before implementation starts.
+Implemented explicit multi-target proxy fan-out, not middleware routing. The
+backend exposes protocol-neutral `target_name` on captured events and
+connections, supports target-aware REST/WebSocket event contracts, and keeps
+frontend implementation out of scope.

@@ -67,8 +67,8 @@ Backend ownership rules:
   contents.
 - Protocol adapters remain per-connection observers and must not own target
   routing policy.
-- Storage/API consume already-classified target identity from shared event or
-  metadata contracts; they must not infer target identity from port strings.
+- Storage/API consume already-classified `target_name` from shared event or
+  connection contracts; they must not infer target identity from port strings.
 
 Forbidden for multi-target support:
 

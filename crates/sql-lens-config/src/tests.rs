@@ -66,6 +66,7 @@ fn default_config_contains_documented_proxy_and_backend_defaults() {
     assert_eq!(config.proxy.connect_timeout_ms, 5_000);
     assert_eq!(config.proxy.idle_timeout_ms, 300_000);
     assert_eq!(config.proxy.shutdown_timeout_ms, 10_000);
+    assert!(config.targets.is_empty());
     assert_eq!(config.backend.address, "127.0.0.1:3306");
     assert_eq!(config.backend.database_type, DatabaseType::MySql);
     assert_eq!(config.tls.mode, TlsMode::Passthrough);
@@ -126,6 +127,7 @@ fn default_config_contains_documented_security_and_extension_defaults() {
 fn public_config_types_support_serde_traits() {
     assert_serde::<SqlLensConfig>();
     assert_serde::<ProxyConfig>();
+    assert_serde::<ProxyTargetConfig>();
     assert_serde::<BackendConfig>();
     assert_serde::<StorageConfig>();
     assert_serde::<Protocol>();
@@ -149,6 +151,22 @@ fn default_config_passes_validation() {
     let config = SqlLensConfig::default();
 
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn default_config_expands_to_legacy_effective_target() {
+    let config = SqlLensConfig::default();
+
+    assert_eq!(
+        config.effective_targets(),
+        vec![ProxyTargetConfig {
+            name: "default".to_owned(),
+            listen: "127.0.0.1:3307".to_owned(),
+            protocol: Protocol::MySql,
+            database_type: DatabaseType::MySql,
+            backend_address: "127.0.0.1:3306".to_owned(),
+        }]
+    );
 }
 
 #[test]
@@ -259,6 +277,123 @@ fn validation_collects_multiple_violations() {
             ConfigValidationViolation::UnsupportedProtocol {
                 protocol: Protocol::ClickHouse
             }
+        ]
+    );
+}
+
+#[test]
+fn multi_target_toml_loads_and_expands_configured_targets() {
+    let config = SqlLensConfig::from_toml_str(
+        r#"
+[[targets]]
+name = "mysql-local"
+listen = "127.0.0.1:3307"
+protocol = "mysql"
+database_type = "mysql"
+backend_address = "127.0.0.1:3306"
+
+[[targets]]
+name = "starrocks-local"
+listen = "127.0.0.1:9037"
+protocol = "mysql"
+database_type = "starrocks"
+backend_address = "127.0.0.1:9030"
+"#,
+    )
+    .expect("multi-target config should load");
+
+    assert!(config.validate().is_ok());
+    assert_eq!(
+        config.effective_targets(),
+        vec![
+            ProxyTargetConfig {
+                name: "mysql-local".to_owned(),
+                listen: "127.0.0.1:3307".to_owned(),
+                protocol: Protocol::MySql,
+                database_type: DatabaseType::MySql,
+                backend_address: "127.0.0.1:3306".to_owned(),
+            },
+            ProxyTargetConfig {
+                name: "starrocks-local".to_owned(),
+                listen: "127.0.0.1:9037".to_owned(),
+                protocol: Protocol::MySql,
+                database_type: DatabaseType::StarRocks,
+                backend_address: "127.0.0.1:9030".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn multi_target_validation_rejects_missing_values() {
+    let config = SqlLensConfig::from_toml_str(
+        r#"
+[[targets]]
+name = ""
+listen = ""
+protocol = "mysql"
+database_type = "mysql"
+backend_address = ""
+"#,
+    )
+    .expect("semantically invalid target config should still parse");
+
+    let error = config
+        .validate()
+        .expect_err("missing target fields should fail validation");
+
+    assert_eq!(
+        error.violations,
+        vec![
+            ConfigValidationViolation::MissingTargetName { index: 0 },
+            ConfigValidationViolation::MissingTargetListen {
+                target_name: "#0".to_owned(),
+            },
+            ConfigValidationViolation::MissingTargetBackendAddress {
+                target_name: "#0".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn multi_target_validation_rejects_duplicates_and_unsupported_protocol() {
+    let config = SqlLensConfig::from_toml_str(
+        r#"
+[[targets]]
+name = "analytics"
+listen = "127.0.0.1:3307"
+protocol = "postgresql"
+database_type = "postgresql"
+backend_address = "127.0.0.1:5432"
+
+[[targets]]
+name = "analytics"
+listen = "127.0.0.1:3307"
+protocol = "mysql"
+database_type = "mysql"
+backend_address = "127.0.0.1:3306"
+"#,
+    )
+    .expect("duplicate target config should still parse");
+
+    let error = config
+        .validate()
+        .expect_err("duplicate and unsupported target values should fail validation");
+
+    assert_eq!(
+        error.violations,
+        vec![
+            ConfigValidationViolation::UnsupportedTargetProtocol {
+                target_name: "analytics".to_owned(),
+                protocol: Protocol::PostgreSql,
+            },
+            ConfigValidationViolation::DuplicateTargetName {
+                name: "analytics".to_owned(),
+            },
+            ConfigValidationViolation::DuplicateTargetListen {
+                listen: "127.0.0.1:3307".to_owned(),
+            },
         ]
     );
 }

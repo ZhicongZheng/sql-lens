@@ -66,13 +66,13 @@ web/
 ## Multi-Target UI Architecture
 
 SQL Lens backend may expose multiple configured proxy targets in one process,
-for example `mysql-local` and `starrocks-local`. Frontend code must treat target
-identity as a protocol-neutral API field once the backend exposes it.
+for example `mysql-local` and `starrocks-local`. Frontend code must treat
+`target_name` as a protocol-neutral API field.
 
 Frontend ownership rules:
 
-- `lib/api` owns target-aware DTOs and query parameters when the backend API
-  contract is available.
+- `lib/api` owns target-aware DTOs and query parameters such as
+  `target_name`.
 - `features/sql-events` owns target filters for event list/detail workflows.
 - `features/connections` owns target display for connection views.
 - Shared status badges or chips may live under `components/sql` only after a
@@ -85,7 +85,7 @@ Target identity must complement, not replace:
 - `database` and `user`
 
 Do not infer target identity from backend address strings in components. Use the
-typed backend/API field provided by the multi-target backend task.
+typed `target_name` backend/API field.
 
 ## State Rules
 
@@ -201,4 +201,3 @@ export const apiBaseUrl: string = (
 - Stack: Vite 6 + React 18 + TypeScript (strict, `noUnusedLocals`/`noUnusedParameters` on) + TailwindCSS v4 (`@tailwindcss/vite`, CSS-first config via `@import "tailwindcss"` + `@theme inline`) + shadcn/ui (`components.json`, `lib/utils.ts` `cn`, New York style, neutral base) + React Router v7.
 - Path alias: `@/* -> ./src/*`, configured in BOTH `tsconfig.app.json` (`paths`) and `vite.config.ts` (`resolve.alias`). Imports use `@/...` exclusively.
 - The skeleton intentionally does NOT install Monaco Editor, ECharts, or TanStack Query — those land in their own issues (066, 067, feature work). Do not add them speculatively.
-

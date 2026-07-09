@@ -80,8 +80,8 @@ Multi-target model:
 - One SQL Lens process may run multiple explicitly configured proxy targets.
 - Each target maps one listener address to one backend database address.
 - All target listeners share one API/storage/broadcast runtime state.
-- Target identity is protocol-neutral and should be carried into captured
-  connection/event data for API and UI display.
+- Target identity is protocol-neutral. Captured connection/event data exposes it
+  as `target_name` for API and UI display.
 - SQL Lens does not dynamically route one listener to multiple backends based on
   SQL text, username, database name, SNI, or packet contents.
 - Multi-target support must not introduce sharding, read/write splitting,

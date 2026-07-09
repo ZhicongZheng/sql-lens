@@ -90,6 +90,7 @@ mod tests {
     fn test_connection(id: &str, state: ConnectionState) -> ConnectionInfo {
         ConnectionInfo {
             id: ConnectionId(id.to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             client_addr: "127.0.0.1:51000".to_owned(),

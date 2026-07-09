@@ -90,6 +90,7 @@ impl CaptureEventEmitter for VecCaptureEventEmitter {
 fn test_context() -> ProtocolConnectionContext {
     ProtocolConnectionContext::new(ConnectionInfo {
         id: ConnectionId("conn_1".to_owned()),
+        target_name: Some("mysql-local".to_owned()),
         protocol: ProtocolName("dummy".to_owned()),
         database_type: DatabaseType("dummy".to_owned()),
         client_addr: "127.0.0.1:51000".to_owned(),
@@ -110,6 +111,7 @@ fn test_event(id: &str) -> SqlEvent {
     SqlEvent {
         id: SqlEventId(id.to_owned()),
         timestamp: Timestamp("2026-07-06T09:00:00Z".to_owned()),
+        target_name: Some("mysql-local".to_owned()),
         protocol: ProtocolName("dummy".to_owned()),
         database_type: DatabaseType("dummy".to_owned()),
         connection_id: ConnectionId("conn_1".to_owned()),

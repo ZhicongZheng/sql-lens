@@ -34,6 +34,7 @@ pub struct ConnectionListResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionResponse {
     pub id: String,
+    pub target_name: Option<String>,
     pub protocol: String,
     pub database_type: String,
     pub client_addr: String,
@@ -89,6 +90,7 @@ impl From<&ConnectionInfo> for ConnectionResponse {
     fn from(connection: &ConnectionInfo) -> Self {
         Self {
             id: connection.id.0.clone(),
+            target_name: connection.target_name.clone(),
             protocol: connection.protocol.0.clone(),
             database_type: connection.database_type.0.clone(),
             client_addr: connection.client_addr.clone(),
@@ -147,6 +149,7 @@ mod tests {
     fn test_connection(id: &str, state: ConnectionState) -> ConnectionInfo {
         ConnectionInfo {
             id: ConnectionId(id.to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             client_addr: "127.0.0.1:51000".to_owned(),
@@ -210,6 +213,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(has_request_id);
         assert_eq!(json["items"][0]["id"], "conn_2");
+        assert_eq!(json["items"][0]["target_name"], "mysql-local");
         assert_eq!(json["items"][0]["state"], "closed");
         assert_eq!(json["items"][0]["closed_at"], "2026-07-07T09:01:00Z");
         assert_eq!(json["items"][1]["id"], "conn_1");
@@ -227,6 +231,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(has_request_id);
         assert_eq!(json["id"], "conn_1");
+        assert_eq!(json["target_name"], "mysql-local");
         assert_eq!(json["protocol"], "mysql");
         assert_eq!(json["database_type"], "mysql");
         assert_eq!(json["client_addr"], "127.0.0.1:51000");

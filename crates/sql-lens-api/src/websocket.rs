@@ -164,6 +164,7 @@ struct SubscribeMessage {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SqlEventSubscriptionFilter {
+    target_name: Option<String>,
     protocol: Option<ProtocolName>,
     statuses: Option<Vec<CaptureStatus>>,
     database: Option<String>,
@@ -184,6 +185,7 @@ impl SqlEventSubscriptionFilter {
         }
 
         Ok(Self {
+            target_name: filters.target_name,
             protocol: filters.protocol.map(ProtocolName),
             statuses,
             database: filters.database,
@@ -193,6 +195,12 @@ impl SqlEventSubscriptionFilter {
     }
 
     fn matches(&self, event: &SqlEvent) -> bool {
+        if let Some(target_name) = self.target_name.as_deref()
+            && event.target_name.as_deref() != Some(target_name)
+        {
+            return false;
+        }
+
         if let Some(protocol) = &self.protocol
             && &event.protocol != protocol
         {
@@ -230,6 +238,7 @@ impl SqlEventSubscriptionFilter {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SubscribeFilterMessage {
+    target_name: Option<String>,
     protocol: Option<String>,
     status: Option<Vec<String>>,
     database: Option<String>,
@@ -326,6 +335,7 @@ mod tests {
                 "type":"subscribe",
                 "version":1,
                 "filters":{
+                    "target_name":"mysql-local",
                     "protocol":"mysql",
                     "status":["ok","slow"],
                     "database":"app",
@@ -339,6 +349,7 @@ mod tests {
         };
 
         assert!(filter.matches(&test_event("evt_match")));
+        assert!(!filter.matches(&event_with_target_name("evt_target", "starrocks-local")));
         assert!(!filter.matches(&event_with_protocol("evt_protocol", "postgresql")));
         assert!(!filter.matches(&event_with_status("evt_status", CaptureStatus::Error)));
         assert!(!filter.matches(&event_with_database("evt_database", "analytics")));
@@ -735,6 +746,7 @@ mod tests {
         assert_eq!(payload["type"], "sql_event.created");
         assert_eq!(payload["version"], 1);
         assert_eq!(payload["payload"]["id"], expected_id);
+        assert_eq!(payload["payload"]["target_name"], "mysql-local");
     }
 
     fn assert_subscription_error(message: ClientMessage, expected_field: &str) {
@@ -754,6 +766,12 @@ mod tests {
     fn event_with_protocol(id: &str, protocol: &str) -> sql_lens_core::SqlEvent {
         let mut event = test_event(id);
         event.protocol = ProtocolName(protocol.to_owned());
+        event
+    }
+
+    fn event_with_target_name(id: &str, target_name: &str) -> sql_lens_core::SqlEvent {
+        let mut event = test_event(id);
+        event.target_name = Some(target_name.to_owned());
         event
     }
 

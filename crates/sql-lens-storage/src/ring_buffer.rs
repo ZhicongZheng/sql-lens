@@ -173,6 +173,7 @@ pub struct RingBufferTimelinePage {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SqlEventFilter {
+    pub target_name: Option<String>,
     pub protocol: Option<ProtocolName>,
     pub database_type: Option<DatabaseType>,
     pub database: Option<String>,
@@ -208,6 +209,12 @@ impl SqlEventFilter {
     }
 
     fn matches(&self, event: &SqlEvent) -> bool {
+        if let Some(target_name) = self.target_name.as_deref() {
+            if event.target_name.as_deref() != Some(target_name) {
+                return false;
+            }
+        }
+
         if let Some(protocol) = &self.protocol {
             if &event.protocol != protocol {
                 return false;
@@ -354,6 +361,7 @@ mod tests {
         SqlEvent {
             id: SqlEventId(id.to_owned()),
             timestamp: Timestamp("2026-07-06T09:00:00Z".to_owned()),
+            target_name: None,
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             connection_id: ConnectionId("conn_1".to_owned()),
@@ -766,6 +774,38 @@ mod tests {
         assert_eq!(
             event_ids(&page.events),
             vec![SqlEventId("evt_1".to_owned())]
+        );
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn ring_buffer_timeline_filters_by_target_name() {
+        let mut store = RingBufferStore::new(capacity(3));
+        let mut mysql_target = test_event("evt_1");
+        mysql_target.target_name = Some("mysql-local".to_owned());
+        let mut starrocks_target = test_event("evt_2");
+        starrocks_target.target_name = Some("starrocks-local".to_owned());
+        let unnamed = test_event("evt_3");
+
+        store.append(mysql_target);
+        store.append(starrocks_target);
+        store.append(unnamed);
+
+        let page = query_page(
+            &store,
+            filtered_timeline_query(
+                10,
+                None,
+                SqlEventFilter {
+                    target_name: Some("starrocks-local".to_owned()),
+                    ..SqlEventFilter::default()
+                },
+            ),
+        );
+
+        assert_eq!(
+            event_ids(&page.events),
+            vec![SqlEventId("evt_2".to_owned())]
         );
         assert_eq!(page.next_cursor, None);
     }

@@ -32,6 +32,7 @@ pub(crate) fn routes() -> Router {
 struct SqlEventListQueryParams {
     limit: Option<usize>,
     cursor: Option<String>,
+    target_name: Option<String>,
     protocol: Option<String>,
     database_type: Option<String>,
     database: Option<String>,
@@ -56,6 +57,7 @@ pub struct SqlEventListResponse {
 pub struct SqlEventSummaryResponse {
     pub id: String,
     pub timestamp: String,
+    pub target_name: Option<String>,
     pub protocol: String,
     pub database_type: String,
     pub connection_id: String,
@@ -77,6 +79,7 @@ pub struct SqlEventSummaryResponse {
 pub struct SqlEventDetailResponse {
     pub id: String,
     pub timestamp: String,
+    pub target_name: Option<String>,
     pub protocol: String,
     pub database_type: String,
     pub connection_id: String,
@@ -197,6 +200,7 @@ impl SqlEventListQueryParams {
             limit: parse_limit(self.limit)?,
             cursor: self.cursor.as_deref().map(decode_cursor).transpose()?,
             filter: SqlEventFilter {
+                target_name: self.target_name,
                 protocol: self.protocol.map(ProtocolName),
                 database_type: self.database_type.map(DatabaseType),
                 database: self.database,
@@ -251,6 +255,7 @@ impl From<&SqlEvent> for SqlEventSummaryResponse {
         Self {
             id: event_id(event),
             timestamp: timestamp_value(&event.timestamp),
+            target_name: event.target_name.clone(),
             protocol: protocol_name(&event.protocol),
             database_type: database_type_name(&event.database_type),
             connection_id: event.connection_id.0.clone(),
@@ -275,6 +280,7 @@ impl From<&SqlEvent> for SqlEventDetailResponse {
         Self {
             id: event_id(event),
             timestamp: timestamp_value(&event.timestamp),
+            target_name: event.target_name.clone(),
             protocol: protocol_name(&event.protocol),
             database_type: database_type_name(&event.database_type),
             connection_id: event.connection_id.0.clone(),
@@ -488,6 +494,7 @@ mod tests {
         SqlEvent {
             id: SqlEventId(id.to_owned()),
             timestamp: Timestamp("2026-07-07T09:00:00Z".to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             connection_id: ConnectionId("conn_1".to_owned()),
@@ -583,6 +590,7 @@ mod tests {
         assert!(has_request_id);
         let item = &json["items"][0];
         assert_eq!(item["id"], "evt_1");
+        assert_eq!(item["target_name"], "mysql-local");
         assert_eq!(item["protocol"], "mysql");
         assert_eq!(item["database_type"], "mysql");
         assert_eq!(item["connection_id"], "conn_1");
@@ -599,6 +607,7 @@ mod tests {
     async fn sql_event_list_maps_query_params_to_storage_filters() {
         let mut matching = test_event("evt_1");
         matching.client_addr = "127.0.0.1:51042".to_owned();
+        matching.target_name = Some("mysql-local".to_owned());
         matching.fingerprint = Some("select filtered".to_owned());
         let mut wrong_client = matching.clone();
         wrong_client.id = SqlEventId("evt_2".to_owned());
@@ -606,10 +615,13 @@ mod tests {
         let mut wrong_fingerprint = matching.clone();
         wrong_fingerprint.id = SqlEventId("evt_3".to_owned());
         wrong_fingerprint.fingerprint = Some("select other".to_owned());
+        let mut wrong_target = matching.clone();
+        wrong_target.id = SqlEventId("evt_4".to_owned());
+        wrong_target.target_name = Some("starrocks-local".to_owned());
 
         let (status, json, _) = get_json(
-            app_with_events(vec![matching, wrong_client, wrong_fingerprint]),
-            "/api/v1/sql-events?client_addr=127.0.0.1:51042&fingerprint=select%20filtered",
+            app_with_events(vec![matching, wrong_client, wrong_fingerprint, wrong_target]),
+            "/api/v1/sql-events?target_name=mysql-local&client_addr=127.0.0.1:51042&fingerprint=select%20filtered",
         )
         .await;
 
@@ -708,6 +720,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(has_request_id);
         assert_eq!(json["id"], "evt_1");
+        assert_eq!(json["target_name"], "mysql-local");
         assert_eq!(json["normalized_sql"], "select * from users where id = ?");
         assert_eq!(json["parameters"][0]["index"], 0);
         assert_eq!(json["parameters"][0]["name"], "id");

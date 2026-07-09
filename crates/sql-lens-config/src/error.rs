@@ -72,7 +72,28 @@ impl std::error::Error for ConfigValidationError {}
 pub enum ConfigValidationViolation {
     MissingProxyListen,
     MissingBackendAddress,
-    UnsupportedProtocol { protocol: Protocol },
+    UnsupportedProtocol {
+        protocol: Protocol,
+    },
+    MissingTargetName {
+        index: usize,
+    },
+    MissingTargetListen {
+        target_name: String,
+    },
+    MissingTargetBackendAddress {
+        target_name: String,
+    },
+    UnsupportedTargetProtocol {
+        target_name: String,
+        protocol: Protocol,
+    },
+    DuplicateTargetName {
+        name: String,
+    },
+    DuplicateTargetListen {
+        listen: String,
+    },
 }
 
 impl fmt::Display for ConfigValidationViolation {
@@ -85,6 +106,30 @@ impl fmt::Display for ConfigValidationViolation {
                 "`proxy.protocol` `{}` is not supported in this build; currently supported: `mysql`",
                 protocol.config_value()
             ),
+            Self::MissingTargetName { index } => {
+                write!(f, "`targets[{index}].name` must not be empty")
+            }
+            Self::MissingTargetListen { target_name } => {
+                write!(f, "`targets[{target_name}].listen` must not be empty")
+            }
+            Self::MissingTargetBackendAddress { target_name } => write!(
+                f,
+                "`targets[{target_name}].backend_address` must not be empty"
+            ),
+            Self::UnsupportedTargetProtocol {
+                target_name,
+                protocol,
+            } => write!(
+                f,
+                "`targets[{target_name}].protocol` `{}` is not supported in this build; currently supported: `mysql`",
+                protocol.config_value()
+            ),
+            Self::DuplicateTargetName { name } => {
+                write!(f, "`targets` contains duplicate target name `{name}`")
+            }
+            Self::DuplicateTargetListen { listen } => {
+                write!(f, "`targets` contains duplicate listen address `{listen}`")
+            }
         }
     }
 }

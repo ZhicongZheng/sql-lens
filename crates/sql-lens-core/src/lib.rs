@@ -36,6 +36,7 @@ mod tests {
         let event = SqlEvent {
             id: SqlEventId("evt_01".to_owned()),
             timestamp: Timestamp("2026-07-03T12:00:00Z".to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             connection_id: ConnectionId("conn_01".to_owned()),
@@ -83,6 +84,7 @@ mod tests {
     fn connection_info_can_be_constructed() {
         let connection = ConnectionInfo {
             id: ConnectionId("conn_01".to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             client_addr: "127.0.0.1:51000".to_owned(),

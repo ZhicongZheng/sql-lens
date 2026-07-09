@@ -82,6 +82,7 @@ fn test_timestamp(value: &str) -> Timestamp {
 fn test_lifecycle_record() -> ConnectionLifecycleRecord {
     ConnectionLifecycleRecord::accepted(
         ConnectionId("conn_test".to_owned()),
+        Some("mysql-local".to_owned()),
         ProtocolName("mysql".to_owned()),
         DatabaseType("mysql".to_owned()),
         "127.0.0.1:51000",

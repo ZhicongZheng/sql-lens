@@ -9,6 +9,7 @@ use crate::{
 pub struct SqlEvent {
     pub id: SqlEventId,
     pub timestamp: Timestamp,
+    pub target_name: Option<String>,
     pub protocol: ProtocolName,
     pub database_type: DatabaseType,
     pub connection_id: ConnectionId,
@@ -51,6 +52,7 @@ pub enum CaptureStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionInfo {
     pub id: ConnectionId,
+    pub target_name: Option<String>,
     pub protocol: ProtocolName,
     pub database_type: DatabaseType,
     pub client_addr: String,

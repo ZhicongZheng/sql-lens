@@ -46,6 +46,7 @@ Query parameters:
 
 - `limit`
 - `cursor`
+- `target_name`
 - `protocol`
 - `database_type`
 - `database`
@@ -67,6 +68,7 @@ Response:
     {
       "id": "evt_01J00000000000000000000000",
       "timestamp": "2026-07-03T12:00:00Z",
+      "target_name": "mysql-local",
       "protocol": "mysql",
       "database_type": "mysql",
       "connection_id": "conn_01J00000000000000000000000",
@@ -116,6 +118,7 @@ Connection response:
 ```json
 {
   "id": "conn_01J00000000000000000000000",
+  "target_name": "mysql-local",
   "protocol": "mysql",
   "database_type": "mysql",
   "client_addr": "127.0.0.1:51000",
@@ -214,6 +217,7 @@ Client subscription:
   "type": "subscribe",
   "version": 1,
   "filters": {
+    "target_name": "mysql-local",
     "protocol": "mysql",
     "status": ["ok", "error", "slow"],
     "database": "app",
@@ -226,6 +230,7 @@ Client subscription:
 Current implementation requires a valid `subscribe` message before sending live events. `filters` is optional; when omitted, the subscriber receives all future SQL events. Supported filters are:
 
 - `protocol`: exact protocol name.
+- `target_name`: exact configured proxy target name.
 - `status`: one or more of `ok`, `slow`, `error`, or `unknown`.
 - `database`: exact database name.
 - `min_duration_ms`: inclusive minimum duration in milliseconds.
@@ -242,6 +247,7 @@ Server event:
   "payload": {
     "id": "evt_01J00000000000000000000000",
     "timestamp": "2026-07-03T12:00:00Z",
+    "target_name": "mysql-local",
     "protocol": "mysql",
     "status": "ok",
     "duration_ms": 3.4,

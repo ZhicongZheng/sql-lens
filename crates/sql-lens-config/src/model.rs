@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct SqlLensConfig {
     pub proxy: ProxyConfig,
     pub backend: BackendConfig,
+    pub targets: Vec<ProxyTargetConfig>,
     pub tls: TlsConfig,
     pub web: WebConfig,
     pub storage: StorageConfig,
@@ -14,6 +15,16 @@ pub struct SqlLensConfig {
     pub auth: AuthConfig,
     pub replay: ReplayConfig,
     pub plugins: PluginsConfig,
+}
+
+impl SqlLensConfig {
+    pub fn effective_targets(&self) -> Vec<ProxyTargetConfig> {
+        if self.targets.is_empty() {
+            return vec![ProxyTargetConfig::from_legacy(&self.proxy, &self.backend)];
+        }
+
+        self.targets.clone()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +51,28 @@ impl Default for ProxyConfig {
             connect_timeout_ms: 5_000,
             idle_timeout_ms: 300_000,
             shutdown_timeout_ms: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProxyTargetConfig {
+    pub name: String,
+    pub listen: String,
+    pub protocol: Protocol,
+    pub database_type: DatabaseType,
+    pub backend_address: String,
+}
+
+impl ProxyTargetConfig {
+    fn from_legacy(proxy: &ProxyConfig, backend: &BackendConfig) -> Self {
+        Self {
+            name: "default".to_owned(),
+            listen: proxy.listen.clone(),
+            protocol: proxy.protocol,
+            database_type: backend.database_type,
+            backend_address: backend.address.clone(),
         }
     }
 }
@@ -246,7 +279,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub(crate) fn config_value(self) -> &'static str {
+    pub fn config_value(self) -> &'static str {
         match self {
             Self::MySql => "mysql",
             Self::PostgreSql => "postgresql",
@@ -273,6 +306,20 @@ pub enum DatabaseType {
     Sqlite,
     #[serde(rename = "clickhouse")]
     ClickHouse,
+}
+
+impl DatabaseType {
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::MySql => "mysql",
+            Self::StarRocks => "starrocks",
+            Self::TiDb => "tidb",
+            Self::Doris => "doris",
+            Self::PostgreSql => "postgresql",
+            Self::Sqlite => "sqlite",
+            Self::ClickHouse => "clickhouse",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]

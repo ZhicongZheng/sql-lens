@@ -204,6 +204,7 @@ mod tests {
         SqlEvent {
             id: SqlEventId(id.to_owned()),
             timestamp: Timestamp("2026-07-06T09:00:00Z".to_owned()),
+            target_name: Some("mysql-local".to_owned()),
             protocol: ProtocolName("mysql".to_owned()),
             database_type: DatabaseType("mysql".to_owned()),
             connection_id: ConnectionId(connection_id.to_owned()),

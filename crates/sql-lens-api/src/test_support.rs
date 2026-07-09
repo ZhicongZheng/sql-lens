@@ -8,6 +8,7 @@ pub(crate) fn test_event(id: &str) -> SqlEvent {
     SqlEvent {
         id: SqlEventId(id.to_owned()),
         timestamp: Timestamp("2026-07-07T09:00:00Z".to_owned()),
+        target_name: Some("mysql-local".to_owned()),
         protocol: ProtocolName("mysql".to_owned()),
         database_type: DatabaseType("mysql".to_owned()),
         connection_id: ConnectionId("conn_1".to_owned()),
