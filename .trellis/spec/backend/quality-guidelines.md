@@ -614,8 +614,9 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
   broadcast, live statistics, and ring-buffer event storage.
 - When `storage.type = "sqlite"`, runtime startup opens/migrates
   `storage.path` through `SqliteEventStore::open` and starts a bounded
-  persistence worker. REST SQL event timeline/detail endpoints still read from
-  the shared ring-buffer `ApiState` until a later API storage-backend task.
+  persistence worker. REST SQL event timeline/detail/export endpoints and
+  replay preview event lookup read persisted events through the configured
+  SQLite API read source.
 - The CLI owns OS signal handling; `sql-lens-api` owns HTTP graceful shutdown
   primitives and `sql-lens-proxy` owns listener/session primitives.
 - Ctrl-C triggers graceful shutdown of the API server and proxy listeners.
@@ -5437,6 +5438,10 @@ pub struct ApiState;
 impl ApiState {
     pub fn new(event_store: sql_lens_storage::RingBufferStore) -> Self;
     pub fn event_store(&self) -> std::sync::Arc<tokio::sync::RwLock<sql_lens_storage::RingBufferStore>>;
+    pub fn with_sqlite_event_reader(
+        event_store: sql_lens_storage::RingBufferStore,
+        sqlite_store: sql_lens_storage::SqliteEventStore,
+    ) -> Self;
 }
 
 pub fn router() -> axum::Router;
@@ -5486,7 +5491,9 @@ tokio = { version = "1", features = ["net", "sync"] }
 
 - `router()` uses `ApiState::default()` and remains usable for empty API smoke tests.
 - `router_with_state(ApiState)` registers health routes and SQL event routes under the existing request ID middleware.
-- `ApiState` stores a concrete `RingBufferStore` behind `Arc<RwLock<_>>`.
+- `ApiState` stores the live `RingBufferStore` behind `Arc<RwLock<_>>` and uses
+  a configured SQL event read source for REST timeline/detail/export/replay
+  event lookups.
 - The endpoint supports `limit`, `cursor`, `protocol`, `database_type`, `database`, `user`, `client_addr`, `status`, `min_duration_ms`, `max_duration_ms`, `q`, `fingerprint`, `from`, and `to`.
 - Default `limit` is `100`.
 - Maximum `limit` is `500`; larger values are clamped to `500`.
@@ -5525,8 +5532,10 @@ Good:
 
 Base:
 
-- A future app runtime creates one configured ring buffer and passes it to `ApiState::new`.
-- Future SQLite/DuckDB backends can introduce a repository boundary after a second storage backend is actually wired.
+- Ring-buffer-only runtime creates one configured ring buffer and passes it to
+  `ApiState::new`.
+- SQLite runtime creates one configured ring buffer for live state and passes a
+  configured `SqliteEventStore` to `ApiState::with_sqlite_event_reader`.
 
 Bad:
 

@@ -3,6 +3,7 @@
 mod api_error;
 mod api_state;
 mod connections;
+mod event_reader;
 mod export;
 mod health;
 mod live_sql_events;

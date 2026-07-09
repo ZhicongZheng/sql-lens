@@ -2247,6 +2247,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "rusqlite",
  "serde",
  "serde_json",
  "sql-lens-config",
@@ -2266,6 +2267,7 @@ dependencies = [
  "clap",
  "mysql_async",
  "reqwest",
+ "serde_json",
  "sql-lens-api",
  "sql-lens-capture",
  "sql-lens-config",

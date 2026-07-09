@@ -66,9 +66,9 @@ pub fn apply_sqlite_schema(
 - Use `rusqlite::Connection::execute_batch` for schema-only migrations.
 - Keep migrations idempotent with `CREATE TABLE IF NOT EXISTS`,
   `CREATE INDEX IF NOT EXISTS`, and `INSERT OR IGNORE` for schema version rows.
-- Keep SQLite access in `sql-lens-storage`; protocol, proxy, and API handlers
-  must not call SQLite directly. App runtime may open a configured
-  `SqliteEventStore` only for an explicit runtime wiring task.
+- Keep SQLite SQL access in `sql-lens-storage`; protocol, proxy, and API
+  handlers must not call `rusqlite` directly. App/API runtime wiring may pass a
+  configured `SqliteEventStore` through an explicit read-source boundary.
 - Rollback/downgrade behavior is not implemented yet. Future schema versions
   must document upgrade and compatibility behavior before adding version > 1.
 
@@ -232,10 +232,9 @@ let tx = connection.transaction()?;
 
 - Trigger: a task reads persisted `sql_events` from SQLite or changes the
   SQLite timeline query API.
-- SQLite timeline reads remain storage-local until a separate runtime wiring
-  task chooses SQLite as an application storage backend.
-- Query code belongs in `sql-lens-storage`; API handlers and UI code should
-  translate into storage query structs instead of duplicating filter behavior.
+- SQLite timeline query code belongs in `sql-lens-storage`. API handlers should
+  translate HTTP inputs into storage query structs through the API read-source
+  boundary instead of duplicating filter behavior.
 
 ### 2. Signatures
 

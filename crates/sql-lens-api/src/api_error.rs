@@ -65,6 +65,10 @@ impl ApiEndpointError {
             BTreeMap::from([(key.into(), value.into())]),
         )
     }
+
+    pub(crate) fn storage_unavailable(message: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::StorageUnavailable, message, BTreeMap::new())
+    }
 }
 
 impl IntoResponse for ApiEndpointError {

@@ -1820,3 +1820,22 @@ Priority: P1
 Difficulty: Medium
 Estimated Time: 6h
 Dependencies: Issue 087, Issue 109
+
+## Issue 113: Add SQLite-backed API event reads
+
+Description: Read persisted SQL event timeline and detail data from SQLite when SQLite storage is configured.
+
+Acceptance Criteria:
+
+- API runtime can select a SQLite-backed event read store when `storage.type = "sqlite"` is configured.
+- `GET /api/v1/sql-events` can read persisted SQLite events with existing filters and pagination semantics.
+- `GET /api/v1/sql-events/{id}` can read persisted SQLite event details, including parameters.
+- SQL event export and replay preview event lookup use the same configured event read source.
+- Default ring-buffer-only behavior is unchanged.
+- Tests cover ring-buffer reads and SQLite-backed list/detail/export/replay preview reads.
+
+Labels: `area:backend`, `area:api`, `area:storage`, `area:app`, `type:feature`
+Priority: P1
+Difficulty: Medium
+Estimated Time: 6h
+Dependencies: Issue 088, Issue 112

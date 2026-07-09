@@ -138,8 +138,11 @@ Current implementation:
 - Structured protocol metadata and parameter values are stored as JSON text.
 - `query_timeline` reads persisted `sql_events` newest-first with storage-owned
   cursors and the shared SQL event filter contract.
-- Runtime capture fan-out, file lifecycle configuration, retention cleanup, and
-  API/runtime SQLite selection are separate tasks.
+- Runtime capture fan-out can persist captured events to SQLite when configured.
+- API runtime can select SQLite as the SQL event read source for timeline,
+  detail, export, and replay preview event lookup.
+- File lifecycle configuration and retention cleanup scheduling are separate
+  runtime tasks.
 
 ## DuckDB Future
 

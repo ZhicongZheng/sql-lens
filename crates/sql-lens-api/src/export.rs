@@ -9,12 +9,11 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
-use sql_lens_core::{RedactionPolicy, redact_sql_event};
-use sql_lens_storage::RingBufferTimelineQuery;
 
 use crate::{
     ApiState,
     api_error::ApiEndpointError,
+    event_reader::SqlEventReadQuery,
     sql_events::{SqlEventDetailResponse, SqlEventFilterQueryParams},
 };
 
@@ -55,21 +54,12 @@ async fn export_sql_events(
     Query(params): Query<SqlEventExportQueryParams>,
 ) -> Result<Response, ApiEndpointError> {
     let format = parse_export_format(params.format.as_deref())?;
-    let query = RingBufferTimelineQuery {
+    let query = SqlEventReadQuery {
         limit: parse_export_limit(params.limit)?,
         cursor: None,
         filter: params.into_filter_params().try_into_filter()?,
     };
-    let events = {
-        let event_store = state.event_store();
-        let store = event_store.read().await;
-        store.query_timeline(query)?
-    }
-    .events
-    .into_iter()
-    .map(|event| redact_sql_event(event, &RedactionPolicy::default()))
-    .map(|event| SqlEventDetailResponse::from(&event))
-    .collect::<Vec<_>>();
+    let events = state.event_reader().query_details(query).await?;
 
     match format {
         ExportFormat::Json => Ok(axum::Json(events).into_response()),
@@ -147,7 +137,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{REQUEST_ID_HEADER, router_with_state, test_support::test_event};
+    use crate::{
+        REQUEST_ID_HEADER, router_with_state,
+        test_support::{sqlite_api_state_with_events, test_event},
+    };
 
     fn capacity(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test capacity should be non-zero")
@@ -160,6 +153,10 @@ mod tests {
         }
 
         router_with_state(ApiState::new(store))
+    }
+
+    fn app_with_sqlite_events(events: Vec<SqlEvent>) -> Router {
+        router_with_state(sqlite_api_state_with_events(events))
     }
 
     async fn get(app: Router, uri: &str) -> (StatusCode, String, Option<String>, bool) {
@@ -215,6 +212,29 @@ mod tests {
         );
         assert_eq!(json[0]["id"], "evt_1");
         assert_eq!(json[0]["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_export_reads_persisted_event_details() {
+        let mut event = test_event("evt_sqlite_export");
+        event.database = Some("analytics".to_owned());
+
+        let (status, body, content_type, has_request_id) = get(
+            app_with_sqlite_events(vec![event]),
+            "/api/v1/sql-events/export?database=analytics",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(has_request_id);
+        assert!(
+            content_type
+                .as_deref()
+                .is_some_and(|value| value.starts_with("application/json"))
+        );
+        let json: Value = serde_json::from_str(&body).expect("export should be JSON");
+        assert_eq!(json[0]["id"], "evt_sqlite_export");
+        assert_eq!(json[0]["parameters"][0]["value"]["value"], 42);
     }
 
     #[tokio::test]

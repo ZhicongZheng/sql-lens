@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLite storage/query ownership and API/runtime read-source constraints."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "API state, REST event endpoint, and app runtime composition contracts."}

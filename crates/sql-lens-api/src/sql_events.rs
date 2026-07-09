@@ -10,18 +10,15 @@ use sql_lens_core::{
     CaptureStatus, DatabaseType, DurationMillis, MetadataField, MetadataValue, ProtocolMetadata,
     ProtocolName, SqlEvent, SqlEventId, SqlEventKind, SqlParameter, SqlParameterValue, Timestamp,
 };
-use sql_lens_storage::{
-    RingBufferTimelineCursor, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
-};
+use sql_lens_storage::{SqlEventFilter, SqlEventFilterError, SqliteEventRow, SqliteParameterRow};
 use utoipa::ToSchema;
 
-use crate::{ApiState, api_error::ApiEndpointError};
+use crate::{ApiState, api_error::ApiEndpointError, event_reader::SqlEventReadQuery};
 
 pub const SQL_EVENTS_PATH: &str = "/api/v1/sql-events";
 pub const SQL_EVENT_DETAIL_PATH: &str = "/api/v1/sql-events/{id}";
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
-const CURSOR_PREFIX: &str = "seq_";
 
 pub(crate) fn routes() -> Router {
     Router::new()
@@ -167,20 +164,12 @@ async fn list_sql_events(
     Extension(state): Extension<ApiState>,
     Query(params): Query<SqlEventListQueryParams>,
 ) -> Result<Json<SqlEventListResponse>, ApiEndpointError> {
-    let query = params.try_into_timeline_query()?;
-    let page = {
-        let event_store = state.event_store();
-        let store = event_store.read().await;
-        store.query_timeline(query)?
-    };
+    let query = params.try_into_read_query()?;
+    let page = state.event_reader().query_timeline(query).await?;
 
     Ok(Json(SqlEventListResponse {
-        items: page
-            .events
-            .iter()
-            .map(SqlEventSummaryResponse::from)
-            .collect(),
-        next_cursor: page.next_cursor.map(encode_cursor),
+        items: page.items,
+        next_cursor: page.next_cursor,
     }))
 }
 
@@ -188,21 +177,20 @@ async fn get_sql_event_detail(
     Extension(state): Extension<ApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<SqlEventDetailResponse>, ApiEndpointError> {
-    let event = {
-        let event_store = state.event_store();
-        let store = event_store.read().await;
-        store.get(&SqlEventId(id.clone())).cloned()
-    }
-    .ok_or_else(|| ApiEndpointError::not_found("SQL event not found", "id", id))?;
+    let event = state
+        .event_reader()
+        .get_detail(&SqlEventId(id.clone()))
+        .await?
+        .ok_or_else(|| ApiEndpointError::not_found("SQL event not found", "id", id))?;
 
-    Ok(Json(SqlEventDetailResponse::from(&event)))
+    Ok(Json(event))
 }
 
 impl SqlEventListQueryParams {
-    fn try_into_timeline_query(self) -> Result<RingBufferTimelineQuery, ApiEndpointError> {
-        Ok(RingBufferTimelineQuery {
+    fn try_into_read_query(self) -> Result<SqlEventReadQuery, ApiEndpointError> {
+        Ok(SqlEventReadQuery {
             limit: parse_limit(self.limit)?,
-            cursor: self.cursor.as_deref().map(decode_cursor).transpose()?,
+            cursor: self.cursor,
             filter: SqlEventFilterQueryParams {
                 target_name: self.target_name,
                 protocol: self.protocol,
@@ -279,19 +267,6 @@ fn parse_status(status: &str) -> Result<CaptureStatus, ApiEndpointError> {
     }
 }
 
-fn encode_cursor(cursor: RingBufferTimelineCursor) -> String {
-    format!("{CURSOR_PREFIX}{}", cursor.before_sequence)
-}
-
-fn decode_cursor(cursor: &str) -> Result<RingBufferTimelineCursor, ApiEndpointError> {
-    let before_sequence = cursor
-        .strip_prefix(CURSOR_PREFIX)
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(|| ApiEndpointError::bad_request("invalid cursor", "cursor"))?;
-
-    Ok(RingBufferTimelineCursor { before_sequence })
-}
-
 impl From<&SqlEvent> for SqlEventSummaryResponse {
     fn from(event: &SqlEvent) -> Self {
         Self {
@@ -359,6 +334,78 @@ impl From<&SqlEvent> for SqlEventDetailResponse {
     }
 }
 
+pub(crate) fn sqlite_summary_response(
+    row: &SqliteEventRow,
+) -> Result<SqlEventSummaryResponse, ApiEndpointError> {
+    Ok(SqlEventSummaryResponse {
+        id: row.id.clone(),
+        timestamp: row.timestamp.clone(),
+        target_name: row.target_name.clone(),
+        protocol: row.protocol.clone(),
+        database_type: row.database_type.clone(),
+        connection_id: row.connection_id.clone(),
+        client_addr: row.client_addr.clone(),
+        backend_addr: row.backend_addr.clone(),
+        user: row.user.clone(),
+        database: row.database.clone(),
+        kind: row.kind.clone(),
+        status: row.status.clone(),
+        duration_ms: i64_to_u64(row.duration_ms),
+        original_sql: row.original_sql.clone(),
+        expanded_sql: row.expanded_sql.clone(),
+        fingerprint: row.fingerprint.clone(),
+        rows: sqlite_rows_summary(row),
+        metadata: sqlite_metadata_response(row)?,
+    })
+}
+
+pub(crate) fn sqlite_detail_response(
+    row: &SqliteEventRow,
+    parameters: &[SqliteParameterRow],
+) -> Result<SqlEventDetailResponse, ApiEndpointError> {
+    let parameters = parameters
+        .iter()
+        .map(sqlite_parameter_response)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(SqlEventDetailResponse {
+        id: row.id.clone(),
+        timestamp: row.timestamp.clone(),
+        target_name: row.target_name.clone(),
+        protocol: row.protocol.clone(),
+        database_type: row.database_type.clone(),
+        connection_id: row.connection_id.clone(),
+        client_addr: row.client_addr.clone(),
+        backend_addr: row.backend_addr.clone(),
+        user: row.user.clone(),
+        database: row.database.clone(),
+        kind: row.kind.clone(),
+        status: row.status.clone(),
+        duration_ms: i64_to_u64(row.duration_ms),
+        original_sql: row.original_sql.clone(),
+        normalized_sql: row.normalized_sql.clone(),
+        expanded_sql: row.expanded_sql.clone(),
+        fingerprint: row.fingerprint.clone(),
+        parameters,
+        timings: QueryTimingResponse {
+            started_at: row.started_at.clone(),
+            ended_at: row.ended_at.clone(),
+            duration_ms: i64_to_u64(row.duration_ms),
+        },
+        rows: sqlite_rows_summary(row),
+        error: row
+            .error_message
+            .as_ref()
+            .map(|message| ErrorSummaryResponse {
+                code: row.error_code.clone(),
+                sql_state: row.error_sql_state.clone(),
+                message: message.clone(),
+                metadata: None,
+            }),
+        metadata: sqlite_metadata_response(row)?,
+    })
+}
+
 impl From<&SqlParameter> for SqlParameterResponse {
     fn from(parameter: &SqlParameter) -> Self {
         Self {
@@ -368,6 +415,74 @@ impl From<&SqlParameter> for SqlParameterResponse {
             redacted: parameter.redacted,
         }
     }
+}
+
+fn sqlite_rows_summary(row: &SqliteEventRow) -> Option<RowsSummaryResponse> {
+    (row.affected_rows.is_some() || row.returned_rows.is_some()).then(|| RowsSummaryResponse {
+        affected: row.affected_rows.map(i64_to_u64),
+        returned: row.returned_rows.map(i64_to_u64),
+    })
+}
+
+fn sqlite_metadata_response(
+    row: &SqliteEventRow,
+) -> Result<ProtocolMetadataResponse, ApiEndpointError> {
+    serde_json::from_str::<ProtocolMetadata>(&row.metadata_json)
+        .map(|metadata| protocol_metadata_response(&metadata))
+        .map_err(|_| ApiEndpointError::storage_unavailable("SQLite event metadata is invalid"))
+}
+
+fn sqlite_parameter_response(
+    row: &SqliteParameterRow,
+) -> Result<SqlParameterResponse, ApiEndpointError> {
+    Ok(SqlParameterResponse {
+        index: u16::try_from(row.parameter_index).unwrap_or(u16::MAX),
+        name: row.name.clone(),
+        value: SqlParameterValueResponse {
+            value_type: row.value_type.clone(),
+            value: sqlite_parameter_value(row)?,
+        },
+        redacted: row.redacted,
+    })
+}
+
+fn sqlite_parameter_value(
+    row: &SqliteParameterRow,
+) -> Result<Option<SqlParameterValueDataResponse>, ApiEndpointError> {
+    match row.value_type.as_str() {
+        "null" => Ok(None),
+        "integer" => Ok(Some(SqlParameterValueDataResponse::Integer(
+            parse_sqlite_parameter_value(&row.value_json)?,
+        ))),
+        "unsigned" => Ok(Some(SqlParameterValueDataResponse::Unsigned(
+            parse_sqlite_parameter_value(&row.value_json)?,
+        ))),
+        "float" => Ok(Some(SqlParameterValueDataResponse::Float(
+            parse_sqlite_parameter_value(&row.value_json)?,
+        ))),
+        "boolean" => Ok(Some(SqlParameterValueDataResponse::Boolean(
+            parse_sqlite_parameter_value(&row.value_json)?,
+        ))),
+        "string" | "date" | "time" | "timestamp" | "json" | "binary_summary" | "unsupported" => {
+            Ok(Some(SqlParameterValueDataResponse::String(
+                parse_sqlite_parameter_value(&row.value_json)?,
+            )))
+        }
+        _ => Err(ApiEndpointError::storage_unavailable(
+            "SQLite parameter value type is invalid",
+        )),
+    }
+}
+
+fn parse_sqlite_parameter_value<T: serde::de::DeserializeOwned>(
+    value_json: &str,
+) -> Result<T, ApiEndpointError> {
+    serde_json::from_str(value_json)
+        .map_err(|_| ApiEndpointError::storage_unavailable("SQLite parameter value is invalid"))
+}
+
+fn i64_to_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or_default()
 }
 
 impl From<&SqlParameterValue> for SqlParameterValueResponse {
@@ -526,7 +641,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{REQUEST_ID_HEADER, router_with_state};
+    use crate::{REQUEST_ID_HEADER, router_with_state, test_support::sqlite_api_state_with_events};
 
     fn capacity(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test capacity should be non-zero")
@@ -592,6 +707,10 @@ mod tests {
         router_with_state(ApiState::new(store))
     }
 
+    fn app_with_sqlite_events(events: Vec<SqlEvent>) -> Router {
+        router_with_state(sqlite_api_state_with_events(events))
+    }
+
     async fn get_json(app: Router, uri: &str) -> (StatusCode, Value, bool) {
         let response = app
             .oneshot(
@@ -643,6 +762,68 @@ mod tests {
         assert_eq!(item["rows"]["returned"], 1);
         assert_eq!(item["metadata"]["mysql"]["command"], "COM_STMT_EXECUTE");
         assert_eq!(item["metadata"]["mysql"]["statement_id"], 12);
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_sql_event_list_reads_persisted_events() {
+        let mut matching = test_event("evt_matching");
+        matching.database = Some("analytics".to_owned());
+        let mut other = test_event("evt_other");
+        other.database = Some("ops".to_owned());
+
+        let (status, json, has_request_id) = get_json(
+            app_with_sqlite_events(vec![matching, other]),
+            "/api/v1/sql-events?database=analytics",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(has_request_id);
+        assert_eq!(
+            json["items"]
+                .as_array()
+                .expect("items should be array")
+                .len(),
+            1
+        );
+        assert_eq!(json["items"][0]["id"], "evt_matching");
+        assert_eq!(json["items"][0]["metadata"]["mysql"]["statement_id"], 12);
+        assert!(json["next_cursor"].is_null());
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_sql_event_list_pages_with_cursor() {
+        let (status, first_page, _) = get_json(
+            app_with_sqlite_events(vec![
+                test_event("evt_1"),
+                test_event("evt_2"),
+                test_event("evt_3"),
+            ]),
+            "/api/v1/sql-events?limit=2",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first_page["items"][0]["id"], "evt_3");
+        assert_eq!(first_page["items"][1]["id"], "evt_2");
+        let cursor = first_page["next_cursor"]
+            .as_str()
+            .expect("first page should return cursor");
+        assert!(cursor.starts_with("sqlite_"));
+
+        let (status, second_page, _) = get_json(
+            app_with_sqlite_events(vec![
+                test_event("evt_1"),
+                test_event("evt_2"),
+                test_event("evt_3"),
+            ]),
+            &format!("/api/v1/sql-events?limit=2&cursor={cursor}"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second_page["items"][0]["id"], "evt_1");
+        assert!(second_page["next_cursor"].is_null());
     }
 
     #[tokio::test]
@@ -775,6 +956,25 @@ mod tests {
         assert_eq!(json["error"]["sql_state"], "42000");
         assert_eq!(json["error"]["metadata"]["mysql"]["severity"], "error");
         assert_eq!(json["metadata"]["mysql"]["statement_id"], 12);
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_sql_event_detail_reads_parameters() {
+        let (status, json, has_request_id) = get_json(
+            app_with_sqlite_events(vec![test_event("evt_sqlite")]),
+            "/api/v1/sql-events/evt_sqlite",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(has_request_id);
+        assert_eq!(json["id"], "evt_sqlite");
+        assert_eq!(json["expanded_sql"], "SELECT * FROM users WHERE id = 42");
+        assert_eq!(json["parameters"][0]["index"], 0);
+        assert_eq!(json["parameters"][0]["value"]["type"], "integer");
+        assert_eq!(json["parameters"][0]["value"]["value"], 42);
+        assert_eq!(json["rows"]["returned"], 1);
+        assert_eq!(json["metadata"]["mysql"]["command"], "COM_STMT_EXECUTE");
     }
 
     #[tokio::test]

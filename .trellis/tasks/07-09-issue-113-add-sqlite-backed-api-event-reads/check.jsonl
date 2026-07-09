@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify SQLite read/query behavior stays inside storage/API read-source boundaries."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify REST error envelope, API state, and runtime composition contracts."}

@@ -1,8 +1,13 @@
+use std::num::NonZeroUsize;
+
 use sql_lens_core::{
     CaptureStatus, ConnectionId, DatabaseType, DurationMillis, MetadataField, MetadataValue,
     ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent, SqlEventId, SqlEventKind,
     SqlParameter, SqlParameterValue, Timestamp,
 };
+use sql_lens_storage::{RingBufferStore, SqliteEventStore};
+
+use crate::ApiState;
 
 pub(crate) fn test_event(id: &str) -> SqlEvent {
     SqlEvent {
@@ -53,4 +58,22 @@ pub(crate) fn test_event(id: &str) -> SqlEvent {
             ],
         },
     }
+}
+
+pub(crate) fn sqlite_api_state_with_events(events: Vec<SqlEvent>) -> ApiState {
+    let connection = rusqlite::Connection::open_in_memory().expect("in-memory SQLite should open");
+    let mut sqlite_store =
+        SqliteEventStore::new(connection).expect("SQLite event store should initialize");
+
+    for event in events {
+        sqlite_store
+            .insert_event(&event)
+            .expect("test event should insert into SQLite");
+    }
+
+    ApiState::with_sqlite_event_reader(RingBufferStore::new(capacity(20)), sqlite_store)
+}
+
+fn capacity(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("test capacity should be non-zero")
 }

@@ -1,9 +1,9 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-use sql_lens_storage::{ConnectionStore, LiveStatistics, RingBufferStore};
+use sql_lens_storage::{ConnectionStore, LiveStatistics, RingBufferStore, SqliteEventStore};
 use tokio::sync::RwLock;
 
-use crate::SqlEventBroadcaster;
+use crate::{SqlEventBroadcaster, event_reader::SqlEventReadStore};
 
 pub const DEFAULT_EVENT_STORE_CAPACITY: usize = 100_000;
 pub const DEFAULT_CONNECTION_STORE_CAPACITY: usize = 10_000;
@@ -11,6 +11,7 @@ pub const DEFAULT_CONNECTION_STORE_CAPACITY: usize = 10_000;
 #[derive(Debug, Clone)]
 pub struct ApiState {
     event_store: Arc<RwLock<RingBufferStore>>,
+    event_reader: SqlEventReadStore,
     connection_store: Arc<RwLock<ConnectionStore>>,
     live_statistics: Arc<RwLock<LiveStatistics>>,
     sql_event_broadcaster: SqlEventBroadcaster,
@@ -32,8 +33,43 @@ impl ApiState {
         connection_store: ConnectionStore,
         live_statistics: LiveStatistics,
     ) -> Self {
+        let event_store = Arc::new(RwLock::new(event_store));
+
         Self {
-            event_store: Arc::new(RwLock::new(event_store)),
+            event_reader: SqlEventReadStore::ring_buffer(Arc::clone(&event_store)),
+            event_store,
+            connection_store: Arc::new(RwLock::new(connection_store)),
+            live_statistics: Arc::new(RwLock::new(live_statistics)),
+            sql_event_broadcaster: SqlEventBroadcaster::default(),
+        }
+    }
+
+    pub fn with_sqlite_event_reader(
+        event_store: RingBufferStore,
+        sqlite_store: SqliteEventStore,
+    ) -> Self {
+        let capacity = NonZeroUsize::new(DEFAULT_CONNECTION_STORE_CAPACITY)
+            .expect("default connection store capacity should be non-zero");
+
+        Self::with_all_stores_and_sqlite_event_reader(
+            event_store,
+            ConnectionStore::new(capacity),
+            LiveStatistics::new(),
+            sqlite_store,
+        )
+    }
+
+    pub fn with_all_stores_and_sqlite_event_reader(
+        event_store: RingBufferStore,
+        connection_store: ConnectionStore,
+        live_statistics: LiveStatistics,
+        sqlite_store: SqliteEventStore,
+    ) -> Self {
+        let event_store = Arc::new(RwLock::new(event_store));
+
+        Self {
+            event_reader: SqlEventReadStore::sqlite(sqlite_store),
+            event_store,
             connection_store: Arc::new(RwLock::new(connection_store)),
             live_statistics: Arc::new(RwLock::new(live_statistics)),
             sql_event_broadcaster: SqlEventBroadcaster::default(),
@@ -42,6 +78,10 @@ impl ApiState {
 
     pub fn event_store(&self) -> Arc<RwLock<RingBufferStore>> {
         Arc::clone(&self.event_store)
+    }
+
+    pub(crate) fn event_reader(&self) -> SqlEventReadStore {
+        self.event_reader.clone()
     }
 
     pub fn connection_store(&self) -> Arc<RwLock<ConnectionStore>> {

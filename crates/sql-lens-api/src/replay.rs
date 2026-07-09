@@ -1,6 +1,6 @@
 use axum::{Extension, Json, Router, routing::post};
 use serde::{Deserialize, Serialize};
-use sql_lens_core::{SqlEvent, SqlEventId};
+use sql_lens_core::SqlEventId;
 use utoipa::ToSchema;
 
 use crate::{ApiState, api_error::ApiEndpointError};
@@ -47,22 +47,19 @@ async fn preview_event(
     state: &ApiState,
     event_id: String,
 ) -> Result<ReplayPreviewResponse, ApiEndpointError> {
-    let event = {
-        let event_store = state.event_store();
-        let store = event_store.read().await;
-        store
-            .get(&SqlEventId(event_id.clone()))
-            .cloned()
-            .ok_or_else(|| {
-                ApiEndpointError::not_found("SQL event not found", "event_id", event_id.clone())
-            })?
-    };
-    let sql = replay_sql_from_event(&event);
+    let event = state
+        .event_reader()
+        .get_detail(&SqlEventId(event_id.clone()))
+        .await?
+        .ok_or_else(|| {
+            ApiEndpointError::not_found("SQL event not found", "event_id", event_id.clone())
+        })?;
+    let sql = replay_sql_from_event_detail(&event);
 
     preview_sql(ReplayPreviewSourceKind::Event, Some(event_id), sql)
 }
 
-fn replay_sql_from_event(event: &SqlEvent) -> String {
+fn replay_sql_from_event_detail(event: &crate::SqlEventDetailResponse) -> String {
     event
         .expanded_sql
         .clone()
@@ -215,12 +212,15 @@ mod tests {
         http::{Request, StatusCode},
     };
     use serde_json::{Value, json};
-    use sql_lens_core::SqlEventId;
+    use sql_lens_core::{SqlEvent, SqlEventId};
     use sql_lens_storage::RingBufferStore;
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{REQUEST_ID_HEADER, router_with_state, test_support::test_event};
+    use crate::{
+        REQUEST_ID_HEADER, router_with_state,
+        test_support::{sqlite_api_state_with_events, test_event},
+    };
 
     fn capacity(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test capacity should be non-zero")
@@ -233,6 +233,10 @@ mod tests {
         }
 
         router_with_state(ApiState::new(store))
+    }
+
+    fn app_with_sqlite_events(events: Vec<SqlEvent>) -> Router {
+        router_with_state(sqlite_api_state_with_events(events))
     }
 
     async fn post_json(app: Router, body: Value) -> (StatusCode, Value, bool) {
@@ -271,6 +275,23 @@ mod tests {
         assert_eq!(json["sql"], "SELECT * FROM users WHERE id = 42");
         assert_eq!(json["is_mutation"], false);
         assert!(json["warning"].is_null());
+    }
+
+    #[tokio::test]
+    async fn sqlite_backed_replay_preview_reads_persisted_event_source() {
+        let event = test_event("evt_sqlite_replay");
+
+        let (status, json, has_request_id) = post_json(
+            app_with_sqlite_events(vec![event]),
+            json!({ "event_id": "evt_sqlite_replay" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(has_request_id);
+        assert_eq!(json["source"], "event");
+        assert_eq!(json["event_id"], "evt_sqlite_replay");
+        assert_eq!(json["sql"], "SELECT * FROM users WHERE id = 42");
     }
 
     #[tokio::test]

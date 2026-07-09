@@ -204,10 +204,15 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
 
     let RuntimeStorage {
         event_store,
+        sqlite_event_reader,
         persistence,
         sqlite_worker,
     } = runtime_storage;
-    let state = ApiState::new(event_store);
+    let state = if let Some(sqlite_event_reader) = sqlite_event_reader {
+        ApiState::with_sqlite_event_reader(event_store, sqlite_event_reader)
+    } else {
+        ApiState::new(event_store)
+    };
     let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
     tracing::info!(%api_addr, "SQL Lens API server listening");
@@ -275,6 +280,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
 #[derive(Debug)]
 struct RuntimeStorage {
     event_store: RingBufferStore,
+    sqlite_event_reader: Option<SqliteEventStore>,
     persistence: EventPersistence,
     sqlite_worker: Option<thread::JoinHandle<()>>,
 }
@@ -286,6 +292,7 @@ impl RuntimeStorage {
         match config.storage_type {
             StorageType::RingBuffer => Ok(Self {
                 event_store,
+                sqlite_event_reader: None,
                 persistence: EventPersistence::default(),
                 sqlite_worker: None,
             }),
@@ -297,11 +304,18 @@ impl RuntimeStorage {
                         source: Box::new(source),
                     }
                 })?;
+                let sqlite_event_reader = SqliteEventStore::open(&path).map_err(|source| {
+                    MinimalMysqlRuntimeError::SqliteStorage {
+                        path: path.clone(),
+                        source: Box::new(source),
+                    }
+                })?;
                 let (persistence, sqlite_worker) = EventPersistence::sqlite(store);
                 tracing::info!(path = %path.display(), "SQL Lens SQLite persistence enabled");
 
                 Ok(Self {
                     event_store,
+                    sqlite_event_reader: Some(sqlite_event_reader),
                     persistence,
                     sqlite_worker: Some(sqlite_worker),
                 })
@@ -318,6 +332,7 @@ impl RuntimeStorage {
 
         Self {
             event_store: RingBufferStore::new(capacity),
+            sqlite_event_reader: None,
             persistence: EventPersistence::default(),
             sqlite_worker: None,
         }
@@ -689,6 +704,7 @@ impl CaptureEventEmitter for VecCaptureEventEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use sql_lens_core::{
         CaptureStatus, ConnectionId, DurationMillis, ProtocolMetadata, QueryTiming, SqlEventId,
         SqlEventKind,
@@ -882,6 +898,58 @@ path = "{}"
             .expect("runtime should shut down cleanly");
 
         assert!(path.exists(), "sqlite file should be created");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn runtime_from_config_reads_sql_events_from_configured_sqlite_storage() {
+        let listen = unused_loopback_addr();
+        let path = temporary_sqlite_path("runtime-read");
+        {
+            let mut store = SqliteEventStore::open(&path).expect("sqlite store should open");
+            store
+                .insert_event(&test_event(
+                    SqlEventId("evt_sqlite_runtime".to_owned()),
+                    CaptureStatus::Ok,
+                    DurationMillis(12),
+                ))
+                .expect("test event should persist");
+        }
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[proxy]
+listen = "{listen}"
+
+[web]
+listen = "127.0.0.1:0"
+
+[storage]
+type = "sqlite"
+path = "{}"
+"#,
+            path.display()
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+
+        let runtime = start_runtime_from_config(&config)
+            .await
+            .expect("sqlite runtime should start");
+        let response: Value =
+            reqwest::get(format!("http://{}/api/v1/sql-events", runtime.api_addr))
+                .await
+                .expect("request should succeed")
+                .json()
+                .await
+                .expect("response should be JSON");
+
+        assert_eq!(response["items"][0]["id"], "evt_sqlite_runtime");
+        assert!(response["next_cursor"].is_null());
+
+        runtime
+            .shutdown()
+            .await
+            .expect("runtime should shut down cleanly");
         let _ = std::fs::remove_file(path);
     }
 
