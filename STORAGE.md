@@ -130,6 +130,14 @@ Recommended indexes:
 - `sql_events(fingerprint, timestamp)`.
 - `sql_events(duration_ms)`.
 
+Current implementation:
+
+- `sql-lens-storage` owns `SqliteEventStore` as a storage-local synchronous API.
+- `SqliteEventStore::new` applies the schema before use.
+- `insert_event` writes one redacted `SqlEvent` and its parameters in one SQLite transaction.
+- Structured protocol metadata and parameter values are stored as JSON text.
+- Runtime capture fan-out, file lifecycle configuration, retention cleanup, and SQLite timeline queries are separate tasks.
+
 ## DuckDB Future
 
 DuckDB is planned for analytical workloads.
@@ -200,4 +208,3 @@ Storage must never persist:
 - Raw authentication payloads.
 - TLS private keys.
 - Unredacted sensitive parameters when redaction is enabled.
-

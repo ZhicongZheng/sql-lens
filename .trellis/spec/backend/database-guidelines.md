@@ -121,3 +121,98 @@ For storage changes:
 - Do not persist unredacted SQL parameters when redaction is enabled.
 - Do not duplicate filter matching in API or UI layers.
 - Do not introduce SQLite, DuckDB, or migrations as placeholder scaffolding.
+
+## Scenario: SQLite Event Inserts
+
+### 1. Scope / Trigger
+
+- Trigger: a task persists `SqlEvent` rows into SQLite or changes the SQLite
+  persistence API.
+- SQLite persistence is storage-local until a separate runtime wiring task.
+- Inserts must not put SQLite calls in protocol, proxy, API handlers, or app
+  startup code.
+
+### 2. Signatures
+
+Current storage-local API:
+
+```rust
+pub struct SqliteEventStore;
+
+impl SqliteEventStore {
+    pub fn new(connection: rusqlite::Connection) -> rusqlite::Result<Self>;
+    pub fn insert_event(&mut self, event: &SqlEvent) -> rusqlite::Result<()>;
+    pub fn get_event_row(&self, id: &SqlEventId) -> rusqlite::Result<Option<SqliteEventRow>>;
+    pub fn get_parameter_rows(&self, id: &SqlEventId) -> rusqlite::Result<Vec<SqliteParameterRow>>;
+}
+```
+
+### 3. Contracts
+
+- `new` applies `apply_sqlite_schema` before returning a store.
+- `insert_event` applies `redact_sql_event(event.clone(), &RedactionPolicy::default())`
+  before writing.
+- One `SqlEvent` row is inserted into `sql_events`; its parameters are inserted
+  into `sql_parameters`.
+- Event and parameter inserts are written in one SQLite transaction.
+- Structured protocol metadata and parameter values are serialized as JSON text.
+- Duplicate event IDs are rejected by the `sql_events.id` primary key; do not
+  silently replace existing events unless a future task adds update semantics.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Schema is missing | `SqliteEventStore::new` applies it |
+| JSON serialization fails | Return a `rusqlite::Error` without partial writes |
+| Event row insert fails | Transaction rolls back; no parameter rows remain |
+| Parameter row insert fails | Transaction rolls back; no event row remains |
+| Duplicate event ID | Return the SQLite constraint error |
+| Missing event readback | Return `Ok(None)` |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A caller opens a `rusqlite::Connection`, constructs `SqliteEventStore`, and
+  inserts captured events through `insert_event`.
+- Tests verify stored SQL and parameters are redacted.
+
+Base:
+
+- `get_event_row` and `get_parameter_rows` are test/support-oriented readback
+  helpers until the timeline query task adds a query API.
+
+Bad:
+
+- Writing unredacted `SqlEvent` parameters to SQLite.
+- Using `INSERT OR REPLACE` without a documented event update contract.
+- Calling SQLite directly from protocol observers or TCP forwarding code.
+
+### 6. Tests Required
+
+- In-memory SQLite store initialization applies the schema.
+- Insert/readback covers scalar `sql_events` columns.
+- Parameter row insertion covers index, name, value type, JSON value, and
+  redaction flag.
+- Redaction tests assert sensitive SQL text and parameter values are masked
+  before persistence.
+- Duplicate ID behavior is asserted.
+- Run `cargo fmt --check`, `cargo test --workspace`, and
+  `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+connection.execute("INSERT INTO sql_events ...", params![event.original_sql])?;
+```
+
+#### Correct
+
+```rust
+let event = redact_sql_event(event.clone(), &RedactionPolicy::default());
+let tx = connection.transaction()?;
+// Insert sql_events and sql_parameters in tx, then commit.
+```
