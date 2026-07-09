@@ -386,6 +386,7 @@ mod tests {
     async fn websocket_upgrade_sends_initial_ping_and_closes_cleanly() {
         let server = bind_http_server(&HttpServerConfig {
             listen: "127.0.0.1:0".to_owned(),
+            cors_origins: Vec::new(),
             request_timeout_ms: 30_000,
         })
         .await

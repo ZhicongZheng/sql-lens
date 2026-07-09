@@ -13,6 +13,7 @@ sql-lens-core = { path = "../sql-lens-core" }
 sql-lens-config = { path = "../sql-lens-config" }
 sql-lens-storage = { path = "../sql-lens-storage" }
 tokio = { version = "1", features = ["net", "sync"] }
+tower-http = { version = "0.6", features = ["cors"] }
 
 [dev-dependencies]
 futures-util = "0.3"
