@@ -106,6 +106,35 @@ GET /api/v1/sql-events/{id}
 
 Returns the full event, parameter list, timings, result summary, error summary, and metadata.
 
+### SQL Event Export
+
+```http
+GET /api/v1/sql-events/export
+```
+
+Query parameters:
+
+- `format`: `json` (default) or `ndjson`
+- `limit`: maximum number of events to export, capped at `10000`
+- `target_name`
+- `protocol`
+- `database_type`
+- `database`
+- `user`
+- `client_addr`
+- `status`
+- `min_duration_ms`
+- `max_duration_ms`
+- `q`
+- `fingerprint`
+- `from`
+- `to`
+
+`format=json` returns an `application/json` array of full SQL event objects.
+`format=ndjson` returns `application/x-ndjson`, with one full SQL event object per line.
+
+Exported events are redacted before serialization. The endpoint does not execute SQL and does not open database connections.
+
 ### Connections
 
 ```http

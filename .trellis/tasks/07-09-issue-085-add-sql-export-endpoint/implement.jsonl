@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Export module belongs in sql-lens-api, not in storage or core."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Follow API error-handling and filter-parsing patterns from existing endpoints."}

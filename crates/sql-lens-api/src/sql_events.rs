@@ -29,7 +29,7 @@ pub(crate) fn routes() -> Router {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-struct SqlEventListQueryParams {
+pub(crate) struct SqlEventListQueryParams {
     limit: Option<usize>,
     cursor: Option<String>,
     target_name: Option<String>,
@@ -199,21 +199,59 @@ impl SqlEventListQueryParams {
         Ok(RingBufferTimelineQuery {
             limit: parse_limit(self.limit)?,
             cursor: self.cursor.as_deref().map(decode_cursor).transpose()?,
-            filter: SqlEventFilter {
+            filter: SqlEventFilterQueryParams {
                 target_name: self.target_name,
-                protocol: self.protocol.map(ProtocolName),
-                database_type: self.database_type.map(DatabaseType),
+                protocol: self.protocol,
+                database_type: self.database_type,
                 database: self.database,
                 user: self.user,
                 client_addr: self.client_addr,
-                status: self.status.as_deref().map(parse_status).transpose()?,
-                min_duration: self.min_duration_ms.map(DurationMillis),
-                max_duration: self.max_duration_ms.map(DurationMillis),
-                text: self.q,
+                status: self.status,
+                min_duration_ms: self.min_duration_ms,
+                max_duration_ms: self.max_duration_ms,
+                q: self.q,
                 fingerprint: self.fingerprint,
-                from: self.from.map(Timestamp),
-                to: self.to.map(Timestamp),
-            },
+                from: self.from,
+                to: self.to,
+            }
+            .try_into_filter()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct SqlEventFilterQueryParams {
+    pub(crate) target_name: Option<String>,
+    pub(crate) protocol: Option<String>,
+    pub(crate) database_type: Option<String>,
+    pub(crate) database: Option<String>,
+    pub(crate) user: Option<String>,
+    pub(crate) client_addr: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) min_duration_ms: Option<u64>,
+    pub(crate) max_duration_ms: Option<u64>,
+    pub(crate) q: Option<String>,
+    pub(crate) fingerprint: Option<String>,
+    pub(crate) from: Option<String>,
+    pub(crate) to: Option<String>,
+}
+
+impl SqlEventFilterQueryParams {
+    pub(crate) fn try_into_filter(self) -> Result<SqlEventFilter, ApiEndpointError> {
+        Ok(SqlEventFilter {
+            target_name: self.target_name,
+            protocol: self.protocol.map(ProtocolName),
+            database_type: self.database_type.map(DatabaseType),
+            database: self.database,
+            user: self.user,
+            client_addr: self.client_addr,
+            status: self.status.as_deref().map(parse_status).transpose()?,
+            min_duration: self.min_duration_ms.map(DurationMillis),
+            max_duration: self.max_duration_ms.map(DurationMillis),
+            text: self.q,
+            fingerprint: self.fingerprint,
+            from: self.from.map(Timestamp),
+            to: self.to.map(Timestamp),
         })
     }
 }

@@ -5,7 +5,7 @@ use sql_lens_config::WebConfig;
 use tokio::net::TcpListener;
 
 use crate::{
-    ApiState, api_error::ApiEndpointError, connections, health, protocols, replay,
+    ApiState, api_error::ApiEndpointError, connections, export, health, protocols, replay,
     request_id::attach_request_id, sql_events, statistics, websocket,
 };
 
@@ -81,6 +81,7 @@ pub fn router_with_state(state: ApiState) -> Router {
     Router::new()
         .merge(health::routes())
         .merge(sql_events::routes())
+        .merge(export::routes())
         .merge(connections::routes())
         .merge(statistics::routes())
         .merge(protocols::routes())

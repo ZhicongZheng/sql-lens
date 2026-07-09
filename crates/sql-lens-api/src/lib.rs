@@ -3,6 +3,7 @@
 mod api_error;
 mod api_state;
 mod connections;
+mod export;
 mod health;
 mod live_sql_events;
 mod protocols;
@@ -19,6 +20,7 @@ pub use api_state::{ApiState, DEFAULT_CONNECTION_STORE_CAPACITY, DEFAULT_EVENT_S
 pub use connections::{
     CONNECTION_DETAIL_PATH, CONNECTIONS_PATH, ConnectionListResponse, ConnectionResponse,
 };
+pub use export::{MAX_EXPORT_LIMIT, SQL_EVENTS_EXPORT_PATH};
 pub use health::{HEALTH_PATH, HealthResponse, HealthState};
 pub use live_sql_events::{
     DEFAULT_SQL_EVENT_BROADCAST_CAPACITY, SqlEventBroadcastOutcome, SqlEventBroadcastStats,
