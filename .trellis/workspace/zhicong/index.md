@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 68
+- **Total Sessions**: 69
 - **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~271 | Active |
+| `journal-2.md` | ~304 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 69 | 2026-07-09 | Issue 109 CLI runtime startup | `bf8b0fb` | `main` |
 | 68 | 2026-07-09 | Issue 089 storage retention enforcement | `529566f` | `main` |
 | 67 | 2026-07-09 | Issue 088 SQLite timeline queries | `aa8eee1` | `main` |
 | 66 | 2026-07-09 | Issue 087 SQLite event inserts | `a0c7f9d` | `main` |

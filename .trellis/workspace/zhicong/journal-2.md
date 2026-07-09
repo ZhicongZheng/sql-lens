@@ -269,3 +269,36 @@ Implemented storage-local retention enforcement for ring buffer max-events and S
 ### Next Steps
 
 - None - task complete
+
+
+## Session 69: Issue 109 CLI runtime startup
+
+**Date**: 2026-07-09
+**Task**: Issue 109 CLI runtime startup
+**Branch**: `main`
+
+### Summary
+
+Implemented sql-lens app CLI runtime startup: config-driven API/proxy listeners, shared ApiState, Ctrl-C shutdown, runtime tests, and backend specs for the new startup contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bf8b0fb` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
