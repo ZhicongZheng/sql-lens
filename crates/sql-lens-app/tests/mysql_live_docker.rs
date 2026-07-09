@@ -17,6 +17,7 @@ const MYSQL_PORT: u16 = 3306;
 const MYSQL_ROOT_PASSWORD: &str = "sql_lens_root";
 const MYSQL_DATABASE: &str = "sql_lens_test";
 const PROXY_QUERY: &str = "DO 1";
+const PROXY_SELECT_QUERY: &str = "SELECT 1";
 const PREPARED_UPDATE_SQL: &str = "UPDATE prepared_users SET name = ?, password = ? WHERE id = 42";
 
 #[tokio::test]
@@ -44,6 +45,8 @@ async fn docker_mysql_query_is_captured_through_proxy_and_api() -> TestResult {
     let proxy_url = mysql_url(&runtime.proxy_addr.to_string(), options);
     let mut conn = Conn::from_url(proxy_url).await?;
     conn.query_drop(PROXY_QUERY).await?;
+    let selected: Option<u8> = conn.query_first(PROXY_SELECT_QUERY).await?;
+    assert_eq!(selected, Some(1));
     conn.disconnect().await?;
 
     let event = wait_for_captured_event(runtime.api_addr, |event| {
@@ -57,6 +60,19 @@ async fn docker_mysql_query_is_captured_through_proxy_and_api() -> TestResult {
     assert_eq!(event.kind, "query");
     assert_eq!(event.status, "ok");
     assert_eq!(event.original_sql, PROXY_QUERY);
+    let select_event = wait_for_captured_event(runtime.api_addr, |event| {
+        event.protocol == "mysql"
+            && event.kind == "query"
+            && event.status == "ok"
+            && event.original_sql == PROXY_SELECT_QUERY
+            && event.rows.and_then(|rows| rows.returned) == Some(1)
+    })
+    .await?;
+    assert_eq!(select_event.protocol, "mysql");
+    assert_eq!(select_event.kind, "query");
+    assert_eq!(select_event.status, "ok");
+    assert_eq!(select_event.original_sql, PROXY_SELECT_QUERY);
+    assert_eq!(select_event.rows.and_then(|rows| rows.returned), Some(1));
 
     shutdown_runtime(runtime).await?;
     Ok(())

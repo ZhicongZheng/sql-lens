@@ -6,6 +6,7 @@ pub const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
 pub const MYSQL_COM_STMT_EXECUTE: u8 = 0x17;
 pub const MYSQL_COM_STMT_CLOSE: u8 = 0x19;
 pub const MYSQL_COM_QUIT: u8 = 0x01;
+pub const MYSQL_CLIENT_QUERY_ATTRIBUTES: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MysqlCommandKind {
@@ -66,6 +67,13 @@ pub struct MysqlClientCommand {
 pub fn parse_client_command(
     payload: &[u8],
 ) -> Result<Option<MysqlParsedClientCommand>, MysqlCommandParseError> {
+    parse_client_command_with_capabilities(payload, 0)
+}
+
+pub fn parse_client_command_with_capabilities(
+    payload: &[u8],
+    client_capability_flags: u32,
+) -> Result<Option<MysqlParsedClientCommand>, MysqlCommandParseError> {
     let Some((&command, command_body)) = payload.split_first() else {
         return Err(MysqlCommandParseError::IncompletePayload {
             field: "command",
@@ -77,6 +85,7 @@ pub fn parse_client_command(
     match command {
         MYSQL_COM_QUIT => Ok(Some(MysqlParsedClientCommand::Quit(MysqlComQuit))),
         MYSQL_COM_QUERY => {
+            let command_body = com_query_sql_payload(command_body, client_capability_flags)?;
             let sql = parse_utf8_field(command_body, "sql")?;
 
             Ok(Some(MysqlParsedClientCommand::Query(MysqlComQuery { sql })))
@@ -97,6 +106,28 @@ pub fn parse_client_command(
         ))),
         _ => Ok(None),
     }
+}
+
+fn com_query_sql_payload(
+    command_body: &[u8],
+    client_capability_flags: u32,
+) -> Result<&[u8], MysqlCommandParseError> {
+    if client_capability_flags & MYSQL_CLIENT_QUERY_ATTRIBUTES == 0 {
+        return Ok(command_body);
+    }
+
+    let (parameter_count, parameter_count_len) =
+        read_lenenc_integer(command_body, "query_attribute_parameter_count")?;
+    let after_parameter_count = &command_body[parameter_count_len..];
+    let (_, parameter_set_count_len) =
+        read_lenenc_integer(after_parameter_count, "query_attribute_parameter_set_count")?;
+    let sql_payload = &after_parameter_count[parameter_set_count_len..];
+
+    if parameter_count == 0 {
+        return Ok(sql_payload);
+    }
+
+    Err(MysqlCommandParseError::UnsupportedQueryAttributes { parameter_count })
 }
 
 fn parse_com_stmt_execute(bytes: &[u8]) -> Result<MysqlComStmtExecute, MysqlCommandParseError> {
@@ -138,6 +169,48 @@ fn read_u32_le(bytes: &[u8], field: &'static str) -> Result<u32, MysqlCommandPar
     Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
+fn read_lenenc_integer(
+    bytes: &[u8],
+    field: &'static str,
+) -> Result<(u64, usize), MysqlCommandParseError> {
+    let Some((&first, rest)) = bytes.split_first() else {
+        return Err(MysqlCommandParseError::IncompletePayload {
+            field,
+            needed: 1,
+            available: 0,
+        });
+    };
+
+    match first {
+        0x00..=0xfa => Ok((u64::from(first), 1)),
+        0xfc => read_fixed_lenenc_integer(rest, 2, field).map(|value| (value, 3)),
+        0xfd => read_fixed_lenenc_integer(rest, 3, field).map(|value| (value, 4)),
+        0xfe => read_fixed_lenenc_integer(rest, 8, field).map(|value| (value, 9)),
+        marker => Err(MysqlCommandParseError::InvalidLengthEncodedInteger { field, marker }),
+    }
+}
+
+fn read_fixed_lenenc_integer(
+    bytes: &[u8],
+    len: usize,
+    field: &'static str,
+) -> Result<u64, MysqlCommandParseError> {
+    if bytes.len() < len {
+        return Err(MysqlCommandParseError::IncompletePayload {
+            field,
+            needed: len,
+            available: bytes.len(),
+        });
+    }
+
+    let mut value = 0_u64;
+    for (index, byte) in bytes[..len].iter().enumerate() {
+        value |= u64::from(*byte) << (index * 8);
+    }
+
+    Ok(value)
+}
+
 fn parse_utf8_field(bytes: &[u8], field: &'static str) -> Result<String, MysqlCommandParseError> {
     str::from_utf8(bytes)
         .map_err(|_| MysqlCommandParseError::InvalidUtf8 { field })
@@ -153,6 +226,13 @@ pub enum MysqlCommandParseError {
     },
     InvalidUtf8 {
         field: &'static str,
+    },
+    InvalidLengthEncodedInteger {
+        field: &'static str,
+        marker: u8,
+    },
+    UnsupportedQueryAttributes {
+        parameter_count: u64,
     },
 }
 
@@ -170,6 +250,14 @@ impl fmt::Display for MysqlCommandParseError {
             Self::InvalidUtf8 { field } => {
                 write!(f, "invalid UTF-8 in MySQL command field `{field}`")
             }
+            Self::InvalidLengthEncodedInteger { field, marker } => write!(
+                f,
+                "invalid length-encoded integer marker 0x{marker:02x} in MySQL command field `{field}`"
+            ),
+            Self::UnsupportedQueryAttributes { parameter_count } => write!(
+                f,
+                "unsupported MySQL COM_QUERY attributes with {parameter_count} parameters"
+            ),
         }
     }
 }
@@ -203,6 +291,48 @@ mod tests {
             MysqlParsedClientCommand::Query(MysqlComQuery {
                 sql: "select 1".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn parses_com_query_sql_text_after_empty_query_attributes() {
+        let payload = [
+            MYSQL_COM_QUERY,
+            0x00, // parameter_count
+            0x01, // parameter_set_count
+            b's',
+            b'e',
+            b'l',
+            b'e',
+            b'c',
+            b't',
+            b' ',
+            b'1',
+        ];
+
+        let command =
+            parse_client_command_with_capabilities(&payload, MYSQL_CLIENT_QUERY_ATTRIBUTES)
+                .expect("command should parse")
+                .expect("COM_QUERY should be supported");
+
+        assert_eq!(
+            command,
+            MysqlParsedClientCommand::Query(MysqlComQuery {
+                sql: "select 1".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_com_query_attributes_with_parameter_payload() {
+        let payload = [MYSQL_COM_QUERY, 0x01, 0x01, b'x'];
+
+        let error = parse_client_command_with_capabilities(&payload, MYSQL_CLIENT_QUERY_ATTRIBUTES)
+            .expect_err("query attributes should be unsupported until parsed");
+
+        assert_eq!(
+            error,
+            MysqlCommandParseError::UnsupportedQueryAttributes { parameter_count: 1 }
         );
     }
 

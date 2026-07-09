@@ -1791,3 +1791,22 @@ Priority: P1
 Difficulty: Medium
 Estimated Time: 6h
 Dependencies: Issue 088, Issue 112
+
+## Issue 114: Capture MySQL COM_QUERY result set responses
+
+Description: Capture MySQL `COM_QUERY` statements that return result sets, such as `SELECT`, so proxied read queries appear in storage, API, WebSocket, and the local demo UI.
+
+Acceptance Criteria:
+
+- Result-set `COM_QUERY` responses finalize a pending SQL event when the row stream reaches its terminal EOF/OK packet.
+- Captured result-set query events preserve clean SQL text without packet or command-byte prefixes.
+- Returned row count is populated for result-set queries when packet sequencing allows it.
+- Existing OK-packet and ERR-packet `COM_QUERY` capture behavior remains unchanged.
+- No result row contents, column values, authentication payloads, or credentials are stored.
+- Docker-only/env-gated MySQL smoke coverage verifies a proxied `SELECT` is visible through the API.
+
+Labels: `area:backend`, `area:protocol-mysql`, `area:capture`, `type:bug`
+Priority: P0
+Difficulty: Medium
+Estimated Time: 6h
+Dependencies: Issue 043, Issue 044, Issue 112, Issue 113

@@ -30,10 +30,11 @@ pub use authentication::{
     parse_authentication_result,
 };
 pub use command::{
-    MYSQL_COM_PING, MYSQL_COM_QUERY, MYSQL_COM_QUIT, MYSQL_COM_STMT_CLOSE, MYSQL_COM_STMT_EXECUTE,
-    MYSQL_COM_STMT_PREPARE, MysqlClientCommand, MysqlComPing, MysqlComQuery, MysqlComQuit,
-    MysqlComStmtClose, MysqlComStmtExecute, MysqlComStmtPrepare, MysqlCommandKind,
-    MysqlCommandParseError, MysqlParsedClientCommand, parse_client_command,
+    MYSQL_CLIENT_QUERY_ATTRIBUTES, MYSQL_COM_PING, MYSQL_COM_QUERY, MYSQL_COM_QUIT,
+    MYSQL_COM_STMT_CLOSE, MYSQL_COM_STMT_EXECUTE, MYSQL_COM_STMT_PREPARE, MysqlClientCommand,
+    MysqlComPing, MysqlComQuery, MysqlComQuit, MysqlComStmtClose, MysqlComStmtExecute,
+    MysqlComStmtPrepare, MysqlCommandKind, MysqlCommandParseError, MysqlParsedClientCommand,
+    parse_client_command, parse_client_command_with_capabilities,
 };
 pub use err::{MysqlErrPacketParseError, MysqlErrPacketSummary, parse_err_packet_summary};
 pub use execute::{
@@ -190,6 +191,13 @@ pub struct MysqlPendingQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum MysqlQueryResponseState {
+    Columns { remaining_columns: u64 },
+    AwaitingColumnTerminator,
+    Rows { returned_rows: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MysqlPendingStatementPrepare {
     pub command: MysqlClientCommand,
 }
@@ -249,6 +257,7 @@ pub struct MysqlConnectionState {
     authentication_result: Option<MysqlAuthenticationResult>,
     last_client_command: Option<MysqlClientCommand>,
     pending_query: Option<MysqlPendingQuery>,
+    pending_query_response: Option<MysqlQueryResponseState>,
     pending_statement_prepare: Option<MysqlPendingStatementPrepare>,
     last_statement_prepare_outcome: Option<MysqlStatementPrepareOutcome>,
     prepared_statements: BTreeMap<u32, MysqlPreparedStatement>,
@@ -268,6 +277,7 @@ impl MysqlConnectionState {
             authentication_result: None,
             last_client_command: None,
             pending_query: None,
+            pending_query_response: None,
             pending_statement_prepare: None,
             last_statement_prepare_outcome: None,
             prepared_statements: BTreeMap::new(),
@@ -403,7 +413,14 @@ impl MysqlConnectionState {
             return;
         };
 
-        let Ok(Some(command)) = parse_client_command(packet.payload) else {
+        let client_capability_flags = self
+            .client_handshake
+            .as_ref()
+            .map(|handshake| handshake.capability_flags)
+            .unwrap_or_default();
+        let Ok(Some(command)) =
+            parse_client_command_with_capabilities(packet.payload, client_capability_flags)
+        else {
             return;
         };
 
@@ -422,6 +439,7 @@ impl MysqlConnectionState {
                     started_at: time.timestamp,
                     started_monotonic: time.monotonic,
                 });
+                self.pending_query_response = None;
             }
             MysqlParsedClientCommand::Ping(_) => {
                 let time = clock.now();
@@ -543,20 +561,65 @@ impl MysqlConnectionState {
             return 0;
         }
 
-        let Ok(packet) = parse_mysql_packet(bytes) else {
-            return 0;
-        };
+        let mut offset = 0;
+        let mut events_emitted = 0;
 
-        let Some(status) = query_terminal_status(packet.payload) else {
-            return 0;
-        };
+        while offset < bytes.len() && self.pending_query.is_some() {
+            let Ok(packet) = parse_mysql_packet(&bytes[offset..]) else {
+                break;
+            };
+            let packet_len = MYSQL_PACKET_HEADER_LEN + packet.payload.len();
+
+            events_emitted +=
+                self.observe_backend_query_response_packet(packet.payload, events, clock);
+            offset += packet_len;
+        }
+
+        events_emitted
+    }
+
+    fn observe_backend_query_response_packet(
+        &mut self,
+        payload: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+        clock: &dyn MysqlObservationClock,
+    ) -> usize {
+        if self.pending_query_response.is_some() {
+            if payload.first() == Some(&0xff) {
+                return self.emit_terminal_query_response(
+                    payload,
+                    events,
+                    clock,
+                    CaptureStatus::Error,
+                    None,
+                );
+            }
+
+            return self.observe_backend_query_result_set_response(payload, events, clock);
+        }
+
+        if let Some(status) = query_terminal_status(payload) {
+            return self.emit_terminal_query_response(payload, events, clock, status, None);
+        }
+
+        self.observe_backend_query_result_set_response(payload, events, clock)
+    }
+
+    fn emit_terminal_query_response(
+        &mut self,
+        payload: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+        clock: &dyn MysqlObservationClock,
+        status: CaptureStatus,
+        returned_rows: Option<u64>,
+    ) -> usize {
         let ok_summary = if status == CaptureStatus::Ok {
-            parse_ok_packet_summary(packet.payload).ok().flatten()
+            parse_ok_packet_summary(payload).ok().flatten()
         } else {
             None
         };
         let err_summary = if status == CaptureStatus::Error {
-            parse_err_packet_summary(packet.payload).ok().flatten()
+            parse_err_packet_summary(payload).ok().flatten()
         } else {
             None
         };
@@ -564,12 +627,77 @@ impl MysqlConnectionState {
         let Some(pending) = self.pending_query.take() else {
             return 0;
         };
+        self.pending_query_response = None;
         let ended = clock.now();
-        let event = self.query_event(pending, ended, status, ok_summary, err_summary);
+        let event = self.query_event(
+            pending,
+            ended,
+            status,
+            ok_summary,
+            err_summary,
+            returned_rows,
+        );
 
         events.emit(event);
 
         1
+    }
+
+    fn observe_backend_query_result_set_response(
+        &mut self,
+        payload: &[u8],
+        events: &mut dyn CaptureEventEmitter,
+        clock: &dyn MysqlObservationClock,
+    ) -> usize {
+        match self.pending_query_response.take() {
+            None => {
+                let Some(column_count) = result_set_column_count(payload) else {
+                    return 0;
+                };
+
+                self.pending_query_response = Some(MysqlQueryResponseState::Columns {
+                    remaining_columns: column_count,
+                });
+                0
+            }
+            Some(MysqlQueryResponseState::Columns { remaining_columns }) => {
+                if remaining_columns > 1 {
+                    self.pending_query_response = Some(MysqlQueryResponseState::Columns {
+                        remaining_columns: remaining_columns - 1,
+                    });
+                } else {
+                    self.pending_query_response =
+                        Some(MysqlQueryResponseState::AwaitingColumnTerminator);
+                }
+                0
+            }
+            Some(MysqlQueryResponseState::AwaitingColumnTerminator) => {
+                if is_result_set_terminator(payload) {
+                    self.pending_query_response =
+                        Some(MysqlQueryResponseState::Rows { returned_rows: 0 });
+                } else {
+                    self.pending_query_response =
+                        Some(MysqlQueryResponseState::Rows { returned_rows: 1 });
+                }
+                0
+            }
+            Some(MysqlQueryResponseState::Rows { returned_rows }) => {
+                if is_result_set_terminator(payload) {
+                    self.emit_terminal_query_response(
+                        payload,
+                        events,
+                        clock,
+                        CaptureStatus::Ok,
+                        Some(returned_rows),
+                    )
+                } else {
+                    self.pending_query_response = Some(MysqlQueryResponseState::Rows {
+                        returned_rows: returned_rows.saturating_add(1),
+                    });
+                    0
+                }
+            }
+        }
     }
 
     fn observe_backend_statement_execute_response(
@@ -776,6 +904,7 @@ impl MysqlConnectionState {
         status: CaptureStatus,
         ok_summary: Option<MysqlOkPacketSummary>,
         err_summary: Option<MysqlErrPacketSummary>,
+        returned_rows: Option<u64>,
     ) -> SqlEvent {
         let duration = duration_millis(pending.started_monotonic, ended.monotonic);
         let event_id = SqlEventId(format!(
@@ -785,10 +914,17 @@ impl MysqlConnectionState {
         self.next_query_sequence += 1;
         let command_sequence_id = pending.command.sequence_id;
         let original_sql = pending.command.sql;
-        let result = ok_summary.map(|summary| ResultSummary {
-            affected_rows: Some(summary.affected_rows),
-            returned_rows: None,
-        });
+        let result = if let Some(returned_rows) = returned_rows {
+            Some(ResultSummary {
+                affected_rows: None,
+                returned_rows: Some(returned_rows),
+            })
+        } else {
+            ok_summary.map(|summary| ResultSummary {
+                affected_rows: Some(summary.affected_rows),
+                returned_rows: None,
+            })
+        };
         let error = err_summary.map(mysql_error_summary);
         let mut metadata_fields = vec![
             MetadataField {
@@ -894,6 +1030,44 @@ fn query_terminal_status(payload: &[u8]) -> Option<CaptureStatus> {
         Some(0xff) => Some(CaptureStatus::Error),
         _ => None,
     }
+}
+
+fn result_set_column_count(payload: &[u8]) -> Option<u64> {
+    let (column_count, _) = read_lenenc_integer(payload)?;
+    (column_count > 0).then_some(column_count)
+}
+
+fn is_result_set_terminator(payload: &[u8]) -> bool {
+    is_eof_packet(payload) || parse_ok_packet_summary(payload).ok().flatten().is_some()
+}
+
+fn is_eof_packet(payload: &[u8]) -> bool {
+    payload.first() == Some(&0xfe) && payload.len() < 9
+}
+
+fn read_lenenc_integer(input: &[u8]) -> Option<(u64, usize)> {
+    let (&first, rest) = input.split_first()?;
+
+    match first {
+        0x00..=0xfa => Some((u64::from(first), 1)),
+        0xfc => read_fixed_lenenc_integer(rest, 2).map(|value| (value, 3)),
+        0xfd => read_fixed_lenenc_integer(rest, 3).map(|value| (value, 4)),
+        0xfe => read_fixed_lenenc_integer(rest, 8).map(|value| (value, 9)),
+        _ => None,
+    }
+}
+
+fn read_fixed_lenenc_integer(input: &[u8], len: usize) -> Option<u64> {
+    if input.len() < len {
+        return None;
+    }
+
+    let mut value = 0_u64;
+    for (index, byte) in input[..len].iter().enumerate() {
+        value |= u64::from(*byte) << (index * 8);
+    }
+
+    Some(value)
 }
 
 fn duration_millis(started: Instant, ended: Instant) -> DurationMillis {
@@ -1414,6 +1588,41 @@ mod tests {
         assert_eq!(command.sql, "select * from users");
         assert!(state.pending_query().is_some());
         assert!(state.pending_statement_prepare().is_none());
+        assert!(events.events.is_empty());
+    }
+
+    #[test]
+    fn mysql_adapter_observes_com_query_with_empty_query_attributes() {
+        let adapter = MysqlProtocolAdapter::new();
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_complete_handshake_with_client_packet(
+            &adapter,
+            state.as_mut(),
+            &mut events,
+            &client_handshake_response_with_query_attributes_packet(),
+        );
+        adapter
+            .observe_backend_bytes(state.as_mut(), &authentication_ok_packet(), &mut events)
+            .expect("authentication OK should be observed");
+        let packet = attributed_com_query_packet("DO 1", 0);
+
+        let observation = adapter
+            .observe_client_bytes(state.as_mut(), &packet, &mut events)
+            .expect("COM_QUERY should be observed");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let command = state
+            .last_client_command()
+            .expect("client command should be stored");
+
+        assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+        assert_eq!(command.kind, MysqlCommandKind::Query);
+        assert_eq!(command.sql, "DO 1");
+        assert!(state.pending_query().is_some());
         assert!(events.events.is_empty());
     }
 
@@ -2645,6 +2854,176 @@ mod tests {
     }
 
     #[test]
+    fn mysql_adapter_emits_ok_sql_event_when_result_set_finalizes_pending_query() {
+        let adapter =
+            MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start"), (7, "query_end")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select 1", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let packets = [
+            result_set_column_count_packet(1, 1),
+            result_set_column_definition_packet(2),
+            result_set_eof_packet(3),
+            result_set_row_packet(&[b"1"], 4),
+        ];
+        for packet in packets {
+            let observation = adapter
+                .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+                .expect("result-set packet should be observed");
+
+            assert_eq!(observation, ProtocolObservation::new(packet.len(), 0));
+            assert!(events.events.is_empty());
+        }
+
+        let response = result_set_eof_packet(5);
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("row terminator should finalize pending query");
+        let state = state
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MysqlConnectionState>()
+            .expect("state should downcast");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(events.events.len(), 1);
+        assert!(state.pending_query().is_none());
+        assert_sql_event(event, CaptureStatus::Ok, "select 1", "query_end", 7);
+        assert_eq!(
+            event.result,
+            Some(ResultSummary {
+                affected_rows: None,
+                returned_rows: Some(1),
+            })
+        );
+    }
+
+    #[test]
+    fn mysql_adapter_counts_multiple_result_set_rows() {
+        let adapter =
+            MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start"), (7, "query_end")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select id from users", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        for packet in [
+            result_set_column_count_packet(1, 1),
+            result_set_column_definition_packet(2),
+            result_set_eof_packet(3),
+            result_set_row_packet(&[b"1"], 4),
+            result_set_row_packet(&[b"2"], 5),
+        ] {
+            adapter
+                .observe_backend_bytes(state.as_mut(), &packet, &mut events)
+                .expect("result-set packet should be observed");
+        }
+
+        adapter
+            .observe_backend_bytes(state.as_mut(), &result_set_eof_packet(6), &mut events)
+            .expect("row terminator should finalize pending query");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(
+            event.result,
+            Some(ResultSummary {
+                affected_rows: None,
+                returned_rows: Some(2),
+            })
+        );
+    }
+
+    #[test]
+    fn mysql_adapter_handles_result_set_packets_in_one_backend_read() {
+        let adapter =
+            MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start"), (7, "query_end")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select 1", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let response = combined_packets([
+            result_set_column_count_packet(1, 1),
+            result_set_column_definition_packet(2),
+            result_set_eof_packet(3),
+            result_set_row_packet(&[b"1"], 4),
+            result_set_eof_packet(5),
+        ]);
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("combined result-set packets should be observed");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(events.events.len(), 1);
+        assert_sql_event(event, CaptureStatus::Ok, "select 1", "query_end", 7);
+        assert_eq!(
+            event.result,
+            Some(ResultSummary {
+                affected_rows: None,
+                returned_rows: Some(1),
+            })
+        );
+    }
+
+    #[test]
+    fn mysql_adapter_handles_result_set_without_column_terminator() {
+        let adapter =
+            MysqlProtocolAdapter::with_clock(manual_clock(&[(0, "query_start"), (7, "query_end")]));
+        let mut state = adapter.create_connection_state(&test_context());
+        let mut events = VecCaptureEventEmitter::default();
+        observe_authenticated_connection(&adapter, state.as_mut(), &mut events);
+
+        adapter
+            .observe_client_bytes(
+                state.as_mut(),
+                &com_query_packet("select 1", 0),
+                &mut events,
+            )
+            .expect("COM_QUERY should start pending query");
+        let response = combined_packets([
+            result_set_column_count_packet(1, 1),
+            result_set_column_definition_packet(2),
+            result_set_row_packet(&[b"1"], 3),
+            result_set_eof_packet(4),
+        ]);
+        let observation = adapter
+            .observe_backend_bytes(state.as_mut(), &response, &mut events)
+            .expect("combined result-set packets should be observed");
+        let event = events.events.first().expect("SQL event should be emitted");
+
+        assert_eq!(observation, ProtocolObservation::new(response.len(), 1));
+        assert_eq!(
+            event.result,
+            Some(ResultSummary {
+                affected_rows: None,
+                returned_rows: Some(1),
+            })
+        );
+    }
+
+    #[test]
     fn mysql_adapter_emits_error_sql_event_when_backend_err_finalizes_pending_query() {
         let adapter = MysqlProtocolAdapter::with_clock(manual_clock(&[
             (10, "query_start"),
@@ -2880,6 +3259,16 @@ mod tests {
         packet_with_sequence_id(payload, 1)
     }
 
+    fn client_handshake_response_with_query_attributes_packet() -> Vec<u8> {
+        let mut payload = client_handshake_response_payload();
+        let mut capability_flags =
+            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        capability_flags |= MYSQL_CLIENT_QUERY_ATTRIBUTES;
+        payload[..4].copy_from_slice(&capability_flags.to_le_bytes());
+
+        packet_with_sequence_id(payload, 1)
+    }
+
     fn authentication_ok_packet() -> Vec<u8> {
         packet_with_sequence_id(vec![0x00], 2)
     }
@@ -2924,6 +3313,31 @@ mod tests {
         packet_with_sequence_id(vec![0x01], 1)
     }
 
+    fn result_set_column_count_packet(column_count: u8, sequence_id: u8) -> Vec<u8> {
+        packet_with_sequence_id(vec![column_count], sequence_id)
+    }
+
+    fn result_set_column_definition_packet(sequence_id: u8) -> Vec<u8> {
+        packet_with_sequence_id(b"def".to_vec(), sequence_id)
+    }
+
+    fn result_set_row_packet(values: &[&[u8]], sequence_id: u8) -> Vec<u8> {
+        let mut payload = Vec::new();
+        for value in values {
+            payload.extend_from_slice(&length_encoded_value(value));
+        }
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn result_set_eof_packet(sequence_id: u8) -> Vec<u8> {
+        packet_with_sequence_id(vec![0xfe, 0x00, 0x00, 0x02, 0x00], sequence_id)
+    }
+
+    fn combined_packets<const N: usize>(packets: [Vec<u8>; N]) -> Vec<u8> {
+        packets.into_iter().flatten().collect()
+    }
+
     fn com_quit_packet(sequence_id: u8) -> Vec<u8> {
         packet_with_sequence_id(vec![MYSQL_COM_QUIT], sequence_id)
     }
@@ -2963,6 +3377,13 @@ mod tests {
 
     fn com_query_packet(sql: &str, sequence_id: u8) -> Vec<u8> {
         let mut payload = vec![MYSQL_COM_QUERY];
+        payload.extend_from_slice(sql.as_bytes());
+
+        packet_with_sequence_id(payload, sequence_id)
+    }
+
+    fn attributed_com_query_packet(sql: &str, sequence_id: u8) -> Vec<u8> {
+        let mut payload = vec![MYSQL_COM_QUERY, 0x00, 0x01];
         payload.extend_from_slice(sql.as_bytes());
 
         packet_with_sequence_id(payload, sequence_id)
@@ -3134,11 +3555,25 @@ mod tests {
         state: &mut dyn ProtocolConnectionState,
         events: &mut VecCaptureEventEmitter,
     ) {
+        observe_complete_handshake_with_client_packet(
+            adapter,
+            state,
+            events,
+            &client_handshake_response_packet(),
+        );
+    }
+
+    fn observe_complete_handshake_with_client_packet(
+        adapter: &MysqlProtocolAdapter,
+        state: &mut dyn ProtocolConnectionState,
+        events: &mut VecCaptureEventEmitter,
+        client_packet: &[u8],
+    ) {
         adapter
             .observe_backend_bytes(state, &initial_handshake_packet(), events)
             .expect("backend handshake should be observed");
         adapter
-            .observe_client_bytes(state, &client_handshake_response_packet(), events)
+            .observe_client_bytes(state, client_packet, events)
             .expect("client handshake response should be observed");
     }
 
