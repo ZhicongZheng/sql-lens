@@ -6,6 +6,7 @@ mod connections;
 mod health;
 mod live_sql_events;
 mod protocols;
+mod replay;
 mod request_id;
 mod server;
 mod sql_events;
@@ -24,6 +25,7 @@ pub use live_sql_events::{
     SqlEventBroadcaster, SqlEventSubscription, SqlEventSubscriptionError,
 };
 pub use protocols::{PROTOCOLS_PATH, ProtocolListResponse, ProtocolResponse};
+pub use replay::{REPLAY_PREVIEW_PATH, ReplayPreviewRequest, ReplayPreviewResponse};
 pub use request_id::{REQUEST_ID_HEADER, RequestId};
 pub use server::{
     BoundHttpServer, HttpServerConfig, HttpServerError, bind_http_server,

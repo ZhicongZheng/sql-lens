@@ -202,6 +202,40 @@ POST /api/v1/replay/execute
 
 Replay execution must require explicit confirmation, especially for mutating SQL.
 
+Preview request:
+
+```json
+{
+  "event_id": "evt_01J00000000000000000000000"
+}
+```
+
+or:
+
+```json
+{
+  "sql": "UPDATE users SET name = 'alice' WHERE id = 42"
+}
+```
+
+Preview response:
+
+```json
+{
+  "source": "event",
+  "event_id": "evt_01J00000000000000000000000",
+  "sql": "SELECT * FROM users WHERE id = 42",
+  "is_mutation": false,
+  "warning": null
+}
+```
+
+`POST /api/v1/replay/preview` does not execute SQL. It accepts exactly one of
+`event_id` or `sql`; invalid source combinations return `BAD_REQUEST`, and
+missing event IDs return `NOT_FOUND`. Mutation classification is conservative:
+only common read-only statements such as `SELECT`, `SHOW`, `DESCRIBE`, `DESC`,
+and `EXPLAIN` are treated as non-mutating.
+
 ## WebSocket API
 
 ### SQL Events Stream

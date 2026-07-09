@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Defines crate ownership boundaries for API, storage, core, and replay-related responsibilities."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Defines API error envelope and validation error mapping conventions."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Contains API contract guidance and replay-related safety notes for expanded SQL."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Replay preview crosses storage, API DTOs, docs, and future frontend contracts."}
