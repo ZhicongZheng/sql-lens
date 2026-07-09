@@ -50,11 +50,43 @@ The current storage examples are:
 
 ## Migrations
 
-- There are no migrations yet.
-- Do not add migration folders, SQL files, or database dependencies until a task
-  explicitly designs persistent storage.
-- A future persistent backend must document migration naming, rollback behavior,
-  and compatibility expectations before implementation.
+- SQLite schema migration support starts in `sql-lens-storage`.
+- The initial public contract is:
+
+```rust
+pub const SQLITE_SCHEMA_VERSION: i64 = 1;
+
+pub fn apply_sqlite_schema(
+    connection: &rusqlite::Connection,
+) -> Result<(), rusqlite::Error>;
+```
+
+- Use `rusqlite::Connection::execute_batch` for schema-only migrations.
+- Keep migrations idempotent with `CREATE TABLE IF NOT EXISTS`,
+  `CREATE INDEX IF NOT EXISTS`, and `INSERT OR IGNORE` for schema version rows.
+- Keep SQLite access in `sql-lens-storage`; do not call SQLite from protocol,
+  proxy, API handler, or app startup code until an explicit runtime wiring task.
+- Rollback/downgrade behavior is not implemented yet. Future schema versions
+  must document upgrade and compatibility behavior before adding version > 1.
+
+Required first-schema tables:
+
+- `schema_version`
+- `sql_events`
+- `sql_parameters`
+- `connections`
+- `prepared_statements`
+
+Required first-schema SQL event indexes:
+
+- `timestamp`
+- `(protocol, timestamp)`
+- `(database_type, timestamp)`
+- `(database_name, timestamp)`
+- `(user_name, timestamp)`
+- `(status, timestamp)`
+- `(fingerprint, timestamp)`
+- `duration_ms`
 
 ## Naming Conventions
 
@@ -74,6 +106,10 @@ For storage changes:
 - Filter validation and matching behavior.
 - Pagination order and next-cursor behavior.
 - Redaction before storage when events may contain sensitive SQL or parameters.
+- SQLite schema tests using `Connection::open_in_memory` when schema/migration
+  code changes.
+- SQLite schema tests must assert required tables, indexes, version row, and
+  idempotent migration behavior.
 - `cargo fmt --check`.
 - `cargo test --workspace`.
 - `cargo clippy --workspace --all-targets -- -D warnings`.

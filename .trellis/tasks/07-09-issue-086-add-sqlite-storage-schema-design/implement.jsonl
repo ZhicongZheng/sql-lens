@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "SQLite schema and migration code belongs in sql-lens-storage."}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLite schema design should follow storage/database conventions."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Schema API is a backend contract and requires focused tests plus workspace checks."}

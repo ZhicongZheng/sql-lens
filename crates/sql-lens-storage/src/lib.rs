@@ -3,6 +3,7 @@
 mod connection_store;
 mod live_statistics;
 mod ring_buffer;
+mod sqlite_schema;
 
 pub use connection_store::{ConnectionStore, ConnectionUpsertOutcome};
 pub use live_statistics::{
@@ -12,3 +13,4 @@ pub use ring_buffer::{
     RingBufferAppendOutcome, RingBufferStats, RingBufferStore, RingBufferTimelineCursor,
     RingBufferTimelinePage, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
 };
+pub use sqlite_schema::{SQLITE_SCHEMA_VERSION, apply_sqlite_schema};
