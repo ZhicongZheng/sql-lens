@@ -236,3 +236,36 @@ Implemented storage-local SQLite timeline queries with deterministic cursor pagi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 68: Issue 089 storage retention enforcement
+
+**Date**: 2026-07-09
+**Task**: Issue 089 storage retention enforcement
+**Branch**: `main`
+
+### Summary
+
+Implemented storage-local retention enforcement for ring buffer max-events and SQLite age/count cleanup with explicit parameter deletion, docs, specs, and tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `529566f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
