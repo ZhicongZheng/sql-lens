@@ -53,6 +53,13 @@ pub struct SqliteParameterRow {
     pub redacted: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SqliteRetentionOutcome {
+    pub deleted_event_ids: Vec<SqlEventId>,
+    pub deleted_event_count: usize,
+    pub deleted_parameter_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteTimelineQuery {
     pub limit: NonZeroUsize,
@@ -293,6 +300,71 @@ impl SqliteEventStore {
             .collect()
     }
 
+    pub fn delete_events_older_than(
+        &mut self,
+        cutoff: &Timestamp,
+    ) -> rusqlite::Result<SqliteRetentionOutcome> {
+        let transaction = self.connection.transaction()?;
+        let deleted_event_ids = {
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT id
+                FROM sql_events
+                WHERE timestamp < ?1
+                ORDER BY timestamp ASC, id ASC
+                "#,
+            )?;
+
+            statement
+                .query_map(params![&cutoff.0], |row| {
+                    row.get::<_, String>(0).map(SqlEventId)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let outcome = delete_sqlite_events(&transaction, deleted_event_ids)?;
+        transaction.commit()?;
+
+        Ok(outcome)
+    }
+
+    pub fn enforce_max_events(
+        &mut self,
+        max_events: NonZeroUsize,
+    ) -> rusqlite::Result<SqliteRetentionOutcome> {
+        let transaction = self.connection.transaction()?;
+        let event_count = sqlite_event_count(&transaction)?;
+        let max_events = max_events.get();
+
+        if event_count <= max_events {
+            transaction.commit()?;
+            return Ok(SqliteRetentionOutcome::default());
+        }
+
+        let delete_count = event_count - max_events;
+        let deleted_event_ids = {
+            let mut statement = transaction.prepare(
+                r#"
+                SELECT id
+                FROM sql_events
+                ORDER BY timestamp ASC, id ASC
+                LIMIT ?1
+                "#,
+            )?;
+
+            statement
+                .query_map(params![usize_to_i64(delete_count)], |row| {
+                    row.get::<_, String>(0).map(SqlEventId)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let outcome = delete_sqlite_events(&transaction, deleted_event_ids)?;
+        transaction.commit()?;
+
+        Ok(outcome)
+    }
+
     pub fn query_timeline(
         &self,
         query: SqliteTimelineQuery,
@@ -373,6 +445,41 @@ impl SqliteEventStore {
             next_cursor,
         })
     }
+}
+
+fn sqlite_event_count(connection: &Connection) -> rusqlite::Result<usize> {
+    let count = connection.query_row("SELECT COUNT(*) FROM sql_events", [], |row| {
+        row.get::<_, i64>(0)
+    })?;
+
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+}
+
+fn delete_sqlite_events(
+    connection: &Connection,
+    deleted_event_ids: Vec<SqlEventId>,
+) -> rusqlite::Result<SqliteRetentionOutcome> {
+    if deleted_event_ids.is_empty() {
+        return Ok(SqliteRetentionOutcome::default());
+    }
+
+    let mut deleted_parameter_count = 0;
+    let mut deleted_event_count = 0;
+
+    for event_id in &deleted_event_ids {
+        deleted_parameter_count += connection.execute(
+            "DELETE FROM sql_parameters WHERE event_id = ?1",
+            params![&event_id.0],
+        )?;
+        deleted_event_count +=
+            connection.execute("DELETE FROM sql_events WHERE id = ?1", params![&event_id.0])?;
+    }
+
+    Ok(SqliteRetentionOutcome {
+        deleted_event_ids,
+        deleted_event_count,
+        deleted_parameter_count,
+    })
 }
 
 fn push_cursor_predicate(
@@ -1057,6 +1164,127 @@ mod tests {
 
         assert!(page.events.is_empty());
         assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn sqlite_retention_deletes_events_older_than_cutoff() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_oldest", "2026-07-09T08:00:00Z"),
+                event_at("evt_old", "2026-07-09T08:01:00Z"),
+                event_at("evt_keep", "2026-07-09T08:02:00Z"),
+            ],
+        );
+
+        let outcome = store
+            .delete_events_older_than(&Timestamp("2026-07-09T08:02:00Z".to_owned()))
+            .expect("age cleanup should succeed");
+
+        assert_eq!(
+            outcome.deleted_event_ids,
+            vec![
+                SqlEventId("evt_oldest".to_owned()),
+                SqlEventId("evt_old".to_owned())
+            ]
+        );
+        assert_eq!(outcome.deleted_event_count, 2);
+        assert_eq!(outcome.deleted_parameter_count, 4);
+        assert_eq!(
+            row_ids(&query_page(&store, timeline_query(10, None)).events),
+            ["evt_keep"]
+        );
+    }
+
+    #[test]
+    fn sqlite_retention_enforces_max_events_with_timeline_ordering() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_a", "2026-07-09T08:00:00Z"),
+                event_at("evt_b", "2026-07-09T08:00:00Z"),
+                event_at("evt_c", "2026-07-09T08:00:00Z"),
+                event_at("evt_new", "2026-07-09T08:01:00Z"),
+            ],
+        );
+
+        let outcome = store
+            .enforce_max_events(NonZeroUsize::new(2).expect("max events should be non-zero"))
+            .expect("count cleanup should succeed");
+
+        assert_eq!(
+            outcome.deleted_event_ids,
+            vec![
+                SqlEventId("evt_a".to_owned()),
+                SqlEventId("evt_b".to_owned())
+            ]
+        );
+        assert_eq!(outcome.deleted_event_count, 2);
+        assert_eq!(outcome.deleted_parameter_count, 4);
+        assert_eq!(
+            row_ids(&query_page(&store, timeline_query(10, None)).events),
+            ["evt_new", "evt_c"]
+        );
+    }
+
+    #[test]
+    fn sqlite_retention_deletes_parameter_rows_for_deleted_events() {
+        let mut store = in_memory_store();
+        let deleted = event_at("evt_deleted", "2026-07-09T08:00:00Z");
+        let kept = event_at("evt_kept", "2026-07-09T08:01:00Z");
+        insert_events(&mut store, vec![deleted.clone(), kept.clone()]);
+
+        store
+            .delete_events_older_than(&Timestamp("2026-07-09T08:01:00Z".to_owned()))
+            .expect("age cleanup should succeed");
+
+        assert_eq!(
+            store
+                .get_parameter_rows(&deleted.id)
+                .expect("deleted parameters should be readable"),
+            Vec::new()
+        );
+        assert_eq!(
+            store
+                .get_parameter_rows(&kept.id)
+                .expect("kept parameters should be readable")
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .get_event_row(&deleted.id)
+                .expect("deleted event lookup should succeed"),
+            None
+        );
+    }
+
+    #[test]
+    fn sqlite_retention_noops_when_nothing_matches() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_1", "2026-07-09T08:00:00Z"),
+                event_at("evt_2", "2026-07-09T08:01:00Z"),
+            ],
+        );
+
+        let age_outcome = store
+            .delete_events_older_than(&Timestamp("2026-07-09T07:00:00Z".to_owned()))
+            .expect("age cleanup should succeed");
+        let count_outcome = store
+            .enforce_max_events(NonZeroUsize::new(2).expect("max events should be non-zero"))
+            .expect("count cleanup should succeed");
+
+        assert_eq!(age_outcome, SqliteRetentionOutcome::default());
+        assert_eq!(count_outcome, SqliteRetentionOutcome::default());
+        assert_eq!(
+            row_ids(&query_page(&store, timeline_query(10, None)).events),
+            ["evt_2", "evt_1"]
+        );
     }
 
     fn in_memory_store() -> SqliteEventStore {

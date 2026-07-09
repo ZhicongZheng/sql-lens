@@ -65,6 +65,20 @@ impl RingBufferStore {
         }
     }
 
+    pub fn enforce_max_events(&mut self, max_events: NonZeroUsize) -> RingBufferRetentionOutcome {
+        let mut deleted_event_ids = Vec::new();
+        let max_events = max_events.get();
+
+        while self.events.len() > max_events {
+            if let Some(entry) = self.events.pop_front() {
+                self.total_evicted += 1;
+                deleted_event_ids.push(entry.event.id);
+            }
+        }
+
+        RingBufferRetentionOutcome { deleted_event_ids }
+    }
+
     pub fn snapshot(&self) -> Vec<SqlEvent> {
         self.events
             .iter()
@@ -151,6 +165,11 @@ impl RingBufferStore {
 pub struct RingBufferAppendOutcome {
     pub stored_event_id: SqlEventId,
     pub evicted_event_id: Option<SqlEventId>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RingBufferRetentionOutcome {
+    pub deleted_event_ids: Vec<SqlEventId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1081,5 +1100,52 @@ mod tests {
                 SqlEventId("evt_3".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn ring_buffer_retention_noops_when_within_max_events() {
+        let mut store = RingBufferStore::new(capacity(3));
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        let stats_before = store.stats();
+
+        let outcome = store.enforce_max_events(capacity(2));
+
+        assert_eq!(outcome, RingBufferRetentionOutcome::default());
+        assert_eq!(
+            event_ids(&store.snapshot()),
+            vec![
+                SqlEventId("evt_1".to_owned()),
+                SqlEventId("evt_2".to_owned())
+            ]
+        );
+        assert_eq!(store.stats(), stats_before);
+    }
+
+    #[test]
+    fn ring_buffer_retention_deletes_oldest_events_first() {
+        let mut store = RingBufferStore::new(capacity(5));
+        store.append(test_event("evt_1"));
+        store.append(test_event("evt_2"));
+        store.append(test_event("evt_3"));
+        store.append(test_event("evt_4"));
+
+        let outcome = store.enforce_max_events(capacity(2));
+
+        assert_eq!(
+            outcome.deleted_event_ids,
+            vec![
+                SqlEventId("evt_1".to_owned()),
+                SqlEventId("evt_2".to_owned())
+            ]
+        );
+        assert_eq!(
+            event_ids(&store.snapshot()),
+            vec![
+                SqlEventId("evt_3".to_owned()),
+                SqlEventId("evt_4".to_owned())
+            ]
+        );
+        assert_eq!(store.stats().total_evicted, 2);
     }
 }

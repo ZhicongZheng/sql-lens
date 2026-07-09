@@ -169,6 +169,19 @@ Drop policy:
 
 Retention must apply after redaction.
 
+Current implementation:
+
+- `RingBufferStore::enforce_max_events` trims already-retained events by deleting
+  oldest entries first.
+- `SqliteEventStore::delete_events_older_than` deletes persisted events older
+  than a caller-provided timestamp cutoff.
+- `SqliteEventStore::enforce_max_events` keeps the newest persisted events using
+  SQLite timeline ordering.
+- SQLite cleanup deletes matching parameter rows explicitly and does not rely on
+  connection-level foreign-key cascade settings.
+- Maximum byte retention is not enforced by current storage primitives. SQLite
+  file-size cleanup needs a separate VACUUM / incremental-vacuum design.
+
 ## Query Optimization
 
 Timeline query:

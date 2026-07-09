@@ -331,3 +331,117 @@ let sql = format!("SELECT * FROM sql_events WHERE original_sql LIKE '%{text}%'")
 query.filter.validate()?;
 // Build predicates from fixed SQL fragments and bind all user/filter values.
 ```
+
+## Scenario: Storage Retention Enforcement
+
+### 1. Scope / Trigger
+
+- Trigger: a task deletes retained SQL events from ring buffer or SQLite storage
+  according to retention policy dimensions.
+- Retention primitives belong in `sql-lens-storage`; runtime config wiring,
+  cleanup scheduling, and API reporting are separate tasks.
+- Storage retention must act on already-redacted events. It must not mutate
+  retained SQL event contents.
+
+### 2. Signatures
+
+Current storage-local API:
+
+```rust
+pub struct RingBufferRetentionOutcome {
+    pub deleted_event_ids: Vec<SqlEventId>,
+}
+
+impl RingBufferStore {
+    pub fn enforce_max_events(&mut self, max_events: NonZeroUsize) -> RingBufferRetentionOutcome;
+}
+
+pub struct SqliteRetentionOutcome {
+    pub deleted_event_ids: Vec<SqlEventId>,
+    pub deleted_event_count: usize,
+    pub deleted_parameter_count: usize,
+}
+
+impl SqliteEventStore {
+    pub fn delete_events_older_than(
+        &mut self,
+        cutoff: &Timestamp,
+    ) -> rusqlite::Result<SqliteRetentionOutcome>;
+
+    pub fn enforce_max_events(
+        &mut self,
+        max_events: NonZeroUsize,
+    ) -> rusqlite::Result<SqliteRetentionOutcome>;
+}
+```
+
+### 3. Contracts
+
+- Ring buffer max-events retention evicts oldest entries until `len <=
+  max_events` and reports deleted IDs oldest-first.
+- SQLite age retention deletes `sql_events.timestamp < cutoff`.
+- SQLite max-events retention keeps the newest rows by timeline ordering:
+  `timestamp DESC, id DESC`.
+- SQLite retention deletes `sql_parameters` rows explicitly before deleting
+  their owning `sql_events` rows. Do not rely on foreign-key cascades being
+  enabled.
+- SQLite retention runs in one transaction per cleanup operation.
+- Maximum byte retention is not currently supported. Do not add no-op max-byte
+  APIs that imply enforcement happened; file-size cleanup needs a VACUUM /
+  incremental-vacuum design.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Current retained count is within max events | Return an empty outcome |
+| Ring buffer is above max events | Delete oldest entries and increment eviction stats |
+| SQLite has no matching age/count rows | Return an empty outcome |
+| SQLite parameter deletion fails | Roll back the transaction |
+| SQLite event deletion fails | Roll back the transaction |
+| Max-byte retention requested by runtime | Treat as unsupported until a dedicated design exists |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Runtime code later translates `RetentionConfig.max_events` into
+  `enforce_max_events` calls and translates parsed `max_age` into a timestamp
+  cutoff for SQLite.
+
+Base:
+
+- Storage tests call retention APIs directly using in-memory stores and
+  in-memory SQLite connections.
+
+Bad:
+
+- Deleting SQLite event rows and assuming parameters cascade without enabling
+  foreign keys.
+- Running retention from protocol observers or TCP forwarding code.
+- Pretending `max_bytes` was enforced by deleting arbitrary rows without file
+  size accounting and vacuum behavior.
+
+### 6. Tests Required
+
+- Ring buffer no-op within max-events.
+- Ring buffer oldest-first deletion and eviction counter updates.
+- SQLite age cleanup deletes old event rows.
+- SQLite count cleanup keeps newest rows by `(timestamp DESC, id DESC)`.
+- SQLite cleanup removes parameter rows for deleted events.
+- SQLite no-op cleanup returns an empty outcome.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+connection.execute("DELETE FROM sql_events WHERE timestamp < ?1", params![cutoff])?;
+```
+
+#### Correct
+
+```rust
+let tx = connection.transaction()?;
+// Select IDs, delete sql_parameters for those IDs, delete sql_events, then commit.
+```

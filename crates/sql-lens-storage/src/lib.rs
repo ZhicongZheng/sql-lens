@@ -11,11 +11,12 @@ pub use live_statistics::{
     LatencyBucketCount, LatencyPercentiles, LiveStatistics, LiveStatisticsSnapshot,
 };
 pub use ring_buffer::{
-    RingBufferAppendOutcome, RingBufferStats, RingBufferStore, RingBufferTimelineCursor,
-    RingBufferTimelinePage, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
+    RingBufferAppendOutcome, RingBufferRetentionOutcome, RingBufferStats, RingBufferStore,
+    RingBufferTimelineCursor, RingBufferTimelinePage, RingBufferTimelineQuery, SqlEventFilter,
+    SqlEventFilterError,
 };
 pub use sqlite_event_store::{
-    SqliteEventRow, SqliteEventStore, SqliteParameterRow, SqliteTimelineCursor, SqliteTimelinePage,
-    SqliteTimelineQuery, SqliteTimelineQueryError,
+    SqliteEventRow, SqliteEventStore, SqliteParameterRow, SqliteRetentionOutcome,
+    SqliteTimelineCursor, SqliteTimelinePage, SqliteTimelineQuery, SqliteTimelineQueryError,
 };
 pub use sqlite_schema::{SQLITE_SCHEMA_VERSION, apply_sqlite_schema};
