@@ -5924,6 +5924,112 @@ MysqlParsedClientCommand::Ping(_) => {
 }
 ```
 
+## Scenario: SQL Fingerprinting Foundation
+
+### 1. Scope / Trigger
+
+- Trigger: backend code needs a stable grouping key for similar SQL text.
+- Fingerprinting is protocol-neutral core behavior. Protocol adapters may call
+  it when building `SqlEvent`, but they must not duplicate local normalization
+  algorithms.
+- The first foundation is scanner-based, not an AST parser or dialect-specific
+  normalizer.
+
+### 2. Signatures
+
+The shared helper lives in `sql-lens-core` and is re-exported from `lib.rs`:
+
+```rust
+pub fn fingerprint_sql(sql: &str) -> String;
+```
+
+Adapter event construction should populate the existing event field:
+
+```rust
+SqlEvent {
+    fingerprint: Some(fingerprint_sql(sql_for_grouping)),
+    ..
+}
+```
+
+### 3. Contracts
+
+- `fingerprint_sql` is total over arbitrary text and must not return `Result`.
+- Common string, numeric, hexadecimal, `NULL`, `TRUE`, and `FALSE` literals are
+  replaced with `?`.
+- ASCII whitespace is collapsed, and punctuation/comparison spacing is
+  normalized so `id=42` and `id = 42` group together.
+- The helper preserves statement shape, identifiers, punctuation, and operators
+  well enough for debug grouping.
+- `COM_QUERY` events fingerprint the original query SQL.
+- Prepared execute events prefer expanded SQL for fingerprinting when available,
+  then fall back to the prepared template SQL.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Empty SQL text | Return an empty fingerprint |
+| Malformed or unterminated string literal | Return a best-effort fingerprint, no panic |
+| Literal value appears in supported form | Replace it with `?` |
+| Identifier contains digits | Preserve it as an identifier, not a literal |
+| Adapter cannot render expanded prepared SQL | Fingerprint the template SQL |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- `SELECT * FROM users WHERE id = 42` and
+  `select * from users where id=7` both group to the same fingerprint.
+- A new protocol adapter calls `sql_lens_core::fingerprint_sql` instead of
+  adding a private normalizer.
+
+Base:
+
+- The helper is intentionally parser-light; full dialect AST normalization can
+  be added later behind the same public contract if product scope requires it.
+
+Bad:
+
+- Adding `serde_json`, SQL parser crates, runtime crates, or protocol-specific
+  dependencies to `sql-lens-core` for the foundation implementation.
+- Treating fingerprinting as redaction. Storage/API redaction remains the owner
+  of masking sensitive values.
+
+### 6. Tests Required
+
+- Core unit tests for common `SELECT`, `INSERT`, `UPDATE`, and `DELETE`
+  statements.
+- Core tests for whitespace, punctuation/operator spacing, quoted strings, and
+  identifiers containing digits.
+- Protocol adapter tests proving emitted SQL events populate
+  `SqlEvent.fingerprint`.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-core`.
+- Run `cargo test -p sql-lens-protocol-mysql` when adapter wiring changes.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+SqlEvent {
+    fingerprint: Some(mysql_only_fingerprint(&sql)),
+    ..
+}
+```
+
+#### Correct
+
+```rust
+SqlEvent {
+    fingerprint: Some(sql_lens_core::fingerprint_sql(&sql)),
+    ..
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

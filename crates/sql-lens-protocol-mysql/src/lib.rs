@@ -18,7 +18,7 @@ use std::{
 use sql_lens_core::{
     CaptureStatus, ConnectionInfo, ConnectionState, DurationMillis, ErrorSummary, MetadataField,
     MetadataValue, ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent,
-    SqlEventId, SqlEventKind, SqlParameter, Timestamp,
+    SqlEventId, SqlEventKind, SqlParameter, Timestamp, fingerprint_sql,
 };
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
@@ -729,6 +729,13 @@ impl MysqlConnectionState {
             });
         }
 
+        let fingerprint = Some(fingerprint_sql(
+            envelope
+                .expanded_sql
+                .as_deref()
+                .unwrap_or(&envelope.command.sql),
+        ));
+
         SqlEvent {
             id: event_id,
             timestamp: envelope.started_at.clone(),
@@ -746,7 +753,7 @@ impl MysqlConnectionState {
             original_sql: envelope.command.sql,
             normalized_sql: None,
             expanded_sql: envelope.expanded_sql,
-            fingerprint: None,
+            fingerprint,
             parameters,
             result,
             error,
@@ -801,6 +808,8 @@ impl MysqlConnectionState {
             });
         }
 
+        let fingerprint = Some(fingerprint_sql(&original_sql));
+
         SqlEvent {
             id: event_id,
             timestamp: pending.started_at.clone(),
@@ -818,7 +827,7 @@ impl MysqlConnectionState {
             original_sql,
             normalized_sql: None,
             expanded_sql: None,
-            fingerprint: None,
+            fingerprint,
             parameters: Vec::new(),
             result,
             error,
@@ -1730,6 +1739,10 @@ mod tests {
         assert_eq!(
             event.expanded_sql.as_deref(),
             Some("update users set name = 'alice', password = 's3cr3t' where id = 42")
+        );
+        assert_eq!(
+            event.fingerprint.as_deref(),
+            Some("update users set name=?,password=? where id=?")
         );
         assert_eq!(event.parameters.len(), 2);
         assert_eq!(event.parameters[0].index, 0);
@@ -3090,7 +3103,11 @@ mod tests {
         assert_eq!(event.original_sql, expected_sql);
         assert_eq!(event.normalized_sql, None);
         assert_eq!(event.expanded_sql, None);
-        assert_eq!(event.fingerprint, None);
+        let expected_fingerprint = fingerprint_sql(expected_sql);
+        assert_eq!(
+            event.fingerprint.as_deref(),
+            Some(expected_fingerprint.as_str())
+        );
         assert!(event.parameters.is_empty());
         assert_eq!(
             event.timings.started_at,

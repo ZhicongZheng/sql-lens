@@ -2,6 +2,7 @@
 
 mod error;
 mod event;
+mod fingerprint;
 mod ids;
 mod metadata;
 mod redaction;
@@ -12,6 +13,7 @@ pub use event::{
     CaptureStatus, ConnectionInfo, ConnectionState, PreparedStatementInfo, QueryTiming,
     ResultSummary, SqlEvent, SqlEventKind, SqlParameter, SqlParameterValue,
 };
+pub use fingerprint::fingerprint_sql;
 pub use ids::{ConnectionId, RequestId, SqlEventId, StatementId};
 pub use metadata::{DatabaseType, MetadataField, MetadataValue, ProtocolMetadata, ProtocolName};
 pub use redaction::{

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Final checks should verify small scoped changes, tests, formatting, and clippy cleanliness."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Fingerprinting should be total and should not introduce runtime errors for malformed SQL text."}
