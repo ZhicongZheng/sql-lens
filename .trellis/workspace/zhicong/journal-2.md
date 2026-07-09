@@ -203,3 +203,36 @@ Implemented storage-local SQLite event inserts with redaction, transactional par
 ### Next Steps
 
 - None - task complete
+
+
+## Session 67: Issue 088 SQLite timeline queries
+
+**Date**: 2026-07-09
+**Task**: Issue 088 SQLite timeline queries
+**Branch**: `main`
+
+### Summary
+
+Implemented storage-local SQLite timeline queries with deterministic cursor pagination, shared SQL event filters, structured query errors, docs, specs, and tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `aa8eee1` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
