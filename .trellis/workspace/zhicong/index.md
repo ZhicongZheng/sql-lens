@@ -7,9 +7,9 @@
 ## Current Status
 
 <!-- @@@auto:current-status -->
-- **Active File**: `journal-1.md`
-- **Total Sessions**: 60
-- **Last Active**: 2026-07-08
+- **Active File**: `journal-2.md`
+- **Total Sessions**: 61
+- **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,8 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1996 | Active |
+| `journal-2.md` | ~40 | Active |
+| `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 61 | 2026-07-09 | Implement multi-target proxy fan-out | `8cb320e` | `main` |
 | 60 | 2026-07-08 | Issue 064: React web app skeleton | `2e49ecc` | `main` |
 | 59 | 2026-07-08 | Add slow SQL classification | `294789d` | `main` |
 | 58 | 2026-07-08 | Add MySQL-compatible Docker smoke tests | `d4930be` | `main` |
