@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import {
   AlertTriangleIcon,
   CopyIcon,
@@ -67,7 +67,17 @@ function Section({
 }
 
 // ---------------------------------------------------------------------------
-// SQL block with copy button
+// Lazy-loaded Monaco SQL editor (code-split to avoid bloating the main bundle)
+// ---------------------------------------------------------------------------
+
+const LazySqlEditor = lazy(() =>
+  import("@/components/sql/sql-editor").then((m) => ({
+    default: m.SqlEditor,
+  })),
+);
+
+// ---------------------------------------------------------------------------
+// SQL block with Monaco editor + copy button
 // ---------------------------------------------------------------------------
 
 function SqlBlock({
@@ -78,19 +88,28 @@ function SqlBlock({
   label: string;
 }) {
   return (
-    <div className="group relative">
-      <pre className="overflow-x-auto rounded-md bg-muted p-3 pr-10 text-xs font-mono whitespace-pre-wrap break-all">
-        {sql}
-      </pre>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="absolute right-1.5 top-1.5 size-7 opacity-0 transition-opacity group-hover:opacity-100"
-        onClick={() => copyToClipboard(sql)}
-        aria-label={`Copy ${label}`}
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 text-xs"
+          onClick={() => copyToClipboard(sql)}
+          aria-label={`Copy ${label}`}
+        >
+          <CopyIcon className="size-3" />
+          Copy
+        </Button>
+      </div>
+      <Suspense
+        fallback={
+          <div className="flex h-20 items-center justify-center rounded-md bg-muted text-xs text-muted-foreground">
+            Loading editor…
+          </div>
+        }
       >
-        <CopyIcon className="size-3.5" />
-      </Button>
+        <LazySqlEditor value={sql} />
+      </Suspense>
     </div>
   );
 }

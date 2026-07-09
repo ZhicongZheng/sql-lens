@@ -10,6 +10,9 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  optimizeDeps: {
+    include: ["monaco-editor"],
+  },
   server: {
     port: 5174,
   },
