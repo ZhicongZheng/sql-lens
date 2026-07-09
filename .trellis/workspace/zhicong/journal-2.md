@@ -434,3 +434,36 @@ Added a GitHub Actions Rust CI workflow for format, clippy, and workspace tests 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 74: Build Connections page (Issue 077)
+
+**Date**: 2026-07-09
+**Task**: Build Connections page (Issue 077)
+**Branch**: `main`
+
+### Summary
+
+Implemented Connections page with active/closed filter, table view, loading/empty/error states. All ACs met, trellis-check passed, committed.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `94a2aec` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
