@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { AlertTriangleIcon, ChevronDownIcon, SearchIcon, XIcon } from "lucide-react";
+import { AlertTriangleIcon, ChevronDownIcon, PauseIcon, PlayIcon, SearchIcon, XIcon } from "lucide-react";
 
 import { useDetailDrawer } from "@/app/providers/detail-drawer-provider";
 import { useSqlEvents } from "@/lib/api/hooks";
@@ -318,6 +318,7 @@ export function SqlEventsRoute() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [allItems, setAllItems] = useState<SqlEvent[]>([]);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [isPaused, setIsPaused] = useState(false);
 
   const filters = useMemo(() => filtersFromParams(searchParams), [searchParams]);
 
@@ -340,7 +341,7 @@ export function SqlEventsRoute() {
   const { openDrawer } = useDetailDrawer();
 
   // WebSocket live stream.
-  const { connectionState } = useSqlStream();
+  const { connectionState, queuedCount } = useSqlStream({ paused: isPaused });
 
   // Seed allItems on first successful load.
   useEffect(() => {
@@ -407,29 +408,50 @@ export function SqlEventsRoute() {
           <span className="flex items-center gap-1.5 text-xs">
             <span
               className={`size-1.5 rounded-full ${
-                connectionState === "open"
-                  ? "bg-status-ok"
-                  : connectionState === "closed"
-                    ? "bg-status-error"
-                    : "bg-status-slow"
+                isPaused
+                  ? "bg-status-slow"
+                  : connectionState === "open"
+                    ? "bg-status-ok"
+                    : connectionState === "closed"
+                      ? "bg-status-error"
+                      : "bg-status-slow"
               }`}
             />
             <span
               className={
-                connectionState === "open"
-                  ? "text-status-ok"
-                  : connectionState === "closed"
-                    ? "text-status-error"
-                    : "text-status-slow"
+                isPaused
+                  ? "text-status-slow"
+                  : connectionState === "open"
+                    ? "text-status-ok"
+                    : connectionState === "closed"
+                      ? "text-status-error"
+                      : "text-status-slow"
               }
             >
-              {connectionState === "open"
-                ? "Live"
-                : connectionState === "closed"
-                  ? "Disconnected"
-                  : "Connecting…"}
+              {isPaused
+                ? "Paused"
+                : connectionState === "open"
+                  ? "Live"
+                  : connectionState === "closed"
+                    ? "Disconnected"
+                    : "Connecting…"}
             </span>
           </span>
+          {isPaused && queuedCount > 0 && (
+            <Badge variant="secondary" className="text-xs">
+              {queuedCount} queued
+            </Badge>
+          )}
+          {/* Pause/resume toggle */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            onClick={() => setIsPaused((p) => !p)}
+            aria-label={isPaused ? "Resume live updates" : "Pause live updates"}
+          >
+            {isPaused ? <PlayIcon className="size-3.5" /> : <PauseIcon className="size-3.5" />}
+          </Button>
         </div>
         {isFetching && !isLoading && (
           <span className="text-xs text-muted-foreground">Refreshing…</span>
