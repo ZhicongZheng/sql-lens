@@ -136,7 +136,10 @@ Current implementation:
 - `SqliteEventStore::new` applies the schema before use.
 - `insert_event` writes one redacted `SqlEvent` and its parameters in one SQLite transaction.
 - Structured protocol metadata and parameter values are stored as JSON text.
-- Runtime capture fan-out, file lifecycle configuration, retention cleanup, and SQLite timeline queries are separate tasks.
+- `query_timeline` reads persisted `sql_events` newest-first with storage-owned
+  cursors and the shared SQL event filter contract.
+- Runtime capture fan-out, file lifecycle configuration, retention cleanup, and
+  API/runtime SQLite selection are separate tasks.
 
 ## DuckDB Future
 

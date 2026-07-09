@@ -216,3 +216,118 @@ let event = redact_sql_event(event.clone(), &RedactionPolicy::default());
 let tx = connection.transaction()?;
 // Insert sql_events and sql_parameters in tx, then commit.
 ```
+
+## Scenario: SQLite Timeline Queries
+
+### 1. Scope / Trigger
+
+- Trigger: a task reads persisted `sql_events` from SQLite or changes the
+  SQLite timeline query API.
+- SQLite timeline reads remain storage-local until a separate runtime wiring
+  task chooses SQLite as an application storage backend.
+- Query code belongs in `sql-lens-storage`; API handlers and UI code should
+  translate into storage query structs instead of duplicating filter behavior.
+
+### 2. Signatures
+
+Current storage-local API:
+
+```rust
+pub struct SqliteTimelineQuery {
+    pub limit: NonZeroUsize,
+    pub cursor: Option<SqliteTimelineCursor>,
+    pub filter: SqlEventFilter,
+}
+
+pub struct SqliteTimelineCursor {
+    pub before_timestamp: Timestamp,
+    pub before_event_id: SqlEventId,
+}
+
+pub struct SqliteTimelinePage {
+    pub events: Vec<SqliteEventRow>,
+    pub next_cursor: Option<SqliteTimelineCursor>,
+}
+
+pub enum SqliteTimelineQueryError {
+    InvalidFilter(SqlEventFilterError),
+    Sqlite(rusqlite::Error),
+}
+
+impl SqliteEventStore {
+    pub fn query_timeline(
+        &self,
+        query: SqliteTimelineQuery,
+    ) -> Result<SqliteTimelinePage, SqliteTimelineQueryError>;
+}
+```
+
+### 3. Contracts
+
+- Query ordering is deterministic: `ORDER BY timestamp DESC, id DESC`.
+- Cursors mean "return rows older than this row in SQLite ordering" using
+  `(timestamp, id)` rather than ring-buffer sequence numbers.
+- Use `limit + 1` internally to detect whether a next cursor exists.
+- Validate `SqlEventFilter` before preparing SQL.
+- Common indexed filters should become SQL predicates:
+  `target_name`, `protocol`, `database_type`, `database_name`, `user_name`,
+  `status`, `fingerprint`, `timestamp`, and `duration_ms`.
+- SQL text search should match ring-buffer substring semantics across
+  `original_sql`, `normalized_sql`, and `expanded_sql`. Avoid wildcard behavior
+  that treats user text as a SQL pattern.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Invalid duration range | Return `SqliteTimelineQueryError::InvalidFilter` |
+| Invalid timestamp range | Return `SqliteTimelineQueryError::InvalidFilter` |
+| SQLite prepare/query/read fails | Return `SqliteTimelineQueryError::Sqlite` with source |
+| No matching rows | Return an empty page and `next_cursor: None` |
+| Final page has no older rows | Return `next_cursor: None` |
+| Newer rows inserted after cursor creation | Existing cursor still pages older rows without duplicates |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A SQLite timeline query uses `SqlEventFilter` and receives persisted rows
+  newest-first, then uses `next_cursor` to request older rows.
+
+Base:
+
+- The page returns `SqliteEventRow` scalar readback rows. Full `SqlEvent`
+  reconstruction from parameters and metadata can be added by a later task.
+
+Bad:
+
+- Using offset pagination for timelines.
+- Sorting only by timestamp, which is unstable for multiple events at the same
+  timestamp.
+- Building SQL with user-provided values interpolated into SQL strings.
+
+### 6. Tests Required
+
+- Newest-first ordering.
+- Equal-timestamp deterministic ordering by ID.
+- Limit and next cursor.
+- Multi-page cursor behavior without duplicates.
+- Cursor stability after newer inserts.
+- Indexed/common filters and SQL text/fingerprint filters.
+- Invalid filter range errors preserve the underlying `SqlEventFilterError`.
+- Empty result page behavior.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let sql = format!("SELECT * FROM sql_events WHERE original_sql LIKE '%{text}%'");
+```
+
+#### Correct
+
+```rust
+query.filter.validate()?;
+// Build predicates from fixed SQL fragments and bind all user/filter values.
+```

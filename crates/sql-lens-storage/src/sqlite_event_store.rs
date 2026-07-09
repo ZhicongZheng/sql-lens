@@ -1,11 +1,13 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use std::{error::Error, fmt, num::NonZeroUsize};
+
+use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use serde::Serialize;
 use sql_lens_core::{
-    CaptureStatus, RedactionPolicy, SqlEvent, SqlEventId, SqlEventKind, SqlParameterValue,
-    redact_sql_event,
+    CaptureStatus, DatabaseType, DurationMillis, ProtocolName, RedactionPolicy, SqlEvent,
+    SqlEventId, SqlEventKind, SqlParameterValue, Timestamp, redact_sql_event,
 };
 
-use crate::apply_sqlite_schema;
+use crate::{SqlEventFilter, SqlEventFilterError, apply_sqlite_schema};
 
 #[derive(Debug)]
 pub struct SqliteEventStore {
@@ -49,6 +51,61 @@ pub struct SqliteParameterRow {
     pub value_type: String,
     pub value_json: String,
     pub redacted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteTimelineQuery {
+    pub limit: NonZeroUsize,
+    pub cursor: Option<SqliteTimelineCursor>,
+    pub filter: SqlEventFilter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteTimelineCursor {
+    pub before_timestamp: Timestamp,
+    pub before_event_id: SqlEventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteTimelinePage {
+    pub events: Vec<SqliteEventRow>,
+    pub next_cursor: Option<SqliteTimelineCursor>,
+}
+
+#[derive(Debug)]
+pub enum SqliteTimelineQueryError {
+    InvalidFilter(SqlEventFilterError),
+    Sqlite(rusqlite::Error),
+}
+
+impl fmt::Display for SqliteTimelineQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidFilter(error) => write!(f, "{error}"),
+            Self::Sqlite(error) => write!(f, "sqlite timeline query failed: {error}"),
+        }
+    }
+}
+
+impl Error for SqliteTimelineQueryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidFilter(error) => Some(error),
+            Self::Sqlite(error) => Some(error),
+        }
+    }
+}
+
+impl From<SqlEventFilterError> for SqliteTimelineQueryError {
+    fn from(error: SqlEventFilterError) -> Self {
+        Self::InvalidFilter(error)
+    }
+}
+
+impl From<rusqlite::Error> for SqliteTimelineQueryError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
+    }
 }
 
 impl SqliteEventStore {
@@ -235,6 +292,220 @@ impl SqliteEventStore {
             .query_map(params![&id.0], parameter_row_from_sqlite)?
             .collect()
     }
+
+    pub fn query_timeline(
+        &self,
+        query: SqliteTimelineQuery,
+    ) -> Result<SqliteTimelinePage, SqliteTimelineQueryError> {
+        query.filter.validate()?;
+
+        let limit = query.limit.get();
+        let fetch_limit = limit.saturating_add(1);
+        let mut sql = String::from(
+            r#"
+            SELECT
+                id,
+                timestamp,
+                target_name,
+                protocol,
+                database_type,
+                connection_id,
+                client_addr,
+                backend_addr,
+                user_name,
+                database_name,
+                kind,
+                status,
+                duration_ms,
+                original_sql,
+                normalized_sql,
+                expanded_sql,
+                fingerprint,
+                affected_rows,
+                returned_rows,
+                error_code,
+                error_sql_state,
+                error_message,
+                started_at,
+                ended_at,
+                metadata_json
+            FROM sql_events
+            "#,
+        );
+        let mut predicates = Vec::new();
+        let mut parameters: Vec<Box<dyn ToSql>> = Vec::new();
+
+        push_cursor_predicate(&mut predicates, &mut parameters, query.cursor);
+        push_filter_predicates(&mut predicates, &mut parameters, &query.filter);
+
+        if !predicates.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&predicates.join(" AND "));
+        }
+
+        sql.push_str(" ORDER BY timestamp DESC, id DESC LIMIT ?");
+        parameters.push(Box::new(usize_to_i64(fetch_limit)));
+
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut events = statement
+            .query_map(
+                params_from_iter(parameters.iter().map(|parameter| parameter.as_ref())),
+                event_row_from_sqlite,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let has_more_older_events = events.len() > limit;
+        if has_more_older_events {
+            events.truncate(limit);
+        }
+
+        let next_cursor = if has_more_older_events {
+            events.last().map(|event| SqliteTimelineCursor {
+                before_timestamp: Timestamp(event.timestamp.clone()),
+                before_event_id: SqlEventId(event.id.clone()),
+            })
+        } else {
+            None
+        };
+
+        Ok(SqliteTimelinePage {
+            events,
+            next_cursor,
+        })
+    }
+}
+
+fn push_cursor_predicate(
+    predicates: &mut Vec<&'static str>,
+    parameters: &mut Vec<Box<dyn ToSql>>,
+    cursor: Option<SqliteTimelineCursor>,
+) {
+    if let Some(cursor) = cursor {
+        predicates.push("((timestamp < ?) OR (timestamp = ? AND id < ?))");
+        parameters.push(Box::new(cursor.before_timestamp.0.clone()));
+        parameters.push(Box::new(cursor.before_timestamp.0));
+        parameters.push(Box::new(cursor.before_event_id.0));
+    }
+}
+
+fn push_filter_predicates(
+    predicates: &mut Vec<&'static str>,
+    parameters: &mut Vec<Box<dyn ToSql>>,
+    filter: &SqlEventFilter,
+) {
+    push_optional_string_filter(
+        predicates,
+        parameters,
+        "target_name = ?",
+        filter.target_name.as_deref(),
+    );
+    push_optional_protocol_filter(
+        predicates,
+        parameters,
+        "protocol = ?",
+        filter.protocol.as_ref(),
+    );
+    push_optional_database_type_filter(
+        predicates,
+        parameters,
+        "database_type = ?",
+        filter.database_type.as_ref(),
+    );
+    push_optional_string_filter(
+        predicates,
+        parameters,
+        "database_name = ?",
+        filter.database.as_deref(),
+    );
+    push_optional_string_filter(
+        predicates,
+        parameters,
+        "user_name = ?",
+        filter.user.as_deref(),
+    );
+    push_optional_string_filter(
+        predicates,
+        parameters,
+        "client_addr = ?",
+        filter.client_addr.as_deref(),
+    );
+
+    if let Some(status) = filter.status {
+        predicates.push("status = ?");
+        parameters.push(Box::new(capture_status_name(status).to_owned()));
+    }
+
+    if let Some(min_duration) = filter.min_duration {
+        predicates.push("duration_ms >= ?");
+        parameters.push(Box::new(duration_millis_to_i64(min_duration)));
+    }
+
+    if let Some(max_duration) = filter.max_duration {
+        predicates.push("duration_ms <= ?");
+        parameters.push(Box::new(duration_millis_to_i64(max_duration)));
+    }
+
+    if let Some(text) = filter.text.as_deref() {
+        predicates.push(
+            "(instr(original_sql, ?) > 0 OR instr(COALESCE(normalized_sql, ''), ?) > 0 OR instr(COALESCE(expanded_sql, ''), ?) > 0)",
+        );
+        parameters.push(Box::new(text.to_owned()));
+        parameters.push(Box::new(text.to_owned()));
+        parameters.push(Box::new(text.to_owned()));
+    }
+
+    push_optional_string_filter(
+        predicates,
+        parameters,
+        "fingerprint = ?",
+        filter.fingerprint.as_deref(),
+    );
+
+    if let Some(from) = &filter.from {
+        predicates.push("timestamp >= ?");
+        parameters.push(Box::new(from.0.clone()));
+    }
+
+    if let Some(to) = &filter.to {
+        predicates.push("timestamp <= ?");
+        parameters.push(Box::new(to.0.clone()));
+    }
+}
+
+fn push_optional_string_filter(
+    predicates: &mut Vec<&'static str>,
+    parameters: &mut Vec<Box<dyn ToSql>>,
+    predicate: &'static str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        predicates.push(predicate);
+        parameters.push(Box::new(value.to_owned()));
+    }
+}
+
+fn push_optional_protocol_filter(
+    predicates: &mut Vec<&'static str>,
+    parameters: &mut Vec<Box<dyn ToSql>>,
+    predicate: &'static str,
+    value: Option<&ProtocolName>,
+) {
+    if let Some(value) = value {
+        predicates.push(predicate);
+        parameters.push(Box::new(value.0.clone()));
+    }
+}
+
+fn push_optional_database_type_filter(
+    predicates: &mut Vec<&'static str>,
+    parameters: &mut Vec<Box<dyn ToSql>>,
+    predicate: &'static str,
+    value: Option<&DatabaseType>,
+) {
+    if let Some(value) = value {
+        predicates.push(predicate);
+        parameters.push(Box::new(value.0.clone()));
+    }
 }
 
 fn event_row_from_sqlite(row: &rusqlite::Row<'_>) -> rusqlite::Result<SqliteEventRow> {
@@ -309,6 +580,14 @@ fn u64_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
+fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn duration_millis_to_i64(value: DurationMillis) -> i64 {
+    u64_to_i64(value.0)
+}
+
 fn redacted_flag(redacted: bool) -> i64 {
     i64::from(redacted)
 }
@@ -352,6 +631,8 @@ fn parameter_value_type(value: &SqlParameterValue) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use rusqlite::Connection;
     use serde_json::Value;
     use sql_lens_core::{
@@ -519,10 +800,310 @@ mod tests {
         assert_eq!(row, None);
     }
 
+    #[test]
+    fn sqlite_timeline_returns_newest_events_first() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_1", "2026-07-09T08:00:00Z"),
+                event_at("evt_2", "2026-07-09T08:01:00Z"),
+                event_at("evt_3", "2026-07-09T08:02:00Z"),
+            ],
+        );
+
+        let page = query_page(&store, timeline_query(3, None));
+
+        assert_eq!(row_ids(&page.events), ["evt_3", "evt_2", "evt_1"]);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn sqlite_timeline_uses_event_id_to_order_equal_timestamps() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_a", "2026-07-09T08:00:00Z"),
+                event_at("evt_c", "2026-07-09T08:00:00Z"),
+                event_at("evt_b", "2026-07-09T08:00:00Z"),
+            ],
+        );
+
+        let page = query_page(&store, timeline_query(3, None));
+
+        assert_eq!(row_ids(&page.events), ["evt_c", "evt_b", "evt_a"]);
+    }
+
+    #[test]
+    fn sqlite_timeline_cursor_pages_older_events_without_duplicates() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_1", "2026-07-09T08:00:00Z"),
+                event_at("evt_2", "2026-07-09T08:01:00Z"),
+                event_at("evt_3", "2026-07-09T08:02:00Z"),
+                event_at("evt_4", "2026-07-09T08:03:00Z"),
+                event_at("evt_5", "2026-07-09T08:04:00Z"),
+            ],
+        );
+
+        let first_page = query_page(&store, timeline_query(2, None));
+        let second_page = query_page(&store, timeline_query(2, first_page.next_cursor.clone()));
+        let third_page = query_page(&store, timeline_query(2, second_page.next_cursor.clone()));
+
+        assert_eq!(row_ids(&first_page.events), ["evt_5", "evt_4"]);
+        assert_eq!(row_ids(&second_page.events), ["evt_3", "evt_2"]);
+        assert_eq!(row_ids(&third_page.events), ["evt_1"]);
+        assert!(first_page.next_cursor.is_some());
+        assert!(second_page.next_cursor.is_some());
+        assert_eq!(third_page.next_cursor, None);
+    }
+
+    #[test]
+    fn sqlite_timeline_cursor_is_stable_after_newer_insert() {
+        let mut store = in_memory_store();
+        insert_events(
+            &mut store,
+            vec![
+                event_at("evt_1", "2026-07-09T08:00:00Z"),
+                event_at("evt_2", "2026-07-09T08:01:00Z"),
+                event_at("evt_3", "2026-07-09T08:02:00Z"),
+                event_at("evt_4", "2026-07-09T08:03:00Z"),
+            ],
+        );
+
+        let first_page = query_page(&store, timeline_query(2, None));
+        store
+            .insert_event(&event_at("evt_5", "2026-07-09T08:04:00Z"))
+            .expect("newer event insert should succeed");
+        let second_page = query_page(&store, timeline_query(2, first_page.next_cursor.clone()));
+
+        assert_eq!(row_ids(&first_page.events), ["evt_4", "evt_3"]);
+        assert_eq!(row_ids(&second_page.events), ["evt_2", "evt_1"]);
+        assert_eq!(second_page.next_cursor, None);
+    }
+
+    #[test]
+    fn sqlite_timeline_filters_by_common_indexed_fields() {
+        let mut store = in_memory_store();
+        let mut target = event_at("evt_target", "2026-07-09T08:00:00Z");
+        target.target_name = Some("starrocks-local".to_owned());
+        target.protocol = ProtocolName("mysql".to_owned());
+        target.database_type = DatabaseType("starrocks".to_owned());
+        target.database = Some("analytics".to_owned());
+        target.user = Some("analyst".to_owned());
+        target.status = CaptureStatus::Error;
+
+        let mut wrong_target = target.clone();
+        wrong_target.id = SqlEventId("evt_wrong_target".to_owned());
+        wrong_target.target_name = Some("mysql-local".to_owned());
+        let mut wrong_database = target.clone();
+        wrong_database.id = SqlEventId("evt_wrong_database".to_owned());
+        wrong_database.database = Some("ops".to_owned());
+        let mut wrong_user = target.clone();
+        wrong_user.id = SqlEventId("evt_wrong_user".to_owned());
+        wrong_user.user = Some("app".to_owned());
+        let mut wrong_status = target.clone();
+        wrong_status.id = SqlEventId("evt_wrong_status".to_owned());
+        wrong_status.status = CaptureStatus::Ok;
+
+        insert_events(
+            &mut store,
+            vec![
+                target,
+                wrong_target,
+                wrong_database,
+                wrong_user,
+                wrong_status,
+            ],
+        );
+
+        let page = query_page(
+            &store,
+            filtered_timeline_query(
+                10,
+                None,
+                SqlEventFilter {
+                    target_name: Some("starrocks-local".to_owned()),
+                    protocol: Some(ProtocolName("mysql".to_owned())),
+                    database_type: Some(DatabaseType("starrocks".to_owned())),
+                    database: Some("analytics".to_owned()),
+                    user: Some("analyst".to_owned()),
+                    status: Some(CaptureStatus::Error),
+                    ..SqlEventFilter::default()
+                },
+            ),
+        );
+
+        assert_eq!(row_ids(&page.events), ["evt_target"]);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn sqlite_timeline_filters_by_duration_timestamp_text_and_fingerprint() {
+        let mut store = in_memory_store();
+        let mut target = event_at("evt_target", "2026-07-09T08:05:00Z");
+        target.duration = DurationMillis(7);
+        target.original_sql = "SELECT * FROM invoices WHERE id = ?".to_owned();
+        target.normalized_sql = Some("select * from orders where id = ?".to_owned());
+        target.expanded_sql = None;
+        target.fingerprint = Some("select * from orders where id = ?".to_owned());
+
+        let mut wrong_duration = target.clone();
+        wrong_duration.id = SqlEventId("evt_wrong_duration".to_owned());
+        wrong_duration.duration = DurationMillis(20);
+        let mut wrong_timestamp = target.clone();
+        wrong_timestamp.id = SqlEventId("evt_wrong_timestamp".to_owned());
+        wrong_timestamp.timestamp = Timestamp("2026-07-09T08:20:00Z".to_owned());
+        let mut wrong_text = target.clone();
+        wrong_text.id = SqlEventId("evt_wrong_text".to_owned());
+        wrong_text.normalized_sql = Some("select * from invoices where id = ?".to_owned());
+        let mut wrong_fingerprint = target.clone();
+        wrong_fingerprint.id = SqlEventId("evt_wrong_fingerprint".to_owned());
+        wrong_fingerprint.fingerprint = Some("select * from users where id = ?".to_owned());
+
+        insert_events(
+            &mut store,
+            vec![
+                target,
+                wrong_duration,
+                wrong_timestamp,
+                wrong_text,
+                wrong_fingerprint,
+            ],
+        );
+
+        let page = query_page(
+            &store,
+            filtered_timeline_query(
+                10,
+                None,
+                SqlEventFilter {
+                    min_duration: Some(DurationMillis(2)),
+                    max_duration: Some(DurationMillis(8)),
+                    text: Some("orders".to_owned()),
+                    fingerprint: Some("select * from orders where id = ?".to_owned()),
+                    from: Some(Timestamp("2026-07-09T08:01:00Z".to_owned())),
+                    to: Some(Timestamp("2026-07-09T08:09:00Z".to_owned())),
+                    ..SqlEventFilter::default()
+                },
+            ),
+        );
+
+        assert_eq!(row_ids(&page.events), ["evt_target"]);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn sqlite_timeline_rejects_invalid_duration_range() {
+        let store = in_memory_store();
+
+        let error = store
+            .query_timeline(filtered_timeline_query(
+                10,
+                None,
+                SqlEventFilter {
+                    min_duration: Some(DurationMillis(10)),
+                    max_duration: Some(DurationMillis(5)),
+                    ..SqlEventFilter::default()
+                },
+            ))
+            .expect_err("invalid duration range should fail");
+
+        assert!(matches!(
+            error,
+            SqliteTimelineQueryError::InvalidFilter(SqlEventFilterError::InvalidDurationRange {
+                min: DurationMillis(10),
+                max: DurationMillis(5),
+            })
+        ));
+        assert!(!error.to_string().is_empty());
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn sqlite_timeline_rejects_invalid_timestamp_range() {
+        let store = in_memory_store();
+
+        let error = store
+            .query_timeline(filtered_timeline_query(
+                10,
+                None,
+                SqlEventFilter {
+                    from: Some(Timestamp("2026-07-09T08:10:00Z".to_owned())),
+                    to: Some(Timestamp("2026-07-09T08:00:00Z".to_owned())),
+                    ..SqlEventFilter::default()
+                },
+            ))
+            .expect_err("invalid timestamp range should fail");
+
+        assert!(matches!(
+            error,
+            SqliteTimelineQueryError::InvalidFilter(
+                SqlEventFilterError::InvalidTimestampRange { .. }
+            )
+        ));
+        assert!(!error.to_string().is_empty());
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn sqlite_timeline_returns_empty_page_without_next_cursor() {
+        let store = in_memory_store();
+
+        let page = query_page(&store, timeline_query(10, None));
+
+        assert!(page.events.is_empty());
+        assert_eq!(page.next_cursor, None);
+    }
+
     fn in_memory_store() -> SqliteEventStore {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
 
         SqliteEventStore::new(connection).expect("sqlite store should initialize")
+    }
+
+    fn insert_events(store: &mut SqliteEventStore, events: Vec<SqlEvent>) {
+        for event in events {
+            store
+                .insert_event(&event)
+                .expect("event insert should succeed");
+        }
+    }
+
+    fn event_at(id: &str, timestamp: &str) -> SqlEvent {
+        let mut event = test_event(id);
+        event.timestamp = Timestamp(timestamp.to_owned());
+        event.timings.started_at = Timestamp(timestamp.to_owned());
+        event
+    }
+
+    fn timeline_query(limit: usize, cursor: Option<SqliteTimelineCursor>) -> SqliteTimelineQuery {
+        filtered_timeline_query(limit, cursor, SqlEventFilter::default())
+    }
+
+    fn filtered_timeline_query(
+        limit: usize,
+        cursor: Option<SqliteTimelineCursor>,
+        filter: SqlEventFilter,
+    ) -> SqliteTimelineQuery {
+        SqliteTimelineQuery {
+            limit: NonZeroUsize::new(limit).expect("test limit should be non-zero"),
+            cursor,
+            filter,
+        }
+    }
+
+    fn query_page(store: &SqliteEventStore, query: SqliteTimelineQuery) -> SqliteTimelinePage {
+        store
+            .query_timeline(query)
+            .expect("test timeline query should succeed")
+    }
+
+    fn row_ids(events: &[SqliteEventRow]) -> Vec<&str> {
+        events.iter().map(|event| event.id.as_str()).collect()
     }
 
     fn test_event(id: &str) -> SqlEvent {

@@ -189,7 +189,7 @@ pub struct SqlEventFilter {
 }
 
 impl SqlEventFilter {
-    fn validate(&self) -> Result<(), SqlEventFilterError> {
+    pub(crate) fn validate(&self) -> Result<(), SqlEventFilterError> {
         if let (Some(min), Some(max)) = (self.min_duration, self.max_duration) {
             if min > max {
                 return Err(SqlEventFilterError::InvalidDurationRange { min, max });

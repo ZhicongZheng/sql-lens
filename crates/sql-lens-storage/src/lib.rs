@@ -14,5 +14,8 @@ pub use ring_buffer::{
     RingBufferAppendOutcome, RingBufferStats, RingBufferStore, RingBufferTimelineCursor,
     RingBufferTimelinePage, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
 };
-pub use sqlite_event_store::{SqliteEventRow, SqliteEventStore, SqliteParameterRow};
+pub use sqlite_event_store::{
+    SqliteEventRow, SqliteEventStore, SqliteParameterRow, SqliteTimelineCursor, SqliteTimelinePage,
+    SqliteTimelineQuery, SqliteTimelineQueryError,
+};
 pub use sqlite_schema::{SQLITE_SCHEMA_VERSION, apply_sqlite_schema};
