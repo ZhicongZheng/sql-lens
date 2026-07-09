@@ -6,6 +6,7 @@ mod connections;
 mod export;
 mod health;
 mod live_sql_events;
+mod openapi;
 mod protocols;
 mod replay;
 mod request_id;
@@ -16,6 +17,7 @@ mod statistics;
 mod test_support;
 mod websocket;
 
+pub use api_error::{ApiErrorBody, ApiErrorEnvelope};
 pub use api_state::{ApiState, DEFAULT_CONNECTION_STORE_CAPACITY, DEFAULT_EVENT_STORE_CAPACITY};
 pub use connections::{
     CONNECTION_DETAIL_PATH, CONNECTIONS_PATH, ConnectionListResponse, ConnectionResponse,
@@ -26,6 +28,7 @@ pub use live_sql_events::{
     DEFAULT_SQL_EVENT_BROADCAST_CAPACITY, SqlEventBroadcastOutcome, SqlEventBroadcastStats,
     SqlEventBroadcaster, SqlEventSubscription, SqlEventSubscriptionError,
 };
+pub use openapi::{openapi, openapi_yaml};
 pub use protocols::{PROTOCOLS_PATH, ProtocolListResponse, ProtocolResponse};
 pub use replay::{REPLAY_PREVIEW_PATH, ReplayPreviewRequest, ReplayPreviewResponse};
 pub use request_id::{REQUEST_ID_HEADER, RequestId};

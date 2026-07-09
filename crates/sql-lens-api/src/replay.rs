@@ -1,6 +1,7 @@
 use axum::{Extension, Json, Router, routing::post};
 use serde::{Deserialize, Serialize};
 use sql_lens_core::{SqlEvent, SqlEventId};
+use utoipa::ToSchema;
 
 use crate::{ApiState, api_error::ApiEndpointError};
 
@@ -12,13 +13,13 @@ pub(crate) fn routes() -> Router {
     Router::new().route(REPLAY_PREVIEW_PATH, post(preview_replay))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ReplayPreviewRequest {
     pub event_id: Option<String>,
     pub sql: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ReplayPreviewResponse {
     pub source: String,
     pub event_id: Option<String>,

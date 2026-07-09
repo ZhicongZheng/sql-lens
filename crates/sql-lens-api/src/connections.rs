@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sql_lens_core::{ConnectionId, ConnectionInfo, ConnectionState, Timestamp};
+use utoipa::ToSchema;
 
 use crate::{ApiState, api_error::ApiEndpointError};
 
@@ -26,12 +27,12 @@ struct ConnectionListQueryParams {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ConnectionListResponse {
     pub items: Vec<ConnectionResponse>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ConnectionResponse {
     pub id: String,
     pub target_name: Option<String>,

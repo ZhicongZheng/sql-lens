@@ -13,6 +13,7 @@ use sql_lens_core::{
 use sql_lens_storage::{
     RingBufferTimelineCursor, RingBufferTimelineQuery, SqlEventFilter, SqlEventFilterError,
 };
+use utoipa::ToSchema;
 
 use crate::{ApiState, api_error::ApiEndpointError};
 
@@ -47,13 +48,13 @@ pub(crate) struct SqlEventListQueryParams {
     to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlEventListResponse {
     pub items: Vec<SqlEventSummaryResponse>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlEventSummaryResponse {
     pub id: String,
     pub timestamp: String,
@@ -72,10 +73,11 @@ pub struct SqlEventSummaryResponse {
     pub expanded_sql: Option<String>,
     pub fingerprint: Option<String>,
     pub rows: Option<RowsSummaryResponse>,
+    #[schema(value_type = Object)]
     pub metadata: ProtocolMetadataResponse,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlEventDetailResponse {
     pub id: String,
     pub timestamp: String,
@@ -98,10 +100,11 @@ pub struct SqlEventDetailResponse {
     pub timings: QueryTimingResponse,
     pub rows: Option<RowsSummaryResponse>,
     pub error: Option<ErrorSummaryResponse>,
+    #[schema(value_type = Object)]
     pub metadata: ProtocolMetadataResponse,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlParameterResponse {
     pub index: u16,
     pub name: Option<String>,
@@ -109,14 +112,14 @@ pub struct SqlParameterResponse {
     pub redacted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SqlParameterValueResponse {
     #[serde(rename = "type")]
     pub value_type: String,
     pub value: Option<SqlParameterValueDataResponse>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum SqlParameterValueDataResponse {
     Integer(i64),
@@ -126,22 +129,23 @@ pub enum SqlParameterValueDataResponse {
     String(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct QueryTimingResponse {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub duration_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ErrorSummaryResponse {
     pub code: Option<String>,
     pub sql_state: Option<String>,
     pub message: String,
+    #[schema(value_type = Option<Object>)]
     pub metadata: Option<ProtocolMetadataResponse>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RowsSummaryResponse {
     pub affected: Option<u64>,
     pub returned: Option<u64>,
@@ -149,7 +153,7 @@ pub struct RowsSummaryResponse {
 
 pub type ProtocolMetadataResponse = BTreeMap<String, BTreeMap<String, MetadataValueResponse>>;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum MetadataValueResponse {
     String(String),

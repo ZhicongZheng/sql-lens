@@ -14,6 +14,7 @@ sql-lens-config = { path = "../sql-lens-config" }
 sql-lens-storage = { path = "../sql-lens-storage" }
 tokio = { version = "1", features = ["net", "sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
+utoipa = { version = "5.5", features = ["yaml"] }
 
 [dev-dependencies]
 futures-util = "0.3"

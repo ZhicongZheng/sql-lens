@@ -1,5 +1,6 @@
 use axum::{Json, Router, routing::get};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 pub const PROTOCOLS_PATH: &str = "/api/v1/protocols";
 
@@ -7,12 +8,12 @@ pub(crate) fn routes() -> Router {
     Router::new().route(PROTOCOLS_PATH, get(list_protocols))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ProtocolListResponse {
     pub items: Vec<ProtocolResponse>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ProtocolResponse {
     pub name: String,
     pub status: String,

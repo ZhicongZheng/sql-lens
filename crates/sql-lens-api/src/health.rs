@@ -2,11 +2,12 @@ use std::time::Instant;
 
 use axum::{Extension, Json, Router, routing::get};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 pub const HEALTH_PATH: &str = "/api/v1/health";
 const HEALTH_STATUS_OK: &str = "ok";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,

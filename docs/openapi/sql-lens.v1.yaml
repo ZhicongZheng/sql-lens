@@ -1,0 +1,885 @@
+openapi: 3.1.0
+info:
+  title: SQL Lens API
+  description: REST API for SQL Lens local SQL debugging state.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  version: 1.0.0
+paths:
+  /api/v1/connections:
+    get:
+      tags:
+      - connections
+      operationId: list_connections
+      parameters:
+      - name: limit
+        in: query
+        description: Maximum number of connections to return
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      responses:
+        '200':
+          description: Connection list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionListResponse'
+        '400':
+          description: Invalid query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/connections/{id}:
+    get:
+      tags:
+      - connections
+      operationId: get_connection_detail
+      parameters:
+      - name: id
+        in: path
+        description: Connection id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Connection detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionResponse'
+        '404':
+          description: Connection not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/health:
+    get:
+      tags:
+      - health
+      operationId: health
+      responses:
+        '200':
+          description: Health snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '404':
+          description: Route not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/protocols:
+    get:
+      tags:
+      - protocols
+      operationId: list_protocols
+      responses:
+        '200':
+          description: Protocol list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProtocolListResponse'
+  /api/v1/replay/preview:
+    post:
+      tags:
+      - replay
+      operationId: preview_replay
+      requestBody:
+        description: Exactly one of event_id or sql must be provided
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayPreviewRequest'
+        required: true
+      responses:
+        '200':
+          description: Replay preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayPreviewResponse'
+        '400':
+          description: Invalid replay preview request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '404':
+          description: SQL event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/sql-events:
+    get:
+      tags:
+      - sql-events
+      operationId: list_sql_events
+      parameters:
+      - name: limit
+        in: query
+        description: Maximum number of events to return
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      - name: cursor
+        in: query
+        description: Timeline cursor from a previous response
+        required: false
+        schema:
+          type: string
+      - name: target_name
+        in: query
+        description: Configured proxy target name
+        required: false
+        schema:
+          type: string
+      - name: protocol
+        in: query
+        description: Protocol name
+        required: false
+        schema:
+          type: string
+      - name: database_type
+        in: query
+        description: Database family
+        required: false
+        schema:
+          type: string
+      - name: database
+        in: query
+        description: Database/schema name
+        required: false
+        schema:
+          type: string
+      - name: user
+        in: query
+        description: Database user
+        required: false
+        schema:
+          type: string
+      - name: client_addr
+        in: query
+        description: Client socket address
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        description: Capture status
+        required: false
+        schema:
+          type: string
+      - name: min_duration_ms
+        in: query
+        description: Inclusive minimum duration
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: max_duration_ms
+        in: query
+        description: Inclusive maximum duration
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: q
+        in: query
+        description: SQL text search
+        required: false
+        schema:
+          type: string
+      - name: fingerprint
+        in: query
+        description: SQL fingerprint
+        required: false
+        schema:
+          type: string
+      - name: from
+        in: query
+        description: Inclusive start timestamp
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        description: Inclusive end timestamp
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: SQL event timeline page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SqlEventListResponse'
+        '400':
+          description: Invalid query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '404':
+          description: Route not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/sql-events/export:
+    get:
+      tags:
+      - sql-events
+      operationId: export_sql_events
+      parameters:
+      - name: format
+        in: query
+        description: 'Export format: json or ndjson'
+        required: false
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Maximum number of events to export
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+      - name: target_name
+        in: query
+        description: Configured proxy target name
+        required: false
+        schema:
+          type: string
+      - name: protocol
+        in: query
+        description: Protocol name
+        required: false
+        schema:
+          type: string
+      - name: database_type
+        in: query
+        description: Database family
+        required: false
+        schema:
+          type: string
+      - name: database
+        in: query
+        description: Database/schema name
+        required: false
+        schema:
+          type: string
+      - name: user
+        in: query
+        description: Database user
+        required: false
+        schema:
+          type: string
+      - name: client_addr
+        in: query
+        description: Client socket address
+        required: false
+        schema:
+          type: string
+      - name: status
+        in: query
+        description: Capture status
+        required: false
+        schema:
+          type: string
+      - name: min_duration_ms
+        in: query
+        description: Inclusive minimum duration
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: max_duration_ms
+        in: query
+        description: Inclusive maximum duration
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: q
+        in: query
+        description: SQL text search
+        required: false
+        schema:
+          type: string
+      - name: fingerprint
+        in: query
+        description: SQL fingerprint
+        required: false
+        schema:
+          type: string
+      - name: from
+        in: query
+        description: Inclusive start timestamp
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        description: Inclusive end timestamp
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Redacted SQL event export
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SqlEventDetailResponse'
+        '400':
+          description: Invalid export parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/sql-events/{id}:
+    get:
+      tags:
+      - sql-events
+      operationId: get_sql_event_detail
+      parameters:
+      - name: id
+        in: path
+        description: SQL event id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: SQL event detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SqlEventDetailResponse'
+        '404':
+          description: SQL event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+  /api/v1/statistics:
+    get:
+      tags:
+      - statistics
+      operationId: get_statistics
+      parameters:
+      - name: window
+        in: query
+        description: 'Statistics window: 1m or 60s'
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Live statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatisticsResponse'
+        '400':
+          description: Invalid query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+components:
+  schemas:
+    ApiErrorBody:
+      type: object
+      required:
+      - code
+      - message
+      - details
+      properties:
+        code:
+          type: string
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        message:
+          type: string
+        request_id:
+          type:
+          - string
+          - 'null'
+    ApiErrorEnvelope:
+      type: object
+      required:
+      - error
+      properties:
+        error:
+          $ref: '#/components/schemas/ApiErrorBody'
+    ConnectionListResponse:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectionResponse'
+    ConnectionResponse:
+      type: object
+      required:
+      - id
+      - protocol
+      - database_type
+      - client_addr
+      - backend_addr
+      - state
+      - connected_at
+      - bytes_in
+      - bytes_out
+      - query_count
+      properties:
+        backend_addr:
+          type: string
+        bytes_in:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes_out:
+          type: integer
+          format: int64
+          minimum: 0
+        client_addr:
+          type: string
+        closed_at:
+          type:
+          - string
+          - 'null'
+        connected_at:
+          type: string
+        database:
+          type:
+          - string
+          - 'null'
+        database_type:
+          type: string
+        id:
+          type: string
+        last_activity_at:
+          type:
+          - string
+          - 'null'
+        protocol:
+          type: string
+        query_count:
+          type: integer
+          format: int64
+          minimum: 0
+        state:
+          type: string
+        target_name:
+          type:
+          - string
+          - 'null'
+        user:
+          type:
+          - string
+          - 'null'
+    ErrorSummaryResponse:
+      type: object
+      required:
+      - message
+      properties:
+        code:
+          type:
+          - string
+          - 'null'
+        message:
+          type: string
+        metadata:
+          type:
+          - object
+          - 'null'
+        sql_state:
+          type:
+          - string
+          - 'null'
+    HealthResponse:
+      type: object
+      required:
+      - status
+      - version
+      - uptime_ms
+      properties:
+        status:
+          type: string
+        uptime_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        version:
+          type: string
+    LatencyPercentilesResponse:
+      type: object
+      required:
+      - p50
+      - p95
+      - p99
+      properties:
+        p50:
+          type: number
+          format: double
+        p95:
+          type: number
+          format: double
+        p99:
+          type: number
+          format: double
+    ProtocolListResponse:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtocolResponse'
+    ProtocolResponse:
+      type: object
+      required:
+      - name
+      - status
+      - databases
+      properties:
+        databases:
+          type: array
+          items:
+            type: string
+        name:
+          type: string
+        status:
+          type: string
+    QueryTimingResponse:
+      type: object
+      required:
+      - started_at
+      - duration_ms
+      properties:
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        ended_at:
+          type:
+          - string
+          - 'null'
+        started_at:
+          type: string
+    ReplayPreviewRequest:
+      type: object
+      properties:
+        event_id:
+          type:
+          - string
+          - 'null'
+        sql:
+          type:
+          - string
+          - 'null'
+    ReplayPreviewResponse:
+      type: object
+      required:
+      - source
+      - sql
+      - is_mutation
+      properties:
+        event_id:
+          type:
+          - string
+          - 'null'
+        is_mutation:
+          type: boolean
+        source:
+          type: string
+        sql:
+          type: string
+        warning:
+          type:
+          - string
+          - 'null'
+    RowsSummaryResponse:
+      type: object
+      properties:
+        affected:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        returned:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+    SqlEventDetailResponse:
+      type: object
+      required:
+      - id
+      - timestamp
+      - protocol
+      - database_type
+      - connection_id
+      - client_addr
+      - backend_addr
+      - kind
+      - status
+      - duration_ms
+      - original_sql
+      - parameters
+      - timings
+      - metadata
+      properties:
+        backend_addr:
+          type: string
+        client_addr:
+          type: string
+        connection_id:
+          type: string
+        database:
+          type:
+          - string
+          - 'null'
+        database_type:
+          type: string
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        error:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ErrorSummaryResponse'
+        expanded_sql:
+          type:
+          - string
+          - 'null'
+        fingerprint:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+        kind:
+          type: string
+        metadata:
+          type: object
+        normalized_sql:
+          type:
+          - string
+          - 'null'
+        original_sql:
+          type: string
+        parameters:
+          type: array
+          items:
+            $ref: '#/components/schemas/SqlParameterResponse'
+        protocol:
+          type: string
+        rows:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RowsSummaryResponse'
+        status:
+          type: string
+        target_name:
+          type:
+          - string
+          - 'null'
+        timestamp:
+          type: string
+        timings:
+          $ref: '#/components/schemas/QueryTimingResponse'
+        user:
+          type:
+          - string
+          - 'null'
+    SqlEventListResponse:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SqlEventSummaryResponse'
+        next_cursor:
+          type:
+          - string
+          - 'null'
+    SqlEventSummaryResponse:
+      type: object
+      required:
+      - id
+      - timestamp
+      - protocol
+      - database_type
+      - connection_id
+      - client_addr
+      - backend_addr
+      - kind
+      - status
+      - duration_ms
+      - original_sql
+      - metadata
+      properties:
+        backend_addr:
+          type: string
+        client_addr:
+          type: string
+        connection_id:
+          type: string
+        database:
+          type:
+          - string
+          - 'null'
+        database_type:
+          type: string
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+        expanded_sql:
+          type:
+          - string
+          - 'null'
+        fingerprint:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+        kind:
+          type: string
+        metadata:
+          type: object
+        original_sql:
+          type: string
+        protocol:
+          type: string
+        rows:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/RowsSummaryResponse'
+        status:
+          type: string
+        target_name:
+          type:
+          - string
+          - 'null'
+        timestamp:
+          type: string
+        user:
+          type:
+          - string
+          - 'null'
+    SqlParameterResponse:
+      type: object
+      required:
+      - index
+      - value
+      - redacted
+      properties:
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+        name:
+          type:
+          - string
+          - 'null'
+        redacted:
+          type: boolean
+        value:
+          $ref: '#/components/schemas/SqlParameterValueResponse'
+    SqlParameterValueDataResponse:
+      oneOf:
+      - type: integer
+        format: int64
+      - type: integer
+        format: int64
+        minimum: 0
+      - type: number
+        format: double
+      - type: boolean
+      - type: string
+    SqlParameterValueResponse:
+      type: object
+      required:
+      - type
+      properties:
+        type:
+          type: string
+        value:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/SqlParameterValueDataResponse'
+    StatisticsResponse:
+      type: object
+      required:
+      - window
+      - qps
+      - error_rate
+      - slow_count
+      - latency_ms
+      - active_connections
+      properties:
+        active_connections:
+          type: integer
+          minimum: 0
+        error_rate:
+          type: number
+          format: double
+        latency_ms:
+          $ref: '#/components/schemas/LatencyPercentilesResponse'
+        qps:
+          type: number
+          format: double
+        slow_count:
+          type: integer
+          format: int64
+          minimum: 0
+        window:
+          type: string
+tags:
+- name: health
+  description: Process health
+- name: sql-events
+  description: Captured SQL event timeline
+- name: connections
+  description: Observed database connections
+- name: statistics
+  description: Live aggregate statistics
+- name: protocols
+  description: Supported and planned protocols
+- name: replay
+  description: Replay preview helpers

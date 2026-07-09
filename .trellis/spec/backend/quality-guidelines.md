@@ -5250,6 +5250,57 @@ For REST error response changes:
 - Run `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
+## Scenario: OpenAPI Generation Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-api` changes REST DTOs, paths, query parameters, request bodies, response bodies, or shared API error envelopes.
+- The generated document at `docs/openapi/sql-lens.v1.yaml` is a public frontend and release contract.
+- WebSocket routes are not REST endpoints and should not be added as OpenAPI paths.
+
+### 2. Signatures
+
+Generation command:
+
+```bash
+rtk cargo run -p sql-lens-api --example generate-openapi > docs/openapi/sql-lens.v1.yaml
+```
+
+Public API helpers:
+
+```rust
+pub fn openapi() -> utoipa::openapi::OpenApi;
+pub fn openapi_yaml() -> Result<String, Box<dyn std::error::Error + Send + Sync + 'static>>;
+```
+
+### 3. Contracts
+
+- REST response/request DTOs derive `utoipa::ToSchema` when they are part of the public API contract.
+- The OpenAPI aggregate lives in `sql-lens-api`; app/runtime crates do not generate the document.
+- OpenAPI marker functions may describe routes without being runtime handlers.
+- Shared `ApiErrorEnvelope` is included as a schema for non-2xx REST responses.
+- The committed YAML must be regenerated in the same change that modifies public REST API shape.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| A REST endpoint is added or removed | Update the OpenAPI path list and regenerated YAML |
+| A REST DTO field changes | Update schema derives or hints and regenerated YAML |
+| Protocol metadata appears in REST DTOs | Keep it schema-compatible as a JSON object unless a stable typed schema exists |
+| Generated YAML differs from the committed file | Fail the stale-output test with the regeneration command |
+
+### 5. Tests Required
+
+For OpenAPI or REST contract changes:
+
+- Test that all implemented REST paths are present in the generated document.
+- Test that generated YAML exactly matches `docs/openapi/sql-lens.v1.yaml`.
+- Run `cargo fmt --check`.
+- Run `cargo test -p sql-lens-api`.
+- Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## Scenario: Health Endpoint Contracts
 
 ### 1. Scope / Trigger

@@ -407,6 +407,12 @@ The project should publish an OpenAPI document for every release:
 docs/openapi/sql-lens.v1.yaml
 ```
 
+Regenerate it from backend API contracts with:
+
+```bash
+rtk cargo run -p sql-lens-api --example generate-openapi > docs/openapi/sql-lens.v1.yaml
+```
+
 Rules:
 
 - REST endpoints must be represented in OpenAPI.

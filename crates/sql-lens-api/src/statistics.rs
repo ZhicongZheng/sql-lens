@@ -1,5 +1,6 @@
 use axum::{Extension, Json, Router, extract::Query, routing::get};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::{ApiState, api_error::ApiEndpointError};
 
@@ -15,7 +16,7 @@ struct StatisticsQueryParams {
     window: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct StatisticsResponse {
     pub window: String,
     pub qps: f64,
@@ -25,7 +26,7 @@ pub struct StatisticsResponse {
     pub active_connections: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct LatencyPercentilesResponse {
     pub p50: f64,
     pub p95: f64,

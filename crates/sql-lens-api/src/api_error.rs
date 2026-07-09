@@ -7,20 +7,21 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sql_lens_core::ApiErrorCode;
+use utoipa::ToSchema;
 
 use crate::RequestId;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ApiErrorEnvelope {
-    error: ApiErrorBody,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ApiErrorEnvelope {
+    pub error: ApiErrorBody,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ApiErrorBody {
-    code: String,
-    message: String,
-    request_id: Option<String>,
-    details: BTreeMap<String, String>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ApiErrorBody {
+    pub code: String,
+    pub message: String,
+    pub request_id: Option<String>,
+    pub details: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
