@@ -170,3 +170,36 @@ Added rusqlite-backed SQLite schema foundation with schema_version, sql_events, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 66: Issue 087 SQLite event inserts
+
+**Date**: 2026-07-09
+**Task**: Issue 087 SQLite event inserts
+**Branch**: `main`
+
+### Summary
+
+Implemented storage-local SQLite event inserts with redaction, transactional parameter writes, readback helpers, docs, and tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a0c7f9d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
