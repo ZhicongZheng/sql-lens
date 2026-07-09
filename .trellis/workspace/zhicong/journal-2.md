@@ -335,3 +335,36 @@ Implemented configured SQLite storage fan-out in app runtime while keeping API s
 ### Next Steps
 
 - None - task complete
+
+
+## Session 71: Issue 099 OpenAPI generation
+
+**Date**: 2026-07-09
+**Task**: Issue 099 OpenAPI generation
+**Branch**: `main`
+
+### Summary
+
+Added code-first OpenAPI generation for SQL Lens REST API, generated docs/openapi/sql-lens.v1.yaml, and added stale-output tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2676f19` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
