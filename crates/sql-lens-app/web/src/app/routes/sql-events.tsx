@@ -4,6 +4,7 @@ import { AlertTriangleIcon, ChevronDownIcon, SearchIcon, XIcon } from "lucide-re
 
 import { useDetailDrawer } from "@/app/providers/detail-drawer-provider";
 import { useSqlEvents } from "@/lib/api/hooks";
+import { useSqlStream } from "@/lib/websocket";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -338,6 +339,9 @@ export function SqlEventsRoute() {
 
   const { openDrawer } = useDetailDrawer();
 
+  // WebSocket live stream.
+  const { connectionState } = useSqlStream();
+
   // Seed allItems on first successful load.
   useEffect(() => {
     if (data?.items && allItems.length === 0 && !cursor) {
@@ -399,6 +403,33 @@ export function SqlEventsRoute() {
               {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""} active
             </Badge>
           )}
+          {/* Live stream indicator */}
+          <span className="flex items-center gap-1.5 text-xs">
+            <span
+              className={`size-1.5 rounded-full ${
+                connectionState === "open"
+                  ? "bg-status-ok"
+                  : connectionState === "closed"
+                    ? "bg-status-error"
+                    : "bg-status-slow"
+              }`}
+            />
+            <span
+              className={
+                connectionState === "open"
+                  ? "text-status-ok"
+                  : connectionState === "closed"
+                    ? "text-status-error"
+                    : "text-status-slow"
+              }
+            >
+              {connectionState === "open"
+                ? "Live"
+                : connectionState === "closed"
+                  ? "Disconnected"
+                  : "Connecting…"}
+            </span>
+          </span>
         </div>
         {isFetching && !isLoading && (
           <span className="text-xs text-muted-foreground">Refreshing…</span>
@@ -406,6 +437,13 @@ export function SqlEventsRoute() {
       </div>
 
       <FilterBar searchParams={searchParams} setSearchParams={setSearchParams} />
+
+      {connectionState === "closed" && (
+        <div className="flex items-center gap-2 rounded-md border border-status-error/30 bg-status-error/5 px-3 py-2 text-xs text-status-error">
+          <AlertTriangleIcon className="size-3.5 shrink-0" />
+          Live updates disconnected. Reconnecting…
+        </div>
+      )}
 
       <div className="overflow-x-auto rounded-md border">
         <Table>
