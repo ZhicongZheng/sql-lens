@@ -192,7 +192,6 @@ Sections:
 - Storage.
 - Redaction.
 - Slow SQL threshold.
-- Auth.
 - Plugins.
 - Exporters.
 
@@ -248,4 +247,3 @@ web/
     types/
     styles/
 ```
-

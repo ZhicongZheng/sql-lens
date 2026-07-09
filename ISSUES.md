@@ -100,7 +100,7 @@ Dependencies: Issue 002
 
 ## Issue 007: Add configuration crate module
 
-Description: Add configuration model scaffolding for proxy, backend, TLS, web, storage, retention, logging, redaction, auth, replay, and plugins.
+Description: Add configuration model scaffolding for proxy, backend, TLS, web, storage, retention, logging, redaction, replay, and plugins.
 
 Acceptance Criteria:
 
@@ -1291,7 +1291,7 @@ Dependencies: Issue 031, Issue 068
 
 ## Issue 079: Build Settings page skeleton
 
-Description: Add settings sections for proxy, backend, storage, redaction, auth, plugins, and exporters.
+Description: Add settings sections for proxy, backend, storage, redaction, plugins, and exporters.
 
 Acceptance Criteria:
 
@@ -1688,54 +1688,6 @@ Priority: P0
 Difficulty: Medium
 Estimated Time: 5h
 Dependencies: Issue 070, Issue 074
-
-## Issue 104: Add CSRF protection for mutating endpoints
-
-Description: Add CSRF protection for replay execute and future settings mutations when cookie auth is enabled.
-
-Acceptance Criteria:
-
-- CSRF token validation exists for mutating endpoints.
-- Safe methods are not blocked.
-- Tests cover missing and valid tokens.
-
-Labels: `area:api`, `area:security`, `type:feature`
-Priority: P1
-Difficulty: Medium
-Estimated Time: 5h
-Dependencies: Issue 026
-
-## Issue 105: Add local web authentication
-
-Description: Add optional local authentication for the web UI and API.
-
-Acceptance Criteria:
-
-- Auth can be enabled by config.
-- Session cookie uses safe defaults.
-- Loopback-only unauthenticated mode remains possible.
-
-Labels: `area:security`, `area:api`, `type:feature`
-Priority: P2
-Difficulty: Hard
-Estimated Time: 8h
-Dependencies: Issue 026, Issue 007
-
-## Issue 106: Add RBAC model skeleton
-
-Description: Add role definitions for viewer, operator, and admin.
-
-Acceptance Criteria:
-
-- Roles are represented in auth context.
-- Replay execute requires operator or admin.
-- Settings mutation requires admin.
-
-Labels: `area:security`, `type:feature`
-Priority: P3
-Difficulty: Medium
-Estimated Time: 5h
-Dependencies: Issue 105
 
 ## Issue 107: Add docs website homepage design
 

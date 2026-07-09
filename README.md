@@ -402,7 +402,6 @@ Potential enterprise additions:
 
 - Team workspaces.
 - Centralized retention.
-- SSO and RBAC.
 - Audit reports.
 - Shared capture environments.
 - Compliance exports.

@@ -116,7 +116,6 @@ Targets:
 - Pagination.
 - Error responses.
 - WebSocket subscription filters.
-- Auth behavior.
 
 ### Security Tests
 
@@ -125,7 +124,6 @@ Targets:
 - Password redaction.
 - SQL redaction.
 - XSS escaping for SQL text and error messages.
-- CSRF for mutating endpoints.
 - Replay confirmation.
 - Plugin timeout and failure isolation.
 
@@ -184,4 +182,3 @@ Before release:
 - Full compatibility matrix passes or known gaps are documented.
 - Benchmarks are run and compared with previous release.
 - Web UI smoke tests pass.
-

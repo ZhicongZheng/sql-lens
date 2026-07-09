@@ -21,8 +21,6 @@ pub struct ApiError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ApiErrorCode {
     BadRequest,
-    Unauthorized,
-    Forbidden,
     NotFound,
     Conflict,
     RateLimited,

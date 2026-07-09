@@ -12,7 +12,6 @@ pub struct SqlLensConfig {
     pub retention: RetentionConfig,
     pub logging: LoggingConfig,
     pub redaction: RedactionConfig,
-    pub auth: AuthConfig,
     pub replay: ReplayConfig,
     pub plugins: PluginsConfig,
 }
@@ -213,24 +212,6 @@ impl Default for RedactionConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct AuthConfig {
-    pub enabled: bool,
-    pub mode: AuthMode,
-    pub session_ttl: String,
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            mode: AuthMode::default(),
-            session_ttl: "12h".to_owned(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
 pub struct ReplayConfig {
     pub enabled: bool,
     pub require_confirmation_for_mutations: bool,
@@ -360,15 +341,6 @@ pub enum LoggingFormat {
     #[default]
     Json,
     Pretty,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMode {
-    Disabled,
-    #[default]
-    Local,
-    Oidc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]

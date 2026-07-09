@@ -283,7 +283,6 @@ Before merging security-sensitive work:
 
 - Redaction tests.
 - XSS tests for rendered SQL and errors.
-- CSRF tests for mutating endpoints.
 - Replay confirmation tests.
 
 ## AI Workflow
@@ -307,7 +306,7 @@ KISS:
 YAGNI:
 
 - Do not build generic multi-protocol machinery beyond the adapter boundary until a second protocol needs it.
-- Do not build enterprise auth before local auth is stable.
+- Do not build SQL Lens application-layer Auth, RBAC, or CSRF flows in the open source core; the product is a local developer tool.
 
 DRY:
 

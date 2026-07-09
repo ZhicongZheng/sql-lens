@@ -84,11 +84,6 @@ mask = "***"
 parameter_names = ["password", "token", "secret"]
 sql_patterns = []
 
-[auth]
-enabled = false
-mode = "local"
-session_ttl = "12h"
-
 [replay]
 enabled = true
 require_confirmation_for_mutations = true
@@ -201,14 +196,6 @@ Rules:
 - Raw sensitive values should not be recoverable from storage.
 - Configuration should support parameter names, SQL regex patterns, and future classifier plugins.
 
-### `auth`
-
-Auth modes:
-
-- `disabled`: local development only.
-- `local`: username/password for shared local network usage.
-- `oidc`: future enterprise or team mode.
-
 ### `plugins`
 
 Controls plugin loading.
@@ -230,6 +217,17 @@ SQL_LENS_BACKEND_ADDRESS=127.0.0.1:3306
 SQL_LENS_LOGGING_LEVEL=debug
 ```
 
+Supported overrides:
+
+- `SQL_LENS_PROXY_LISTEN`: overrides legacy `[proxy].listen`.
+- `SQL_LENS_BACKEND_ADDRESS`: overrides legacy `[backend].address`.
+- `SQL_LENS_LOGGING_LEVEL`: overrides `[logging].level`; valid values are
+  `trace`, `debug`, `info`, `warn`, and `error`.
+
+When explicit `[[targets]]` are configured, legacy proxy/backend overrides do
+not rewrite target entries. Use the TOML `[[targets]]` block for multi-target
+local setups.
+
 ## Validation Rules
 
 - `proxy.listen` is required.
@@ -241,4 +239,3 @@ SQL_LENS_LOGGING_LEVEL=debug
 - Target protocol must be `mysql` in the current build.
 - `storage.capacity` must be positive for ring buffer.
 - TLS certificate paths are required for TLS termination.
-- `auth.enabled=true` requires a configured auth mode.

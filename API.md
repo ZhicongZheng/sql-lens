@@ -4,7 +4,8 @@
 
 SQL Lens exposes REST APIs for queryable state and WebSocket APIs for live updates.
 
-The API is local-first by default. Authentication can be disabled for local-only development and enabled for shared environments.
+The API is designed for a local developer workflow. SQL Lens does not implement
+application-layer authentication, RBAC, or CSRF flows in the open source core.
 
 Base path:
 
@@ -375,8 +376,6 @@ Core schema names:
 | Code | HTTP | Meaning |
 | --- | --- | --- |
 | `BAD_REQUEST` | 400 | Invalid query or body |
-| `UNAUTHORIZED` | 401 | Authentication required |
-| `FORBIDDEN` | 403 | Authenticated but not allowed |
 | `NOT_FOUND` | 404 | Resource not found |
 | `CONFLICT` | 409 | State conflict |
 | `RATE_LIMITED` | 429 | Request rate limit exceeded |

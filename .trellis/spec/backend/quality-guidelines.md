@@ -142,9 +142,9 @@ pub struct ProtocolMetadata {
 
 ### 1. Scope / Trigger
 
-- Trigger: `sql-lens-config` owns startup configuration structs, serde-compatible config shape, default values, and startup TOML parsing.
-- Config loading is a boundary contract for CLI startup, validation, logging setup, runtime startup, and future hot reload.
-- Config parsing must stay separate from semantic validation and runtime apply logic.
+- Trigger: `sql-lens-config` owns startup configuration structs, serde-compatible config shape, default values, startup TOML parsing, and local environment-variable overrides.
+- Config loading is a boundary contract for CLI startup, validation, logging setup, and runtime startup.
+- Config parsing must stay separate from semantic validation, runtime apply logic, and environment override application.
 
 ### 2. Signatures
 
@@ -154,6 +154,12 @@ Public TOML loading APIs live on `SqlLensConfig`:
 impl SqlLensConfig {
     pub fn from_path(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigLoadError>;
     pub fn from_toml_str(input: &str) -> Result<Self, ConfigLoadError>;
+    pub fn apply_env_overrides(&mut self) -> Result<(), ConfigOverrideError>;
+    pub fn apply_env_overrides_from<I, K, V>(&mut self, variables: I) -> Result<(), ConfigOverrideError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>;
 }
 ```
 
@@ -170,6 +176,12 @@ pub enum ConfigLoadError {
         source: toml::de::Error,
     },
 }
+
+pub struct ConfigOverrideError {
+    pub variable: String,
+    pub value: String,
+    pub expected: &'static str,
+}
 ```
 
 ### 3. Contracts
@@ -178,6 +190,13 @@ pub enum ConfigLoadError {
 - `from_toml_str` parses already-loaded TOML content.
 - Missing sections and fields use the existing `Default` implementations.
 - Unknown sections and fields are rejected with `#[serde(deny_unknown_fields)]`.
+- Environment overrides are applied explicitly after TOML parsing and before
+  validation/runtime startup.
+- `apply_env_overrides_from` exists so unit tests can avoid mutating
+  process-global environment variables.
+- Supported overrides are `SQL_LENS_PROXY_LISTEN`,
+  `SQL_LENS_BACKEND_ADDRESS`, and `SQL_LENS_LOGGING_LEVEL`.
+- Legacy proxy/backend overrides do not rewrite explicit `[[targets]]` entries.
 - The config crate may depend on `serde` and `toml` for this layer.
 - The config crate must not depend on CLI, async runtime, HTTP, database, watcher, or proxy crates for loading.
 
@@ -190,6 +209,10 @@ pub enum ConfigLoadError {
 | TOML from a string cannot be parsed | Return `ConfigLoadError::Parse` with `None` |
 | Section or field is missing | Use the section or field default |
 | Section or field is unknown | Return a parse/deserialization error |
+| Supported env override is present | Mutate the matching config field before validation |
+| `SQL_LENS_LOGGING_LEVEL` is invalid | Return `ConfigOverrideError` with expected values |
+| Unknown `SQL_LENS_*` override is present | Ignore it |
+| `[[targets]]` is present | Do not rewrite target entries from legacy proxy/backend env overrides |
 | Required semantic value is empty or unsupported at runtime | Leave to the later config validation layer |
 
 ### 5. Good/Base/Bad Cases
@@ -199,17 +222,20 @@ Good:
 - A local config file contains only `[proxy] listen = "127.0.0.1:3308"` and the rest comes from defaults.
 - A misspelled field like `lissten` fails during TOML deserialization.
 - A missing file reports `ConfigLoadError::Read`.
+- `SQL_LENS_LOGGING_LEVEL=debug` updates `config.logging.level` after TOML parsing.
 
 Base:
 
 - A caller uses `SqlLensConfig::from_toml_str` in tests and `SqlLensConfig::from_path` in CLI code.
+- CLI startup calls `config.apply_env_overrides()` before `config.validate()`.
 - Validation later rejects semantically invalid values after TOML parsing succeeds.
 
 Bad:
 
 - Silently ignoring unknown config fields.
 - Starting services from `sql-lens-config`.
-- Adding environment overrides, hot reload, or CLI argument parsing inside `sql-lens-config`.
+- Reading environment variables inside `from_path` or `from_toml_str`.
+- Adding hot reload or CLI argument parsing inside `sql-lens-config`.
 
 ### 6. Tests Required
 
@@ -222,6 +248,9 @@ For config loading changes:
 - Invalid TOML returns `ConfigLoadError::Parse`.
 - Missing files return `ConfigLoadError::Read`.
 - `ConfigLoadError` implements `Display` and `std::error::Error`.
+- Supported env overrides update the expected fields.
+- Invalid logging-level env override returns `ConfigOverrideError`.
+- `ConfigOverrideError` implements `Display` and `std::error::Error`.
 
 ### 7. Wrong vs Correct
 
@@ -624,7 +653,7 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 - Logging initialization happens after config validation; follow `logging-guidelines.md`.
 - Runtime startup failures are wrapped in `AppError` and exit with
   `ExitCode::FAILURE`.
-- Do not add config hot reload, frontend static serving, auth, TLS termination,
+- Do not add config hot reload, frontend static serving, TLS termination,
   replay execute, or new storage backends in the CLI runtime startup path
   without a dedicated task.
 
@@ -670,7 +699,7 @@ Bad:
 - Starting services from `sql-lens-config` or `sql-lens-api`.
 - Blocking packet forwarding on REST, WebSocket, SQLite persistence, plugins,
   or frontend work.
-- Adding hot reload, static frontend hosting, replay execute, auth, or new
+- Adding hot reload, static frontend hosting, replay execute, or new
   storage backends to the CLI runtime startup task.
 
 ### 6. Tests Required
@@ -4229,8 +4258,8 @@ Base:
 - Later app composition can convert `RedactionConfig` into `RedactionPolicy`.
 - Later central capture fan-out can redact once before cloning events to
   storage, WebSocket, exporters, and statistics.
-- Later security work can add SQL parsing, regex, classifiers, plugin rules, or
-  RBAC-aware response redaction behind a new task design.
+- Later security work can add SQL parsing, regex, classifiers, or plugin rules
+  behind a new task design.
 
 Bad:
 
@@ -4809,7 +4838,7 @@ let summary = ActiveSessionDrain::drain(session_handles, &shutdown_config).await
 ### 1. Scope / Trigger
 
 - Trigger: `sql-lens-api` owns the first HTTP server primitive for the Web/API surface.
-- The foundation must let later REST, WebSocket, static web, auth, and dashboard work compose routes without changing listener and request-correlation contracts.
+- The foundation must let later REST, WebSocket, static web, and dashboard work compose routes without changing listener and request-correlation contracts.
 - This layer must not start the application runtime, install OS signal handlers, parse SQL protocols, query storage, or define product endpoints that are owned by later API tasks.
 
 ### 2. Signatures
@@ -4856,7 +4885,7 @@ tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 ```
 
-Do not add `uuid`, `time`, storage crates, proxy crates, protocol crates, auth dependencies, TLS dependencies, or OpenAPI generation dependencies to this foundation layer without a task-level design update.
+Do not add `uuid`, `time`, storage crates, proxy crates, protocol crates, TLS dependencies, or OpenAPI generation dependencies to this foundation layer without a task-level design update.
 
 ### 3. Contracts
 
@@ -4949,7 +4978,7 @@ server.serve_with_shutdown(shutdown_future).await?;
 
 - Trigger: `sql-lens-api` owns the first WebSocket upgrade endpoint for live SQL event streaming.
 - The foundation must register `GET /ws/sql`, accept upgrades, send a minimal heartbeat, and handle disconnects cleanly.
-- This layer must not implement SQL event fan-out, subscription parsing, filters, replay, authentication, statistics streaming, or frontend code.
+- This layer must not implement SQL event fan-out, subscription parsing, filters, replay, statistics streaming, or frontend code.
 
 ### 2. Signatures
 
@@ -4969,7 +4998,7 @@ futures-util = "0.3"
 tokio-tungstenite = "0.28"
 ```
 
-Do not add capture, storage broadcast, auth, OpenAPI, TLS, or frontend dependencies for the WebSocket foundation task.
+Do not add capture, storage broadcast, OpenAPI, TLS, or frontend dependencies for the WebSocket foundation task.
 
 ### 3. Contracts
 
@@ -5031,7 +5060,7 @@ For WebSocket foundation changes:
 
 - Trigger: `sql-lens-api` broadcasts live `SqlEvent` values to `/ws/sql` subscribers.
 - This layer owns API-local WebSocket fan-out, subscription filtering, and message serialization.
-- It must not wire proxy/runtime capture receivers, replay history, authenticate users, or add MySQL-specific behavior.
+- It must not wire proxy/runtime capture receivers, replay history, or add MySQL-specific behavior.
 
 ### 2. Signatures
 
@@ -5059,7 +5088,7 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["net", "sync"] }
 ```
 
-Do not add capture, proxy, app runtime, auth, filter engines, OpenAPI, or frontend dependencies for this subscription layer.
+Do not add capture, proxy, app runtime, filter engines, OpenAPI, or frontend dependencies for this subscription layer.
 
 ### 3. Contracts
 
@@ -5144,7 +5173,7 @@ For SQL WebSocket subscription changes:
 - Trigger: `sql-lens-api` handlers return standardized REST API errors through `ApiEndpointError`.
 - REST error responses must match the `API.md` `ApiError` envelope.
 - Request ID behavior is shared by all API endpoints through the request ID middleware.
-- This layer does not implement auth, rate limiting, storage health, proxy readiness, panic recovery, or OpenAPI generation by itself.
+- This layer does not implement rate limiting, storage health, proxy readiness, panic recovery, or OpenAPI generation by itself.
 
 ### 2. Signatures
 
@@ -5190,8 +5219,6 @@ impl RequestId {
 ### 3. Contracts
 
 - `BAD_REQUEST` maps to HTTP 400.
-- `UNAUTHORIZED` maps to HTTP 401.
-- `FORBIDDEN` maps to HTTP 403.
 - `NOT_FOUND` maps to HTTP 404.
 - `CONFLICT` maps to HTTP 409.
 - `RATE_LIMITED` maps to HTTP 429.
@@ -5226,7 +5253,7 @@ Good:
 Base:
 
 - Unknown routes use the same error envelope as handler errors.
-- Constructors exist before auth/rate-limit/storage/proxy runtime code needs them.
+- Constructors exist before rate-limit/storage/proxy runtime code needs them.
 
 Bad:
 

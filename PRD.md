@@ -293,7 +293,6 @@ Areas:
 - Retention.
 - Redaction.
 - Slow SQL thresholds.
-- UI authentication.
 - Exporters.
 
 ## Release Scope
@@ -366,11 +365,7 @@ Possible paid offerings:
 - Shared environments.
 - Long-term retention.
 - Centralized audit reports.
-- Enterprise authentication.
-- RBAC.
-- SSO.
 - Advanced compliance exports.
 - Managed cloud dashboard.
 
 Commercial features must not remove the core open source value: transparent SQL capture, prepared statement expansion, local dashboard, and extensible protocol architecture.
-

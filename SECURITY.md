@@ -4,7 +4,10 @@
 
 SQL Lens observes database traffic. That makes security and privacy part of the core design, not an add-on.
 
-The default product is local-first. Shared or production-like deployments require explicit hardening.
+The product is local-first and intended for developer machines, local demo
+setups, CI, and pre-production debugging. The open source core does not provide
+application-layer authentication, RBAC, or CSRF protection and should not be
+treated as a shared production web service.
 
 ## Threat Model
 
@@ -16,13 +19,11 @@ Assets:
 - Application data inside SQL literals.
 - Connection metadata.
 - Capture files.
-- Web UI sessions.
 
 Potential attackers:
 
 - Local users on the same machine.
 - Users on the same network when SQL Lens binds to non-local addresses.
-- Malicious web pages attempting CSRF.
 - Malicious SQL contents rendered in UI.
 - Plugins with excessive access.
 
@@ -98,27 +99,12 @@ Default sensitive names:
 - `access_key`.
 - `refresh_token`.
 
-## Web Login
+## Local API Boundary
 
-Local mode may disable auth only when binding to loopback.
-
-If binding to a non-loopback address:
-
-- Auth should be enabled.
-- Session cookies should be `HttpOnly`.
-- Session cookies should use `SameSite=Lax` or stricter.
-- Secure cookies should be used with HTTPS.
-
-## CSRF
-
-CSRF protection is required for mutating endpoints when cookie auth is enabled.
-
-High-risk endpoints:
-
-- Replay execute.
-- Settings mutation.
-- Plugin enable or disable.
-- Export destination configuration.
+SQL Lens should bind web/API listeners to loopback addresses by default. Binding
+to a non-loopback address is a deliberate local-network exposure choice and does
+not enable an auth layer. Users who need a shared or internet-facing deployment
+must place SQL Lens behind infrastructure that supplies access control.
 
 ## XSS
 
@@ -131,21 +117,6 @@ Rules:
 - Avoid `dangerouslySetInnerHTML`.
 - Treat error messages from databases as untrusted.
 - Monaco content must be supplied as plain text.
-
-## RBAC
-
-Open source MVP can use a simple role model:
-
-- `viewer`: read events, statistics, and connections.
-- `operator`: run replay preview, export data.
-- `admin`: change settings, manage plugins, run replay execute.
-
-Enterprise or team editions may add:
-
-- SSO.
-- Groups.
-- Audit logs.
-- Project-level permissions.
 
 ## Plugin Security
 
@@ -185,4 +156,3 @@ Recommended process:
 - Acknowledge within 7 days.
 - Fix timeline based on severity.
 - Publish advisory for confirmed vulnerabilities.
-

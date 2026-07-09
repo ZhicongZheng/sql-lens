@@ -114,9 +114,6 @@ fn default_config_contains_documented_security_and_extension_defaults() {
             "refresh_token".to_owned()
         ]
     );
-    assert!(!config.auth.enabled);
-    assert_eq!(config.auth.mode, AuthMode::Local);
-    assert_eq!(config.auth.session_ttl, "12h");
     assert!(config.replay.enabled);
     assert!(config.replay.require_confirmation_for_mutations);
     assert!(!config.plugins.enabled);
@@ -144,6 +141,21 @@ fn config_load_error_supports_standard_error_traits() {
 
     assert!(!error.to_string().is_empty());
     assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
+fn config_override_error_supports_standard_error_traits() {
+    assert_error::<ConfigOverrideError>();
+
+    let mut config = SqlLensConfig::default();
+    let error = config
+        .apply_env_overrides_from([(SQL_LENS_LOGGING_LEVEL, "verbose")])
+        .expect_err("invalid logging override should fail");
+
+    assert_eq!(error.variable, SQL_LENS_LOGGING_LEVEL);
+    assert_eq!(error.value, "verbose");
+    assert!(!error.to_string().is_empty());
+    assert!(std::error::Error::source(&error).is_none());
 }
 
 #[test]
@@ -452,11 +464,6 @@ mask = "[redacted]"
 parameter_names = ["password"]
 sql_patterns = ["token"]
 
-[auth]
-enabled = true
-mode = "local"
-session_ttl = "1h"
-
 [replay]
 enabled = false
 require_confirmation_for_mutations = true
@@ -485,7 +492,6 @@ timeout_ms = 200
     assert_eq!(config.logging.format, LoggingFormat::Pretty);
     assert!(!config.logging.redact_secrets);
     assert_eq!(config.redaction.mask, "[redacted]");
-    assert!(config.auth.enabled);
     assert!(!config.replay.enabled);
     assert!(config.plugins.enabled);
     assert_eq!(config.plugins.timeout_ms, 200);
@@ -514,7 +520,79 @@ level = "debug"
     assert_eq!(config.logging.level, LoggingLevel::Debug);
     assert_eq!(config.logging.format, LoggingFormat::Json);
     assert!(config.redaction.enabled);
-    assert_eq!(config.auth.session_ttl, "12h");
+}
+
+#[test]
+fn environment_overrides_proxy_backend_and_logging_level() {
+    let mut config = SqlLensConfig::from_toml_str(
+        r#"
+[proxy]
+listen = "127.0.0.1:4408"
+
+[backend]
+address = "127.0.0.1:3306"
+
+[logging]
+level = "info"
+"#,
+    )
+    .expect("base config should load");
+
+    config
+        .apply_env_overrides_from([
+            (SQL_LENS_PROXY_LISTEN, "127.0.0.1:5507"),
+            (SQL_LENS_BACKEND_ADDRESS, "127.0.0.1:23306"),
+            (SQL_LENS_LOGGING_LEVEL, "debug"),
+        ])
+        .expect("valid overrides should apply");
+
+    assert_eq!(config.proxy.listen, "127.0.0.1:5507");
+    assert_eq!(config.backend.address, "127.0.0.1:23306");
+    assert_eq!(config.logging.level, LoggingLevel::Debug);
+}
+
+#[test]
+fn unknown_environment_overrides_are_ignored() {
+    let mut config = SqlLensConfig::default();
+
+    config
+        .apply_env_overrides_from([("SQL_LENS_UNKNOWN", "value")])
+        .expect("unknown overrides should be ignored");
+
+    assert_eq!(config, SqlLensConfig::default());
+}
+
+#[test]
+fn environment_overrides_do_not_rewrite_explicit_targets() {
+    let mut config = SqlLensConfig::from_toml_str(
+        r#"
+[[targets]]
+name = "mysql-local"
+listen = "127.0.0.1:3307"
+protocol = "mysql"
+database_type = "mysql"
+backend_address = "127.0.0.1:3306"
+"#,
+    )
+    .expect("target config should load");
+
+    config
+        .apply_env_overrides_from([
+            (SQL_LENS_PROXY_LISTEN, "127.0.0.1:5507"),
+            (SQL_LENS_BACKEND_ADDRESS, "127.0.0.1:23306"),
+        ])
+        .expect("valid overrides should apply");
+
+    assert_eq!(
+        config.effective_targets(),
+        vec![ProxyTargetConfig {
+            name: "mysql-local".to_owned(),
+            listen: "127.0.0.1:3307".to_owned(),
+            protocol: Protocol::MySql,
+            database_type: DatabaseType::MySql,
+            backend_address: "127.0.0.1:3306".to_owned(),
+        }]
+    );
 }
 
 #[test]
@@ -579,4 +657,17 @@ lissten = "127.0.0.1:4409"
         unknown_field,
         ConfigLoadError::Parse { path: None, .. }
     ));
+}
+
+#[test]
+fn auth_toml_section_is_rejected() {
+    let error = SqlLensConfig::from_toml_str(
+        r#"
+[auth]
+enabled = true
+"#,
+    )
+    .expect_err("application auth config is out of scope");
+
+    assert!(matches!(error, ConfigLoadError::Parse { path: None, .. }));
 }

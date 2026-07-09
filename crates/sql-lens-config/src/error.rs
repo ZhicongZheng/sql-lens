@@ -46,6 +46,25 @@ impl std::error::Error for ConfigLoadError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOverrideError {
+    pub variable: String,
+    pub value: String,
+    pub expected: &'static str,
+}
+
+impl fmt::Display for ConfigOverrideError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid environment override {}={}: expected {}",
+            self.variable, self.value, self.expected
+        )
+    }
+}
+
+impl std::error::Error for ConfigOverrideError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigValidationError {
     pub violations: Vec<ConfigValidationViolation>,
 }

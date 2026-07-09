@@ -1,8 +1,8 @@
 use clap::Parser;
 use sql_lens_app::{MinimalMysqlRuntimeError, start_runtime_from_config};
 use sql_lens_config::{
-    ConfigLoadError, ConfigValidationError, LoggingConfig, LoggingFormat, LoggingLevel,
-    SqlLensConfig,
+    ConfigLoadError, ConfigOverrideError, ConfigValidationError, LoggingConfig, LoggingFormat,
+    LoggingLevel, SqlLensConfig,
 };
 use std::{error::Error, fmt, path::PathBuf, process::ExitCode};
 use tracing_subscriber::filter::LevelFilter;
@@ -34,7 +34,8 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), AppError> {
-    let config = SqlLensConfig::from_path(&cli.config)?;
+    let mut config = SqlLensConfig::from_path(&cli.config)?;
+    config.apply_env_overrides()?;
     config.validate()?;
     init_logging(&config.logging)?;
 
@@ -85,6 +86,7 @@ fn level_filter(level: LoggingLevel) -> LevelFilter {
 #[derive(Debug)]
 enum AppError {
     ConfigLoad(ConfigLoadError),
+    ConfigOverride(ConfigOverrideError),
     ConfigValidation(ConfigValidationError),
     LoggingInit(Box<dyn Error + Send + Sync + 'static>),
     Runtime(MinimalMysqlRuntimeError),
@@ -101,6 +103,9 @@ impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ConfigLoad(source) => write!(f, "failed to load SQL Lens config: {source}"),
+            Self::ConfigOverride(source) => {
+                write!(f, "failed to apply SQL Lens config overrides: {source}")
+            }
             Self::ConfigValidation(source) => {
                 write!(f, "failed to validate SQL Lens config: {source}")
             }
@@ -119,6 +124,7 @@ impl Error for AppError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::ConfigLoad(source) => Some(source),
+            Self::ConfigOverride(source) => Some(source),
             Self::ConfigValidation(source) => Some(source),
             Self::LoggingInit(source) => Some(source.as_ref()),
             Self::Runtime(source) => Some(source),
@@ -130,6 +136,12 @@ impl Error for AppError {
 impl From<ConfigLoadError> for AppError {
     fn from(source: ConfigLoadError) -> Self {
         Self::ConfigLoad(source)
+    }
+}
+
+impl From<ConfigOverrideError> for AppError {
+    fn from(source: ConfigOverrideError) -> Self {
+        Self::ConfigOverride(source)
     }
 }
 

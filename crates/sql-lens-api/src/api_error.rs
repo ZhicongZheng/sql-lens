@@ -120,8 +120,6 @@ pub(crate) fn with_request_id(mut response: Response, request_id: &RequestId) ->
 fn api_error_status(code: ApiErrorCode) -> StatusCode {
     match code {
         ApiErrorCode::BadRequest => StatusCode::BAD_REQUEST,
-        ApiErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-        ApiErrorCode::Forbidden => StatusCode::FORBIDDEN,
         ApiErrorCode::NotFound => StatusCode::NOT_FOUND,
         ApiErrorCode::Conflict => StatusCode::CONFLICT,
         ApiErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -135,8 +133,6 @@ fn api_error_status(code: ApiErrorCode) -> StatusCode {
 fn api_error_code_name(code: ApiErrorCode) -> &'static str {
     match code {
         ApiErrorCode::BadRequest => "BAD_REQUEST",
-        ApiErrorCode::Unauthorized => "UNAUTHORIZED",
-        ApiErrorCode::Forbidden => "FORBIDDEN",
         ApiErrorCode::NotFound => "NOT_FOUND",
         ApiErrorCode::Conflict => "CONFLICT",
         ApiErrorCode::RateLimited => "RATE_LIMITED",
@@ -159,12 +155,6 @@ mod tests {
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
             ),
-            (
-                ApiErrorCode::Unauthorized,
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
-            ),
-            (ApiErrorCode::Forbidden, StatusCode::FORBIDDEN, "FORBIDDEN"),
             (ApiErrorCode::NotFound, StatusCode::NOT_FOUND, "NOT_FOUND"),
             (ApiErrorCode::Conflict, StatusCode::CONFLICT, "CONFLICT"),
             (
