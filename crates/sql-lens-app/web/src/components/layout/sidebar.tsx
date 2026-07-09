@@ -1,46 +1,37 @@
-import { NavLink } from "react-router-dom";
+import { PanelLeftClose, PanelLeft } from "lucide-react";
 
-import { cn } from "@/lib/utils";
-
-interface NavItem {
-  to: string;
-  label: string;
-}
-
-// Primary navigation from UI.md "Information Architecture".
-const NAV_ITEMS: NavItem[] = [
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/sql", label: "SQL" },
-  { to: "/connections", label: "Connections" },
-  { to: "/statistics", label: "Statistics" },
-  { to: "/replay", label: "Replay" },
-  { to: "/settings", label: "Settings" },
-];
+import { useSidebar } from "@/app/providers/sidebar-provider";
+import { Button } from "@/components/ui/button";
+import { SidebarNav } from "@/components/layout/sidebar-nav";
 
 export function Sidebar() {
+  const { isCollapsed, toggleCollapse } = useSidebar();
+
   return (
-    <aside className="flex h-full w-56 shrink-0 flex-col border-r bg-card">
-      <div className="flex h-12 items-center border-b px-4 font-semibold tracking-tight">
-        SQL Lens
+    <aside
+      className={`hidden h-full shrink-0 flex-col border-r bg-card transition-[width] duration-200 md:flex ${
+        isCollapsed ? "w-16" : "w-56"
+      }`}
+    >
+      <div className="flex h-12 items-center justify-between border-b px-4">
+        {!isCollapsed && (
+          <span className="font-semibold tracking-tight">SQL Lens</span>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={toggleCollapse}
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          className={isCollapsed ? "mx-auto" : "ml-auto"}
+        >
+          {isCollapsed ? (
+            <PanelLeft className="size-4" />
+          ) : (
+            <PanelLeftClose className="size-4" />
+          )}
+        </Button>
       </div>
-      <nav className="flex-1 space-y-1 p-2" aria-label="Primary">
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                isActive
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              )
-            }
-          >
-            {item.label}
-          </NavLink>
-        ))}
-      </nav>
+      <SidebarNav collapsed={isCollapsed} />
     </aside>
   );
 }
