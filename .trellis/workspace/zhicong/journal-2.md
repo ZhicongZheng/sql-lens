@@ -500,3 +500,36 @@ Implemented SQL Detail page with Monaco Editor, parameter table, error handling,
 ### Next Steps
 
 - None - task complete
+
+
+## Session 76: Issue 009 config env overrides
+
+**Date**: 2026-07-09
+**Task**: Issue 009 config env overrides
+**Branch**: `main`
+
+### Summary
+
+Added SQL Lens config environment overrides for proxy listen, backend address, and logging level; removed app-layer Auth/RBAC/CSRF from config contracts and project guidance for the local developer tool scope.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6f15f8f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

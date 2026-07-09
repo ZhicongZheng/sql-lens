@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 75
+- **Total Sessions**: 76
 - **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~502 | Active |
+| `journal-2.md` | ~535 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 76 | 2026-07-09 | Issue 009 config env overrides | `6f15f8f` | `main` |
 | 75 | 2026-07-09 | Build SQL Detail page (Issue 074) | `9754ee5` | `main` |
 | 74 | 2026-07-09 | Build Connections page (Issue 077) | `94a2aec` | `main` |
 | 73 | 2026-07-09 | Issue 094 Rust CI | `d5b2615` | `main` |
