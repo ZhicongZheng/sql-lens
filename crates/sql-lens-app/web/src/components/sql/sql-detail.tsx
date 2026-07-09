@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { useSqlEvent } from "@/lib/api/hooks";
 import { usePreviewReplay } from "@/lib/api/hooks";
+import { ParameterTable } from "@/components/sql/parameter-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -245,7 +246,7 @@ export function SqlDetail({ eventId }: SqlDetailProps) {
 
       {/* Parameters */}
       <Section title="Parameters">
-        <ParametersBlock metadata={event.metadata} />
+        <ParameterTable parameters={event.parameters} />
       </Section>
       <Separator />
 
@@ -332,38 +333,6 @@ export function SqlDetail({ eventId }: SqlDetailProps) {
           Replay
         </Button>
       </Section>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Parameters helper
-// ---------------------------------------------------------------------------
-
-function ParametersBlock({ metadata }: { metadata: Record<string, Record<string, unknown>> }) {
-  // Try to extract parameters from protocol-specific metadata.
-  // MySQL: metadata.mysql.parameters (future).
-  // For now, show placeholder if no parameter data is found.
-  const protocolKeys = Object.keys(metadata);
-  if (protocolKeys.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">No parameters available.</p>
-    );
-  }
-
-  // Show a simple key-value summary of the metadata keys.
-  return (
-    <div className="space-y-1 text-xs">
-      {protocolKeys.map((key) => (
-        <div key={key} className="flex justify-between">
-          <span className="text-muted-foreground">{key}</span>
-          <span className="font-mono">
-            {typeof metadata[key] === "string"
-              ? metadata[key]
-              : JSON.stringify(metadata[key])}
-          </span>
-        </div>
-      ))}
     </div>
   );
 }

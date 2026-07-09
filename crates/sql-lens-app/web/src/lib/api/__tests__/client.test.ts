@@ -34,6 +34,7 @@ describe("getSqlEvent", () => {
       expanded_sql: "SELECT * FROM users WHERE id = 42",
       fingerprint: "select * from users where id = ?",
       rows: { affected: 0, returned: 1 },
+      parameters: [],
       metadata: { mysql: { command: "COM_STMT_EXECUTE", statement_id: 12 } },
     };
 

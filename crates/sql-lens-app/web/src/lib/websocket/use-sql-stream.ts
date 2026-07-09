@@ -83,6 +83,7 @@ function toSqlEvent(event: WsSqlEventSummary): SqlEvent {
     expanded_sql: "",
     fingerprint: "",
     rows: { affected: 0, returned: 0 },
+    parameters: [],
     metadata: {},
   };
 }

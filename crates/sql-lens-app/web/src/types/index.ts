@@ -53,6 +53,30 @@ export interface SqlEventRows {
 /** Protocol-specific metadata (e.g. MySQL command + statement_id). */
 export type SqlEventMetadata = Record<string, Record<string, unknown>>;
 
+// ---------------------------------------------------------------------------
+// SQL Parameters
+// ---------------------------------------------------------------------------
+
+/**
+ * Parameter value — a tagged object matching the backend `SqlParameterValue`
+ * enum. The `type` field identifies the variant; `value` carries the payload.
+ *
+ * Variants: null, integer, unsigned, float, boolean, string, date, time,
+ * timestamp, json, binary_summary, unsupported.
+ */
+export interface SqlParameterValue {
+  type: string;
+  value: string | number | boolean | null;
+}
+
+/** A single SQL statement parameter. */
+export interface SqlParameter {
+  index: number;
+  name?: string;
+  value: SqlParameterValue;
+  redacted: boolean;
+}
+
 /** Full SQL event from GET /api/v1/sql-events/{id}. */
 export interface SqlEvent {
   id: string;
@@ -72,6 +96,7 @@ export interface SqlEvent {
   expanded_sql: string;
   fingerprint: string;
   rows: SqlEventRows;
+  parameters: SqlParameter[];
   metadata: SqlEventMetadata;
 }
 
