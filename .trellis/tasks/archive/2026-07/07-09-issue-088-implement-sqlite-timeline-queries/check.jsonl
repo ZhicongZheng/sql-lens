@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify SQLite query contract, filter parity, pagination, and storage-only boundary."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Verify backend model/storage changes keep public contracts stable."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify query error mapping preserves structured causes."}
