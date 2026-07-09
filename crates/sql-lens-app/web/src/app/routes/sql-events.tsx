@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangleIcon, ChevronDownIcon, PauseIcon, PlayIcon, SearchIcon, XIcon } from "lucide-react";
 
-import { useDetailDrawer } from "@/app/providers/detail-drawer-provider";
 import { useSqlEvents } from "@/lib/api/hooks";
 import { useSqlStream } from "@/lib/websocket";
 import { Badge } from "@/components/ui/badge";
@@ -352,8 +351,6 @@ export function SqlEventsRoute() {
   const { data, isLoading, isError, error, isFetching } =
     useSqlEvents(queryParams);
 
-  const { openDrawer } = useDetailDrawer();
-
   // WebSocket live stream.
   const { connectionState, queuedCount } = useSqlStream({ paused: isPaused });
 
@@ -376,11 +373,13 @@ export function SqlEventsRoute() {
     }
   }, [data]);
 
+  const navigate = useNavigate();
+
   const handleSelectEvent = useCallback(
     (id: string) => {
-      openDrawer(id);
+      navigate(`/sql/${id}`);
     },
-    [openDrawer],
+    [navigate],
   );
 
   const displayItems = allItems.length > 0 ? allItems : (data?.items ?? []);
