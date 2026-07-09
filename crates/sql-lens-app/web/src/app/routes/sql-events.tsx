@@ -1,10 +1,19 @@
-import { useCallback, useState } from "react";
-import { AlertTriangleIcon, ChevronDownIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { AlertTriangleIcon, ChevronDownIcon, SearchIcon, XIcon } from "lucide-react";
 
 import { useDetailDrawer } from "@/app/providers/detail-drawer-provider";
 import { useSqlEvents } from "@/lib/api/hooks";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -14,13 +23,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { SqlEvent } from "@/types";
+import type { SqlEvent, SqlEventQueryParams } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Format ISO timestamp to HH:MM:SS. */
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleTimeString(undefined, {
@@ -31,7 +39,6 @@ function fmtTime(iso: string): string {
   });
 }
 
-/** Map status string to a tailwind token class. */
 function statusClass(status: string): string {
   switch (status) {
     case "ok":
@@ -45,7 +52,6 @@ function statusClass(status: string): string {
   }
 }
 
-/** Row left-border accent for slow/error rows. */
 function rowBorderClass(status: string): string {
   switch (status) {
     case "slow":
@@ -58,7 +64,54 @@ function rowBorderClass(status: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Columns definition
+// URL filter keys — must match API param names.
+// ---------------------------------------------------------------------------
+
+const FILTER_KEYS = [
+  "q",
+  "protocol",
+  "status",
+  "database",
+  "user",
+  "min_duration_ms",
+  "max_duration_ms",
+] as const;
+
+type FilterKey = (typeof FILTER_KEYS)[number];
+
+/** Read active filter count from URL search params. */
+function countActiveFilters(params: URLSearchParams): number {
+  let count = 0;
+  for (const key of FILTER_KEYS) {
+    if (params.get(key)) count++;
+  }
+  return count;
+}
+
+/** Build SqlEventQueryParams from URL search params. */
+function filtersFromParams(
+  params: URLSearchParams,
+): SqlEventQueryParams | undefined {
+  const filters: SqlEventQueryParams = {};
+  const q = params.get("q");
+  if (q) filters.q = q;
+  const protocol = params.get("protocol");
+  if (protocol) filters.protocol = protocol;
+  const status = params.get("status");
+  if (status) filters.status = status;
+  const database = params.get("database");
+  if (database) filters.database = database;
+  const user = params.get("user");
+  if (user) filters.user = user;
+  const min = params.get("min_duration_ms");
+  if (min) filters.min_duration_ms = Number(min);
+  const max = params.get("max_duration_ms");
+  if (max) filters.max_duration_ms = Number(max);
+  return Object.keys(filters).length > 0 ? filters : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Columns
 // ---------------------------------------------------------------------------
 
 const COLUMNS = [
@@ -74,7 +127,7 @@ const COLUMNS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Skeleton rows
+// Sub-components
 // ---------------------------------------------------------------------------
 
 function LoadingRows() {
@@ -92,10 +145,6 @@ function LoadingRows() {
     </>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Single event row
-// ---------------------------------------------------------------------------
 
 function EventRow({
   event,
@@ -120,9 +169,7 @@ function EventRow({
           {event.status}
         </Badge>
       </TableCell>
-      <TableCell className="font-mono text-xs">
-        {event.rows.returned}
-      </TableCell>
+      <TableCell className="font-mono text-xs">{event.rows.returned}</TableCell>
       <TableCell className="max-w-xs truncate font-mono text-xs">
         {event.original_sql}
       </TableCell>
@@ -131,67 +178,202 @@ function EventRow({
 }
 
 // ---------------------------------------------------------------------------
+// Filter bar
+// ---------------------------------------------------------------------------
+
+function FilterBar({
+  searchParams,
+  setSearchParams,
+}: {
+  searchParams: URLSearchParams;
+  setSearchParams: (
+    next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams),
+    opts?: { replace?: boolean },
+  ) => void;
+}) {
+  const activeCount = countActiveFilters(searchParams);
+
+  function setFilter(key: FilterKey, value: string) {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (value) {
+          next.set(key, value);
+        } else {
+          next.delete(key);
+        }
+        // Reset cursor when filters change.
+        next.delete("cursor");
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  function clearAll() {
+    setSearchParams(new URLSearchParams(), { replace: true });
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Text search */}
+        <div className="relative">
+          <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search SQL…"
+            aria-label="Search SQL"
+            className="h-8 w-48 pl-8 text-sm"
+            defaultValue={searchParams.get("q") ?? ""}
+            onChange={(e) => setFilter("q", e.target.value)}
+          />
+        </div>
+
+        {/* Protocol */}
+        <Select
+          value={searchParams.get("protocol") ?? "__all__"}
+          onValueChange={(v) => setFilter("protocol", v === "__all__" ? "" : v)}
+        >
+          <SelectTrigger className="h-8 w-[110px] text-xs" aria-label="Protocol">
+            <SelectValue placeholder="Protocol" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">All protocols</SelectItem>
+            <SelectItem value="mysql">mysql</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* Status */}
+        <Select
+          value={searchParams.get("status") ?? "__all__"}
+          onValueChange={(v) => setFilter("status", v === "__all__" ? "" : v)}
+        >
+          <SelectTrigger className="h-8 w-[100px] text-xs" aria-label="Status">
+            <SelectValue placeholder="Status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">All status</SelectItem>
+            <SelectItem value="ok">ok</SelectItem>
+            <SelectItem value="slow">slow</SelectItem>
+            <SelectItem value="error">error</SelectItem>
+            <SelectItem value="unknown">unknown</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {/* Database */}
+        <Input
+          placeholder="Database"
+          aria-label="Database"
+          className="h-8 w-28 text-xs"
+          defaultValue={searchParams.get("database") ?? ""}
+          onChange={(e) => setFilter("database", e.target.value)}
+        />
+
+        {/* User */}
+        <Input
+          placeholder="User"
+          aria-label="User"
+          className="h-8 w-24 text-xs"
+          defaultValue={searchParams.get("user") ?? ""}
+          onChange={(e) => setFilter("user", e.target.value)}
+        />
+
+        {/* Duration range */}
+        <Input
+          type="number"
+          placeholder="Min ms"
+          aria-label="Minimum duration (ms)"
+          className="h-8 w-20 text-xs"
+          defaultValue={searchParams.get("min_duration_ms") ?? ""}
+          onChange={(e) => setFilter("min_duration_ms", e.target.value)}
+        />
+        <span className="text-xs text-muted-foreground">–</span>
+        <Input
+          type="number"
+          placeholder="Max ms"
+          aria-label="Maximum duration (ms)"
+          className="h-8 w-20 text-xs"
+          defaultValue={searchParams.get("max_duration_ms") ?? ""}
+          onChange={(e) => setFilter("max_duration_ms", e.target.value)}
+        />
+
+        {/* Clear button */}
+        {activeCount > 0 && (
+          <Button variant="ghost" size="sm" onClick={clearAll} className="h-8 gap-1 text-xs">
+            <XIcon className="size-3" />
+            Clear ({activeCount})
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SQL Events page
 // ---------------------------------------------------------------------------
 
 export function SqlEventsRoute() {
-  const [cursor, setCursor] = useState<string | undefined>(undefined);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [allItems, setAllItems] = useState<SqlEvent[]>([]);
-  const [hasLoadedFirst, setHasLoadedFirst] = useState(false);
+  const [cursor, setCursor] = useState<string | undefined>(undefined);
 
-  const { data, isLoading, isError, error, isFetching } = useSqlEvents(
-    cursor ? { cursor } : undefined,
-  );
+  const filters = useMemo(() => filtersFromParams(searchParams), [searchParams]);
+
+  // Reset accumulated items when filters change.
+  const filterKey = searchParams.toString();
+  useEffect(() => {
+    setAllItems([]);
+    setCursor(undefined);
+  }, [filterKey]);
+
+  // Build query params: filters + cursor.
+  const queryParams: SqlEventQueryParams | undefined = useMemo(() => {
+    if (!filters && !cursor) return undefined;
+    return { ...filters, cursor };
+  }, [filters, cursor]);
+
+  const { data, isLoading, isError, error, isFetching } =
+    useSqlEvents(queryParams);
 
   const { openDrawer } = useDetailDrawer();
 
-  // Accumulate pages into allItems when data arrives.
-  // We use a ref-like pattern with state to detect new pages.
-  const currentNextCursor = data?.next_cursor;
-
-  // On first successful load, seed allItems.
-  if (data && !hasLoadedFirst) {
-    setAllItems(data.items);
-    setHasLoadedFirst(true);
-  }
-
-  // When cursor changes and new data arrives, append.
-  // This is intentionally simple — a real implementation would use
-  // TanStack Query's infinite queries, but that's a follow-up.
-  const handleLoadMore = useCallback(() => {
-    if (currentNextCursor) {
-      // Append current page items before fetching next.
-      if (data?.items) {
-        setAllItems((prev) => {
-          const newItems = data.items.filter(
-            (item) => !prev.some((p) => p.id === item.id),
-          );
-          return [...prev, ...newItems];
-        });
-      }
-      setCursor(currentNextCursor);
+  // Seed allItems on first successful load.
+  useEffect(() => {
+    if (data?.items && allItems.length === 0 && !cursor) {
+      setAllItems(data.items);
     }
-  }, [currentNextCursor, data]);
+  }, [data, allItems.length, cursor]);
+
+  const handleLoadMore = useCallback(() => {
+    if (data?.next_cursor) {
+      setAllItems((prev) => {
+        const newItems = (data?.items ?? []).filter(
+          (item) => !prev.some((p) => p.id === item.id),
+        );
+        return [...prev, ...newItems];
+      });
+      setCursor(data.next_cursor);
+    }
+  }, [data]);
 
   const handleSelectEvent = useCallback(
-    (id: string) => {
-      // Store the selected event ID for future SQL Detail content.
-      // For now, just open the drawer (shows placeholder).
-      void id;
+    (_id: string) => {
       openDrawer();
     },
     [openDrawer],
   );
 
-  // Build display list: allItems + current page items not yet in allItems.
   const displayItems = allItems.length > 0 ? allItems : (data?.items ?? []);
-  const showLoadMore = !!currentNextCursor && !isLoading;
+  const showLoadMore = !!data?.next_cursor && !isLoading;
+  const activeFilterCount = countActiveFilters(searchParams);
 
   // --- Error state ---
   if (isError) {
     return (
       <div className="space-y-4">
         <h1 className="text-lg font-semibold tracking-tight">SQL Events</h1>
+        <FilterBar searchParams={searchParams} setSearchParams={setSearchParams} />
         <div className="flex items-center gap-3 rounded-md border p-6">
           <AlertTriangleIcon className="size-5 shrink-0 text-status-error" />
           <div>
@@ -210,11 +392,20 @@ export function SqlEventsRoute() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold tracking-tight">SQL Events</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-lg font-semibold tracking-tight">SQL Events</h1>
+          {activeFilterCount > 0 && (
+            <Badge variant="secondary" className="text-xs">
+              {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""} active
+            </Badge>
+          )}
+        </div>
         {isFetching && !isLoading && (
           <span className="text-xs text-muted-foreground">Refreshing…</span>
         )}
       </div>
+
+      <FilterBar searchParams={searchParams} setSearchParams={setSearchParams} />
 
       <div className="overflow-x-auto rounded-md border">
         <Table>
