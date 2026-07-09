@@ -91,6 +91,24 @@ For component changes:
 - Playwright smoke tests for major flows once the app shell exists.
 - Screenshots in PRs for visible UI changes.
 
+## Layout Conventions (Issue 068)
+
+- Desktop sidebar: collapsible (icon-only via `SidebarProvider`, persisted to
+  `localStorage` key `sql-lens-sidebar-collapsed`). Nav items have lucide
+  icons and tooltips when collapsed.
+- Mobile sidebar: shadcn `Sheet` from the left, triggered by hamburger button
+  in topbar (visible `< md` / `<768px`).
+- Topbar: target badge (placeholder), capture status dot + label
+  (`text-status-*`), search input, theme toggle (sun/moon icons).
+- Right-side detail drawer: shadcn `Sheet` via `useDetailDrawer()` hook
+  (`src/app/providers/detail-drawer-provider.tsx`). Opens programmatically,
+  not by route. Content is a placeholder until SQL Detail / Connection Detail
+  features land.
+- Breakpoint handling: Tailwind `md:` prefix (≥768px). No JS `matchMedia`
+  listener — CSS controls visibility.
+- Provider nesting order in `main.tsx`: `ThemeProvider > SidebarProvider >
+  DetailDrawerProvider > TooltipProvider > BrowserRouter`.
+
 ## Common Mistakes
 
 - Do not build a landing page when the task asks for the SQL Lens app.

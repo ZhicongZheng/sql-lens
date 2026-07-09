@@ -218,3 +218,27 @@ export const apiBaseUrl: string = (
   do not re-wrap with a provider.
 - `sonner.tsx` imports `useTheme` from `@/app/providers/theme-provider`, not
   `next-themes`. Do not reintroduce `next-themes`.
+
+## Responsive Layout (established by Issue 068)
+
+- Breakpoint: `md` (≥768px) is the desktop/mobile boundary.
+- Desktop sidebar: `w-56` (expanded) / `w-16` (collapsed), hidden on `< md`.
+  Collapse state persists to `localStorage` key `sql-lens-sidebar-collapsed`.
+- Mobile sidebar: shadcn `Sheet` (left side), triggered by topbar hamburger
+  button (visible `< md`).
+- Right-side detail drawer: shadcn `Sheet` (right side), opened via
+  `useDetailDrawer()` from `src/app/providers/detail-drawer-provider.tsx`.
+  Framework placeholder — no content until SQL/Connection Detail features.
+- `src/components/layout/sidebar-nav.tsx` is the shared nav list used by both
+  desktop sidebar and mobile Sheet (no duplication).
+- Provider nesting in `main.tsx`: `ThemeProvider > SidebarProvider >
+  DetailDrawerProvider > TooltipProvider > BrowserRouter > App + Toaster`.
+
+## Testing Infrastructure (established by Issue 066)
+
+- Vitest configured via `vitest.config.ts` (jsdom environment).
+- Script: `npm run test` → `vitest run`.
+- Tests live under `__tests__/` next to the module they test.
+- Mock pattern: `vi.stubGlobal("fetch", mockFn)` per test, no MSW.
+- Type declarations: `@testing-library/jest-dom` matchers (e.g. `toBeInTheDocument`)
+  available in all test files.

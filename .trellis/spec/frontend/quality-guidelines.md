@@ -51,6 +51,28 @@ land in follow-up issues and must keep these qualities.
 - Color is never the only status signal: pair `text-status-*` with an icon or
   word (e.g. a `Badge` with `text-status-error` plus the text "Error").
 
+## API Client Contract (established by Issue 066)
+
+- `fetch` calls are confined to `src/lib/api/client.ts` (and its test file).
+  Verify before finishing a frontend task:
+  ```bash
+  grep -rn "fetch(" crates/sql-lens-app/web/src/  # → only in client.ts (+ test)
+  ```
+- `/api/v1` literals are confined to `client.ts` runtime code (JSDoc comments
+  in `types/index.ts` are allowed).
+- `ApiClientError` (from `@/lib/api/errors`) is the sanctioned error wrapper
+  for non-2xx API responses. Type guard: `isApiClientError(err)`.
+- TypeScript types are hand-written from `API.md` (project root). Source of
+  truth for field names and shapes.
+
+## Testing (established by Issue 066)
+
+- Vitest with jsdom environment (`npm run test` → `vitest run`).
+- Tests live under `__tests__/` adjacent to the module they test.
+- Mock `fetch` via `vi.stubGlobal` per test — no MSW, no real backend.
+- Before finishing a frontend feature task, run `npm run test` and confirm
+  all tests pass.
+
 ## User Experience Quality
 
 - Optimize for inspection workflows: filtering, comparison, details, replay
