@@ -3,7 +3,7 @@
   "name": "issue-009-implement-environment-variable-overrides",
   "title": "Issue 009: Implement environment variable overrides",
   "description": "Implement local developer environment variable overrides for startup configuration.",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

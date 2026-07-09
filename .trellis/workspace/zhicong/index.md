@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 74
+- **Total Sessions**: 75
 - **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~469 | Active |
+| `journal-2.md` | ~502 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 75 | 2026-07-09 | Build SQL Detail page (Issue 074) | `9754ee5` | `main` |
 | 74 | 2026-07-09 | Build Connections page (Issue 077) | `94a2aec` | `main` |
 | 73 | 2026-07-09 | Issue 094 Rust CI | `d5b2615` | `main` |
 | 72 | 2026-07-09 | Issue 113 SQLite-backed API event reads | `dd4a91a` | `main` |

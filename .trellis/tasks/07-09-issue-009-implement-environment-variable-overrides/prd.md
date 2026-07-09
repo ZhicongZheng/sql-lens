@@ -31,18 +31,18 @@ application-layer Auth, RBAC, or CSRF flows in the open-source core.
 
 ## Acceptance Criteria
 
-- [ ] `SqlLensConfig` can apply env overrides from the current process
+- [x] `SqlLensConfig` can apply env overrides from the current process
       environment.
-- [ ] Tests cover proxy listen, backend address, and logging level overrides.
-- [ ] Invalid logging level override returns a structured error.
-- [ ] App startup applies env overrides before validation.
-- [ ] `AuthConfig`/`AuthMode` are removed from the startup configuration model.
-- [ ] Project docs/specs no longer describe app-level Auth, RBAC, or CSRF as
+- [x] Tests cover proxy listen, backend address, and logging level overrides.
+- [x] Invalid logging level override returns a structured error.
+- [x] App startup applies env overrides before validation.
+- [x] `AuthConfig`/`AuthMode` are removed from the startup configuration model.
+- [x] Project docs/specs no longer describe app-level Auth, RBAC, or CSRF as
       planned backend work.
-- [ ] MySQL wire-protocol authentication safety rules remain documented.
-- [ ] `rtk cargo fmt --check` passes.
-- [ ] `rtk cargo test --workspace` passes.
-- [ ] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
+- [x] MySQL wire-protocol authentication safety rules remain documented.
+- [x] `rtk cargo fmt --check` passes.
+- [x] `rtk cargo test --workspace` passes.
+- [x] `rtk cargo clippy --workspace --all-targets -- -D warnings` passes.
 
 ## Notes
 

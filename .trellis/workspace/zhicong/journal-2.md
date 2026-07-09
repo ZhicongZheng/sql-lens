@@ -467,3 +467,36 @@ Implemented Connections page with active/closed filter, table view, loading/empt
 ### Next Steps
 
 - None - task complete
+
+
+## Session 75: Build SQL Detail page (Issue 074)
+
+**Date**: 2026-07-09
+**Task**: Build SQL Detail page (Issue 074)
+**Branch**: `main`
+
+### Summary
+
+Implemented SQL Detail page with Monaco Editor, parameter table, error handling, connection info. Updated SQL List navigation from drawer to page navigation. All ACs met, trellis-check passed, committed.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9754ee5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
