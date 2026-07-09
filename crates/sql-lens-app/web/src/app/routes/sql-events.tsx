@@ -70,6 +70,7 @@ function rowBorderClass(status: string): string {
 
 const FILTER_KEYS = [
   "q",
+  "target_name",
   "protocol",
   "status",
   "database",
@@ -96,6 +97,8 @@ function filtersFromParams(
   const filters: SqlEventQueryParams = {};
   const q = params.get("q");
   if (q) filters.q = q;
+  const target_name = params.get("target_name");
+  if (target_name) filters.target_name = target_name;
   const protocol = params.get("protocol");
   if (protocol) filters.protocol = protocol;
   const status = params.get("status");
@@ -117,6 +120,7 @@ function filtersFromParams(
 
 const COLUMNS = [
   { key: "time", label: "Time", className: "w-[72px]" },
+  { key: "target", label: "Target", className: "w-[100px]" },
   { key: "protocol", label: "Protocol", className: "w-[80px]" },
   { key: "database", label: "Database", className: "w-[100px]" },
   { key: "user", label: "User", className: "w-[80px]" },
@@ -160,6 +164,7 @@ function EventRow({
       onClick={() => onSelect(event.id)}
     >
       <TableCell className="font-mono text-xs">{fmtTime(event.timestamp)}</TableCell>
+      <TableCell className="font-mono text-xs">{event.target_name || "—"}</TableCell>
       <TableCell className="text-xs">{event.protocol}</TableCell>
       <TableCell className="text-xs">{event.database}</TableCell>
       <TableCell className="text-xs">{event.user}</TableCell>
@@ -229,6 +234,15 @@ function FilterBar({
             onChange={(e) => setFilter("q", e.target.value)}
           />
         </div>
+
+        {/* Target */}
+        <Input
+          placeholder="Target"
+          aria-label="Target"
+          className="h-8 w-28 text-xs"
+          defaultValue={searchParams.get("target_name") ?? ""}
+          onChange={(e) => setFilter("target_name", e.target.value)}
+        />
 
         {/* Protocol */}
         <Select

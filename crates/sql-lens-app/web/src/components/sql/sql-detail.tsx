@@ -165,6 +165,11 @@ export function SqlDetail({ eventId }: SqlDetailProps) {
           >
             {event.status}
           </Badge>
+          {event.target_name && (
+            <span className="font-mono text-xs text-muted-foreground">
+              {event.target_name}
+            </span>
+          )}
           <span className="text-xs text-muted-foreground">{event.protocol}</span>
           <span className="text-xs text-muted-foreground">·</span>
           <span className="text-xs text-muted-foreground">{event.database}</span>
