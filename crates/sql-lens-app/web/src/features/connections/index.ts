@@ -1,1 +1,1 @@
-export {};
+export { ConnectionsPage } from "./ConnectionsPage";

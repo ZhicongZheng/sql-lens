@@ -1,10 +1,5 @@
-import { PageStub } from "@/components/layout/page-stub";
+import { ConnectionsPage } from "@/features/connections";
 
 export function ConnectionsRoute() {
-  return (
-    <PageStub
-      title="Connections"
-      description="Active and closed connections with bytes in/out and query counts."
-    />
-  );
+  return <ConnectionsPage />;
 }
