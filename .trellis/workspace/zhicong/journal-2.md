@@ -302,3 +302,36 @@ Implemented sql-lens app CLI runtime startup: config-driven API/proxy listeners,
 ### Next Steps
 
 - None - task complete
+
+
+## Session 70: Issue 112 SQLite runtime storage
+
+**Date**: 2026-07-09
+**Task**: Issue 112 SQLite runtime storage
+**Branch**: `main`
+
+### Summary
+
+Implemented configured SQLite storage fan-out in app runtime while keeping API state on ring buffer; added non-Docker tests and updated backend storage/runtime specs.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `18a7d34` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
