@@ -9,7 +9,7 @@ use std::{
 
 use sql_lens_api::{ApiState, HttpServerConfig, HttpServerError, bind_http_server_with_state};
 use sql_lens_capture::SlowQueryClassifier;
-use sql_lens_config::{DatabaseType as ConfigDatabaseType, ProxyTargetConfig};
+use sql_lens_config::{DatabaseType as ConfigDatabaseType, ProxyTargetConfig, SqlLensConfig};
 use sql_lens_core::{ConnectionInfo, DatabaseType, ProtocolName, SqlEvent, Timestamp};
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
@@ -117,7 +117,41 @@ pub async fn start_minimal_mysql_runtime(
     .await
 }
 
+pub async fn start_runtime_from_config(
+    config: &SqlLensConfig,
+) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
+    let targets = config
+        .effective_targets()
+        .iter()
+        .map(MinimalMysqlTargetConfig::from)
+        .collect();
+    let backend_connect_timeout = Duration::from_millis(config.proxy.connect_timeout_ms);
+
+    start_minimal_mysql_runtime_with_options(
+        HttpServerConfig::from(&config.web),
+        backend_connect_timeout,
+        targets,
+    )
+    .await
+}
+
 pub async fn start_minimal_mysql_runtime_with_targets(
+    targets: Vec<MinimalMysqlTargetConfig>,
+) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
+    start_minimal_mysql_runtime_with_options(
+        HttpServerConfig {
+            listen: "127.0.0.1:0".to_owned(),
+            request_timeout_ms: 30_000,
+        },
+        DEFAULT_BACKEND_CONNECT_TIMEOUT,
+        targets,
+    )
+    .await
+}
+
+pub async fn start_minimal_mysql_runtime_with_options(
+    http_config: HttpServerConfig,
+    backend_connect_timeout: Duration,
     targets: Vec<MinimalMysqlTargetConfig>,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
@@ -125,15 +159,9 @@ pub async fn start_minimal_mysql_runtime_with_targets(
     }
 
     let state = ApiState::default();
-    let http_server = bind_http_server_with_state(
-        &HttpServerConfig {
-            listen: "127.0.0.1:0".to_owned(),
-            request_timeout_ms: 30_000,
-        },
-        state.clone(),
-    )
-    .await?;
+    let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
+    tracing::info!(%api_addr, "SQL Lens API server listening");
     let mut bound_targets = Vec::with_capacity(targets.len());
     let mut proxy_targets = Vec::with_capacity(targets.len());
 
@@ -141,13 +169,16 @@ pub async fn start_minimal_mysql_runtime_with_targets(
         let proxy_listener =
             TcpProxyListener::bind(ProxyListenerConfig::new(target.listen.clone())).await?;
         let proxy_addr = proxy_listener.local_addr()?;
+        tracing::info!(
+            target_name = %target.name,
+            database_type = %target.database_type,
+            %proxy_addr,
+            "SQL Lens proxy target listening",
+        );
         let runtime_config = MysqlProxyTargetRuntimeConfig {
             name: target.name.clone(),
             database_type: DatabaseType(target.database_type.clone()),
-            backend_config: BackendDialConfig::new(
-                target.backend_address,
-                DEFAULT_BACKEND_CONNECT_TIMEOUT,
-            ),
+            backend_config: BackendDialConfig::new(target.backend_address, backend_connect_timeout),
         };
 
         proxy_targets.push(MinimalMysqlRuntimeTarget {
@@ -555,6 +586,63 @@ mod tests {
             .expect_err("empty target list should fail");
 
         assert!(matches!(error, MinimalMysqlRuntimeError::NoProxyTargets));
+    }
+
+    #[tokio::test]
+    async fn runtime_from_config_binds_configured_web_and_effective_targets() {
+        let mysql_listen = unused_loopback_addr();
+        let starrocks_listen = unused_loopback_addr();
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[[targets]]
+name = "mysql-local"
+listen = "{mysql_listen}"
+protocol = "mysql"
+database_type = "mysql"
+backend_address = "127.0.0.1:3306"
+
+[[targets]]
+name = "starrocks-local"
+listen = "{starrocks_listen}"
+protocol = "mysql"
+database_type = "starrocks"
+backend_address = "127.0.0.1:9030"
+
+[web]
+listen = "127.0.0.1:0"
+request_timeout_ms = 12345
+
+[proxy]
+connect_timeout_ms = 250
+"#,
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+
+        let runtime = start_runtime_from_config(&config)
+            .await
+            .expect("runtime should bind configured ephemeral listeners");
+
+        assert_eq!(runtime.api_addr.ip().to_string(), "127.0.0.1");
+        assert_ne!(runtime.api_addr.port(), 0);
+        assert_eq!(runtime.proxy_targets.len(), 2);
+        assert_eq!(runtime.proxy_targets[0].name, "mysql-local");
+        assert_eq!(runtime.proxy_targets[1].name, "starrocks-local");
+        assert_ne!(
+            runtime.proxy_targets[0].proxy_addr,
+            runtime.proxy_targets[1].proxy_addr
+        );
+
+        runtime
+            .shutdown()
+            .await
+            .expect("runtime should shut down cleanly");
+    }
+
+    fn unused_loopback_addr() -> SocketAddr {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
+        listener.local_addr().expect("read ephemeral test port")
     }
 
     #[tokio::test]

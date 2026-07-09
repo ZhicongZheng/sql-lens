@@ -1,4 +1,5 @@
 use clap::Parser;
+use sql_lens_app::{MinimalMysqlRuntimeError, start_runtime_from_config};
 use sql_lens_config::{
     ConfigLoadError, ConfigValidationError, LoggingConfig, LoggingFormat, LoggingLevel,
     SqlLensConfig,
@@ -7,6 +8,7 @@ use std::{error::Error, fmt, path::PathBuf, process::ExitCode};
 use tracing_subscriber::filter::LevelFilter;
 
 const STARTUP_CHECK_LOG_MESSAGE: &str = "SQL Lens startup checks completed";
+const SHUTDOWN_SIGNAL_LOG_MESSAGE: &str = "SQL Lens shutdown signal received";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -20,8 +22,9 @@ struct Cli {
     config: PathBuf,
 }
 
-fn main() -> ExitCode {
-    match run(Cli::parse()) {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
+    match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -30,14 +33,24 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), AppError> {
+async fn run(cli: Cli) -> Result<(), AppError> {
     let config = SqlLensConfig::from_path(&cli.config)?;
     config.validate()?;
     init_logging(&config.logging)?;
 
     tracing::info!("{STARTUP_CHECK_LOG_MESSAGE}");
+    let runtime = start_runtime_from_config(&config).await?;
+    wait_for_shutdown_signal().await?;
+    tracing::info!("{SHUTDOWN_SIGNAL_LOG_MESSAGE}");
+    runtime.shutdown().await?;
 
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> Result<(), AppError> {
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(AppError::ShutdownSignal)
 }
 
 fn init_logging(config: &LoggingConfig) -> Result<(), AppError> {
@@ -74,6 +87,8 @@ enum AppError {
     ConfigLoad(ConfigLoadError),
     ConfigValidation(ConfigValidationError),
     LoggingInit(Box<dyn Error + Send + Sync + 'static>),
+    Runtime(MinimalMysqlRuntimeError),
+    ShutdownSignal(std::io::Error),
 }
 
 impl AppError {
@@ -92,6 +107,10 @@ impl fmt::Display for AppError {
             Self::LoggingInit(source) => {
                 write!(f, "failed to initialize SQL Lens logging: {source}")
             }
+            Self::Runtime(source) => write!(f, "failed to start SQL Lens runtime: {source}"),
+            Self::ShutdownSignal(source) => {
+                write!(f, "failed to listen for shutdown signal: {source}")
+            }
         }
     }
 }
@@ -102,6 +121,8 @@ impl Error for AppError {
             Self::ConfigLoad(source) => Some(source),
             Self::ConfigValidation(source) => Some(source),
             Self::LoggingInit(source) => Some(source.as_ref()),
+            Self::Runtime(source) => Some(source),
+            Self::ShutdownSignal(source) => Some(source),
         }
     }
 }
@@ -115,5 +136,11 @@ impl From<ConfigLoadError> for AppError {
 impl From<ConfigValidationError> for AppError {
     fn from(source: ConfigValidationError) -> Self {
         Self::ConfigValidation(source)
+    }
+}
+
+impl From<MinimalMysqlRuntimeError> for AppError {
+    fn from(source: MinimalMysqlRuntimeError) -> Self {
+        Self::Runtime(source)
     }
 }

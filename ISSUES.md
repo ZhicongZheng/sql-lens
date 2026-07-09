@@ -1076,6 +1076,27 @@ Difficulty: Medium
 Estimated Time: 5h
 Dependencies: Issue 066, Add multi-target proxy configuration and runtime fan-out
 
+## Issue 109: Wire app CLI runtime startup
+
+Description: Make the `sql-lens --config sql-lens.toml` binary start the long-running local demo runtime instead of stopping after startup checks.
+
+Acceptance Criteria:
+
+- CLI loads and validates the configured file, initializes logging, then starts runtime services.
+- HTTP API server binds to `web.listen`.
+- Proxy listeners start for every effective target from `[targets]` or the legacy `[proxy]` + `[backend]` pair.
+- Proxy, API, WebSocket broadcast, live statistics, and ring-buffer event storage share one `ApiState`.
+- Startup logs include the bound API address and each target listener address.
+- Ctrl-C triggers graceful shutdown for the API server and proxy listeners.
+- Startup failures return a non-zero exit code with clear error text.
+- Tests cover config-to-runtime startup with ephemeral ports without requiring a live database by default.
+
+Labels: `area:backend`, `area:cli`, `area:proxy`, `area:api`, `type:feature`
+Priority: P0
+Difficulty: Medium
+Estimated Time: 6h
+Dependencies: Issue 011, Issue 026, Issue 059, Add multi-target proxy configuration and runtime fan-out
+
 ## Issue 067: Add TanStack Query providers
 
 Description: Configure TanStack Query for server state.
@@ -1748,7 +1769,7 @@ Difficulty: Easy
 Estimated Time: 2h
 Dependencies: None
 
-## Issue 109: Add release notes template
+## Issue 110: Add release notes template
 
 Description: Add a template for GitHub release notes.
 
@@ -1764,7 +1785,7 @@ Difficulty: Easy
 Estimated Time: 3h
 Dependencies: Issue 098
 
-## Issue 110: Add contributor good-first-issue guide
+## Issue 111: Add contributor good-first-issue guide
 
 Description: Create a guide for selecting first contribution tasks.
 

@@ -63,6 +63,24 @@ SQL Lens startup checks completed
 ```
 
 - This startup event must not include config contents, SQL text, credentials, database errors, or authentication data.
+- Runtime startup emits info-level lifecycle events for the bound API address
+  and each proxy target listener address:
+
+```text
+SQL Lens API server listening
+SQL Lens proxy target listening
+```
+
+- Proxy target startup logs may include `target_name`, `database_type`, and
+  local listener address. They must not include backend credentials, SQL text,
+  packet payloads, or unredacted database errors.
+- Shutdown signal handling emits an info-level lifecycle event before graceful
+  runtime shutdown:
+
+```text
+SQL Lens shutdown signal received
+```
+
 - `redact_secrets` remains part of the config contract, but this first logging layer must avoid logging secrets instead of trying to redact them.
 
 ### 4. Validation & Error Matrix
@@ -72,7 +90,7 @@ SQL Lens startup checks completed
 | `logging.format = "json"` | Emit newline-delimited JSON log events to stderr |
 | `logging.format = "pretty"` | Emit human-readable log events to stderr |
 | `logging.level = "info"` | Emit the startup-check info event |
-| `logging.level = "error"` | Filter out the startup-check info event |
+| `logging.level = "error"` | Filter out info-level startup, listener, and shutdown lifecycle events |
 | Global subscriber cannot be installed | Return app-level logging initialization error; exit non-zero |
 | Config loading or validation fails first | Keep existing stderr error behavior; do not initialize logging |
 
@@ -81,8 +99,11 @@ SQL Lens startup checks completed
 Good:
 
 - `tracing::info!("SQL Lens startup checks completed")` after config validation and logging initialization.
-- Logging lifecycle messages such as startup, shutdown, listener bind, and graceful stop.
-- Structured fields with low-sensitivity values such as component names and local bind addresses after those tasks define their contracts.
+- Logging lifecycle messages such as startup, API bind, target listener bind,
+  shutdown signal, and graceful stop.
+- Structured fields with low-sensitivity values such as component names,
+  target names, database type labels, and local bind addresses after those
+  tasks define their contracts.
 
 Base:
 

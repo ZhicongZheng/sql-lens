@@ -553,8 +553,11 @@ config.validate()?;
 ### 1. Scope / Trigger
 
 - Trigger: `sql-lens-app` owns the user-facing `sql-lens` binary.
-- The first CLI layer is a startup contract for local development, CI smoke tests, and future runtime composition.
-- Keep this layer synchronous until a runtime startup task explicitly adds async services.
+- The CLI is the startup contract for local development, CI smoke tests, and
+  the local demo runtime.
+- Runtime startup belongs in `sql-lens-app`; config loading and validation
+  remain owned by `sql-lens-config`, and HTTP serving remains owned by
+  `sql-lens-api`.
 
 ### 2. Signatures
 
@@ -569,15 +572,27 @@ sql-lens --help
 The Rust entry point shape should stay small:
 
 ```rust
-fn main() -> std::process::ExitCode;
-fn run(cli: Cli) -> Result<(), AppError>;
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode;
+async fn run(cli: Cli) -> Result<(), AppError>;
+async fn wait_for_shutdown_signal() -> Result<(), AppError>;
 ```
 
-Allowed application startup dependencies in `sql-lens-app` at this stage:
+Runtime composition is exposed from the app library for tests and future
+composition:
+
+```rust
+pub async fn start_runtime_from_config(
+    config: &sql_lens_config::SqlLensConfig,
+) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError>;
+```
+
+Required application startup dependencies include:
 
 ```toml
 clap = { version = "4", features = ["derive"] }
 sql-lens-config = { path = "../sql-lens-config" }
+tokio = { version = "1", features = ["macros", "rt", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 ```
@@ -588,21 +603,38 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 - The default config path is `sql-lens.toml`.
 - The loaded config is validated through `SqlLensConfig::validate`.
 - `--version` is handled by clap and exits successfully without loading config.
-- Successful load, validation, and logging initialization exit with `ExitCode::SUCCESS`.
+- Successful load, validation, and logging initialization start the configured
+  runtime and keep the process alive until a shutdown signal arrives.
+- Runtime startup uses every `SqlLensConfig::effective_targets()` entry:
+  explicit `[[targets]]` when present, otherwise the legacy `[proxy]` +
+  `[backend]` pair.
+- Runtime startup binds the API server to `web.listen`.
+- Runtime startup creates one shared `ApiState` for REST handlers, WebSocket
+  broadcast, live statistics, and ring-buffer event storage.
+- The CLI owns OS signal handling; `sql-lens-api` owns HTTP graceful shutdown
+  primitives and `sql-lens-proxy` owns listener/session primitives.
+- Ctrl-C triggers graceful shutdown of the API server and proxy listeners.
 - Config load or validation failure prints a human-readable message to stderr and exits with `ExitCode::FAILURE`.
 - Logging initialization happens after config validation; follow `logging-guidelines.md`.
-- Do not start proxy, API, storage, signal handling, hot reload, or async runtime services in this layer.
+- Runtime startup failures are wrapped in `AppError` and exit with
+  `ExitCode::FAILURE`.
+- Do not add config hot reload, frontend static serving, SQLite persistence,
+  auth, TLS termination, or replay execute in the CLI runtime startup path
+  without a dedicated task.
 
 ### 4. Validation & Error Matrix
 
 | Condition | Required behavior |
 | --- | --- |
 | `--version` is passed | Print version and exit zero before config loading |
-| `--config <FILE>` points to a valid config | Load, validate, initialize logging, emit startup-check log, exit zero |
+| `--config <FILE>` points to a valid config | Load, validate, initialize logging, bind API/proxy listeners, and wait for shutdown |
 | Config file cannot be read | Include config load context and the path in stderr; exit non-zero |
 | TOML cannot be parsed | Include config load context and parse error in stderr; exit non-zero |
 | Config validation fails | Include validation context and violation details in stderr; exit non-zero |
 | Running without `--config` | Attempt to load `sql-lens.toml` |
+| `web.listen` cannot bind | Return a runtime startup error and exit non-zero |
+| Any proxy target listen address cannot bind | Return a runtime startup error and exit non-zero |
+| Ctrl-C is received | Stop API server and proxy listeners before returning success |
 
 ### 5. Good/Base/Bad Cases
 
@@ -610,29 +642,71 @@ Good:
 
 - CLI code delegates parsing to clap and delegates config semantics to `sql-lens-config`.
 - App-level errors wrap config errors only to add startup context.
+- Runtime startup converts config into `HttpServerConfig` and
+  `MinimalMysqlTargetConfig` instead of duplicating config validation rules.
+- Tests use `127.0.0.1:0` or preallocated loopback ports to avoid port
+  collisions.
 
 Base:
 
 - Integration tests run the compiled `sql-lens` binary with standard library `Command`.
 - Test configs use temporary files and explicit `--config` paths.
+- Binary startup tests poll `/api/v1/health` to prove the process is serving
+  before cleaning up the child process.
 
 Bad:
 
 - Duplicating config validation rules in `sql-lens-app`.
 - Calling `unwrap` or `expect` on user-provided config load/validation paths.
-- Adding async runtime, HTTP, storage, watcher, or service startup dependencies to satisfy CLI or logging startup tasks.
+- Starting services from `sql-lens-config` or `sql-lens-api`.
+- Blocking packet forwarding on REST, WebSocket, storage, plugins, or frontend
+  work.
+- Adding hot reload, static frontend hosting, or SQLite persistence to the CLI
+  runtime startup task.
 
 ### 6. Tests Required
 
 For CLI entry point changes:
 
 - `--version` exits successfully and includes the package version.
-- `--config <valid-file>` exits successfully.
+- `--config <valid-file>` starts the API server and responds to
+  `/api/v1/health`.
+- Runtime-from-config tests bind configured `web.listen` and all effective
+  proxy targets using ephemeral or preallocated loopback ports.
+- Runtime shutdown tests exercise a deterministic shutdown primitive without
+  requiring a live database.
 - Missing config path exits non-zero and stderr includes load/read context.
 - Invalid config exits non-zero and stderr includes validation context and violation fields.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.
 - Run `cargo test --workspace`.
+- Run `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+fn run(cli: Cli) -> Result<(), AppError> {
+    let config = SqlLensConfig::from_path(&cli.config)?;
+    config.validate()?;
+    Ok(())
+}
+```
+
+#### Correct
+
+```rust
+async fn run(cli: Cli) -> Result<(), AppError> {
+    let config = SqlLensConfig::from_path(&cli.config)?;
+    config.validate()?;
+    init_logging(&config.logging)?;
+    let runtime = start_runtime_from_config(&config).await?;
+    wait_for_shutdown_signal().await?;
+    runtime.shutdown().await?;
+    Ok(())
+}
+```
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ### 7. Wrong vs Correct
@@ -4817,7 +4891,8 @@ Base:
 Bad:
 
 - Adding `/api/v1/health` in a server foundation task when a dedicated health endpoint task exists.
-- Starting the HTTP server from `sql-lens-app` while app specs still require startup-check-only behavior.
+- Starting the HTTP server directly from `sql-lens-api`; application runtime
+  composition belongs in `sql-lens-app`.
 - Using cryptographic request ID dependencies before a security task requires them.
 - Putting proxy, storage, protocol parser, or SQL replay logic inside `sql-lens-api`.
 
@@ -4830,7 +4905,8 @@ For HTTP server foundation changes:
 - Graceful shutdown test using a caller-provided future.
 - Generated request ID response header test.
 - Incoming request ID propagation test.
-- No change to existing `sql-lens-app` startup-check behavior unless a later runtime task updates that contract.
+- Runtime composition changes should be tested through `sql-lens-app`, while
+  `sql-lens-api` tests stay focused on listener and router primitives.
 - Run `cargo fmt --check`.
 - Run `cargo check --workspace`.
 - Run `cargo test --workspace`.
