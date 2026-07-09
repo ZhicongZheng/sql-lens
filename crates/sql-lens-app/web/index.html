@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SQL Lens</title>
+    <script>
+      // Apply theme before hydration to avoid a light-first flash on reload.
+      // Must agree with theme-provider.tsx: storage key "sql-lens-theme",
+      // class "dark" on <html>. Falls back to prefers-color-scheme.
+      (function () {
+        try {
+          var stored = localStorage.getItem("sql-lens-theme");
+          var prefersDark = window.matchMedia(
+            "(prefers-color-scheme: dark)",
+          ).matches;
+          var dark = stored ? stored === "dark" : prefersDark;
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          /* localStorage disabled (private mode) — leave default light. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

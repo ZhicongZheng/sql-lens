@@ -36,6 +36,21 @@ land in follow-up issues and must keep these qualities.
   sanctioned homes for runtime calls. Do not scatter `fetch` calls through
   components or route stubs.
 
+## Status Color Contract (reinforced by Issue 065)
+
+- Status semantics use the `--status-ok/slow/error/unknown` tokens surfaced as
+  `text-status-*` / `bg-status-*`. Never hardcode `text-red-*`, `text-green-*`,
+  `text-amber-*`, `text-yellow-*`, `text-emerald-*`, or `text-rose-*` for
+  status. Verify before finishing a frontend task:
+  ```bash
+  grep -rnE "text-(red|green|amber|yellow|emerald|rose)-[0-9]" crates/sql-lens-app/web/src/  # → none used for status
+  ```
+- The `--destructive` token is for destructive **actions** (e.g. "Delete"
+  buttons), not for query status. It is the only sanctioned red outside the
+  `--status-*` family.
+- Color is never the only status signal: pair `text-status-*` with an icon or
+  word (e.g. a `Badge` with `text-status-error` plus the text "Error").
+
 ## User Experience Quality
 
 - Optimize for inspection workflows: filtering, comparison, details, replay

@@ -41,11 +41,37 @@ be dense, calm, and optimized for repeated debugging workflows.
 - Use the status color tokens (`text-status-ok` / `-slow` / `-error` /
   `-unknown`) defined in `src/styles/globals.css` — never hardcode `text-red-500`
   and similar for status. See directory-structure.md "Theme tokens".
+- The `--destructive` token is for destructive **actions** (e.g. a "Delete"
+  button), not for status. Status uses `--status-*`. Keep the two distinct.
 - Keep tool surfaces compact and predictable: tables, split panes, filters,
   tabs, badges, and detail panels are preferred over decorative cards.
 - Use status badges and restrained color to distinguish `ok`, `error`, and
   in-flight states. Color is never the only signal — pair with text or an icon.
 - Do not render SQL text, parameters, or database errors as HTML.
+
+## shadcn/ui Component Inventory (Issue 065)
+
+Base primitives live under `src/components/ui/` and are imported via
+`@/components/ui/<name>`. Installed set:
+
+`button`, `table`, `badge`, `card`, `dialog`, `alert-dialog`, `tabs`,
+`tooltip`, `dropdown-menu`, `select`, `input`, `skeleton`, `scroll-area`,
+`separator`, `sheet`, `sonner` (Toaster), `toggle`, `toggle-group`.
+
+Conventions:
+
+- Add more with `npx shadcn@latest add <name> --yes` from
+  `crates/sql-lens-app/web/`. If the CLI prompts to overwrite `button.tsx`,
+  decline (it is the upgraded new-york-v4 version) unless intentionally
+  re-pinning.
+- Each primitive uses `cn()` from `@/lib/utils` and the `data-slot` hook pattern.
+- The shadcn `sonner.tsx` was rewired to import `useTheme` from
+  `@/app/providers/theme-provider` (not `next-themes`); do not reintroduce
+  `next-themes` — 064 deliberately owns theme state.
+- `TooltipProvider` is mounted once at the app root (`src/main.tsx`); individual
+  `<Tooltip>` blocks do not need their own provider.
+- Do not strip Radix defaults (focus trap, Esc-to-close, `aria-*`) when
+  wrapping these primitives.
 
 ## Accessibility
 

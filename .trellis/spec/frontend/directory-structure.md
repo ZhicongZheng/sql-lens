@@ -201,3 +201,20 @@ export const apiBaseUrl: string = (
 - Stack: Vite 6 + React 18 + TypeScript (strict, `noUnusedLocals`/`noUnusedParameters` on) + TailwindCSS v4 (`@tailwindcss/vite`, CSS-first config via `@import "tailwindcss"` + `@theme inline`) + shadcn/ui (`components.json`, `lib/utils.ts` `cn`, New York style, neutral base) + React Router v7.
 - Path alias: `@/* -> ./src/*`, configured in BOTH `tsconfig.app.json` (`paths`) and `vite.config.ts` (`resolve.alias`). Imports use `@/...` exclusively.
 - The skeleton intentionally does NOT install Monaco Editor, ECharts, or TanStack Query — those land in their own issues (066, 067, feature work). Do not add them speculatively.
+
+## Design-System Baseline (established by Issue 065)
+
+- `src/components/ui/` holds the shadcn base inventory (see
+  component-guidelines.md). Import via `@/components/ui/<name>`.
+- `index.html` contains an inline pre-hydration script that applies the `.dark`
+  class from `localStorage` key `sql-lens-theme` (falling back to
+  `prefers-color-scheme: dark`) **before** React mounts, eliminating the
+  dark-mode flash-on-reload. `theme-provider.tsx` still owns React-side state;
+  the script and provider must agree on the storage key and class name.
+- `<Toaster richColors closeButton />` (sonner) is mounted once at the app root
+  in `src/main.tsx`, inside `ThemeProvider`. Any feature calls `toast(...)`
+  from `sonner` directly.
+- `TooltipProvider` is also mounted once at the app root; individual tooltips
+  do not re-wrap with a provider.
+- `sonner.tsx` imports `useTheme` from `@/app/providers/theme-provider`, not
+  `next-themes`. Do not reintroduce `next-themes`.
