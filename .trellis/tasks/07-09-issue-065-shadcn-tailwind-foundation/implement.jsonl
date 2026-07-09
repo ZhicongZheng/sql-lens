@@ -1,0 +1,4 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/frontend/directory-structure.md", "reason": "Toolchain/build contract, @/* alias, cn(), globals.css theme tokens, no-flash script + Toaster mount location to document"}
+{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "cn() + @/* styling rules, status tokens, no-marketing-page rule, a11y/focus + accessible labels for icon controls"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Build & decoupling grep gates (no fetch/XHR/WebSocket, no /api/v1), a11y rules, status-not-color-only"}
