@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Check SQLite transaction, redaction, and persistence behavior."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Check test coverage and validation commands."}
