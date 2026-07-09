@@ -104,3 +104,36 @@ Added protocol-neutral fingerprint_sql helper in sql-lens-core with scanner-base
 ### Next Steps
 
 - None - task complete
+
+
+## Session 64: Implement SQL event export endpoint
+
+**Date**: 2026-07-09
+**Task**: Implement SQL event export endpoint
+**Branch**: `main`
+
+### Summary
+
+Added GET /api/v1/sql-events/export with JSON and NDJSON formats, shared SQL event filters, default redaction, bounded export limit, API docs, and endpoint tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `43c1b53` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

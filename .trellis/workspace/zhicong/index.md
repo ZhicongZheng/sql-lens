@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 63
+- **Total Sessions**: 64
 - **Last Active**: 2026-07-09
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~106 | Active |
+| `journal-2.md` | ~139 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 64 | 2026-07-09 | Implement SQL event export endpoint | `43c1b53` | `main` |
 | 63 | 2026-07-09 | Implement SQL fingerprinting foundation | `4c1300f` | `main` |
 | 62 | 2026-07-09 | Implement replay preview API | `4cc4820` | `main` |
 | 61 | 2026-07-09 | Implement multi-target proxy fan-out | `8cb320e` | `main` |
