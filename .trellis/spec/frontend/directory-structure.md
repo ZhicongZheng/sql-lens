@@ -87,6 +87,17 @@ Target identity must complement, not replace:
 Do not infer target identity from backend address strings in components. Use the
 typed `target_name` backend/API field.
 
+## Multi-Target UI (established by Issue 108)
+
+- `target_name` is displayed in:
+  - SQL List table: dedicated column between Time and Protocol.
+  - SQL Detail Summary: shown next to the status badge.
+  - SQL List filter bar: `target_name` input with URL state sync.
+- `target_name` is present in all API response types (`SqlEvent`,
+  `SqlEventSummary`, `SqlConnection`) — no additional type work needed.
+- The topbar target badge remains a hardcoded `mysql-local` placeholder until
+  a dedicated target-list API endpoint is available.
+
 ## State Rules
 
 - TanStack Query owns server state.
