@@ -368,3 +368,36 @@ Added code-first OpenAPI generation for SQL Lens REST API, generated docs/openap
 ### Next Steps
 
 - None - task complete
+
+
+## Session 72: Issue 113 SQLite-backed API event reads
+
+**Date**: 2026-07-09
+**Task**: Issue 113 SQLite-backed API event reads
+**Branch**: `main`
+
+### Summary
+
+Added a configured SQL event read source so SQLite mode serves persisted list/detail/export/replay preview reads through existing REST contracts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dd4a91a` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
