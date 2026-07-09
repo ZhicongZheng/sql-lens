@@ -9,7 +9,8 @@ import {
 
 interface DetailDrawerContextValue {
   isOpen: boolean;
-  openDrawer: () => void;
+  selectedEventId: string | null;
+  openDrawer: (eventId?: string) => void;
   closeDrawer: () => void;
 }
 
@@ -19,13 +20,21 @@ const DetailDrawerContext = createContext<DetailDrawerContextValue | undefined>(
 
 export function DetailDrawerProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 
-  const openDrawer = useCallback(() => setIsOpen(true), []);
-  const closeDrawer = useCallback(() => setIsOpen(false), []);
+  const openDrawer = useCallback((eventId?: string) => {
+    setSelectedEventId(eventId ?? null);
+    setIsOpen(true);
+  }, []);
+
+  const closeDrawer = useCallback(() => {
+    setSelectedEventId(null);
+    setIsOpen(false);
+  }, []);
 
   const value = useMemo<DetailDrawerContextValue>(
-    () => ({ isOpen, openDrawer, closeDrawer }),
-    [isOpen, openDrawer, closeDrawer],
+    () => ({ isOpen, selectedEventId, openDrawer, closeDrawer }),
+    [isOpen, selectedEventId, openDrawer, closeDrawer],
   );
 
   return (

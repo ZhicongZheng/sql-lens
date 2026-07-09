@@ -363,8 +363,8 @@ export function SqlEventsRoute() {
   }, [data]);
 
   const handleSelectEvent = useCallback(
-    (_id: string) => {
-      openDrawer();
+    (id: string) => {
+      openDrawer(id);
     },
     [openDrawer],
   );

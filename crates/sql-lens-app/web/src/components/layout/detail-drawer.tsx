@@ -1,4 +1,5 @@
 import { useDetailDrawer } from "@/app/providers/detail-drawer-provider";
+import { SqlDetail } from "@/components/sql/sql-detail";
 import {
   Sheet,
   SheetContent,
@@ -8,25 +9,32 @@ import {
 } from "@/components/ui/sheet";
 
 export function DetailDrawer() {
-  const { isOpen, closeDrawer } = useDetailDrawer();
+  const { isOpen, selectedEventId, closeDrawer } = useDetailDrawer();
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && closeDrawer()}>
       <SheetContent
         side="right"
-        className="w-full sm:max-w-lg"
+        className="flex w-full flex-col sm:max-w-lg"
         aria-describedby="detail-drawer-description"
       >
         <SheetHeader>
-          <SheetTitle>Detail</SheetTitle>
+          <SheetTitle>
+            {selectedEventId ? "SQL Detail" : "Detail"}
+          </SheetTitle>
           <SheetDescription id="detail-drawer-description">
-            Detail panel — content arrives with SQL Detail / Connection Detail
-            features.
+            {selectedEventId
+              ? `Event ${selectedEventId}`
+              : "Select an event or connection to view details."}
           </SheetDescription>
         </SheetHeader>
-        <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground">
-          Select an event or connection to view details.
-        </div>
+        {selectedEventId ? (
+          <SqlDetail eventId={selectedEventId} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground">
+            Select an event or connection to view details.
+          </div>
+        )}
       </SheetContent>
     </Sheet>
   );
