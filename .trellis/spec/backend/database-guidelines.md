@@ -4,17 +4,19 @@
 
 ## Overview
 
-SQL Lens currently has no external database, ORM, or migration system. The
-implemented storage layer is in-memory and lives in `crates/sql-lens-storage`.
-Future SQLite and DuckDB work should be introduced through explicit storage
-tasks rather than leaking persistence choices into protocol, proxy, API, or app
-crates.
+SQL Lens currently has no external database or ORM. The implemented storage
+layer lives in `crates/sql-lens-storage` and includes the live in-memory ring
+buffer plus SQLite persistence primitives. Future storage backends should be
+introduced through explicit storage/runtime tasks rather than leaking
+persistence choices into protocol, proxy, API, or frontend crates.
 
 The current storage examples are:
 
 - `crates/sql-lens-storage/src/ring_buffer.rs` for SQL event timeline storage.
 - `crates/sql-lens-storage/src/connection_store.rs` for recent connection state.
 - `crates/sql-lens-storage/src/live_statistics.rs` for derived counters.
+- `crates/sql-lens-storage/src/sqlite_event_store.rs` for SQLite event
+  persistence and readback/query helpers.
 
 ## Storage Ownership
 
@@ -64,8 +66,9 @@ pub fn apply_sqlite_schema(
 - Use `rusqlite::Connection::execute_batch` for schema-only migrations.
 - Keep migrations idempotent with `CREATE TABLE IF NOT EXISTS`,
   `CREATE INDEX IF NOT EXISTS`, and `INSERT OR IGNORE` for schema version rows.
-- Keep SQLite access in `sql-lens-storage`; do not call SQLite from protocol,
-  proxy, API handler, or app startup code until an explicit runtime wiring task.
+- Keep SQLite access in `sql-lens-storage`; protocol, proxy, and API handlers
+  must not call SQLite directly. App runtime may open a configured
+  `SqliteEventStore` only for an explicit runtime wiring task.
 - Rollback/downgrade behavior is not implemented yet. Future schema versions
   must document upgrade and compatibility behavior before adding version > 1.
 
@@ -116,8 +119,8 @@ For storage changes:
 
 ## Common Mistakes
 
-- Do not add database access to protocol, proxy, API handler, or app startup code
-  just to make a test pass.
+- Do not add database access to protocol, proxy, or API handler code just to
+  make a test pass.
 - Do not persist unredacted SQL parameters when redaction is enabled.
 - Do not duplicate filter matching in API or UI layers.
 - Do not introduce SQLite, DuckDB, or migrations as placeholder scaffolding.
@@ -128,9 +131,10 @@ For storage changes:
 
 - Trigger: a task persists `SqlEvent` rows into SQLite or changes the SQLite
   persistence API.
-- SQLite persistence is storage-local until a separate runtime wiring task.
-- Inserts must not put SQLite calls in protocol, proxy, API handlers, or app
-  startup code.
+- SQLite persistence is storage-local except for the app runtime fan-out worker
+  created from `storage.type = "sqlite"`.
+- Inserts must not put SQLite calls in protocol, proxy, API handlers, or the
+  forwarding hot path.
 
 ### 2. Signatures
 
@@ -140,6 +144,7 @@ Current storage-local API:
 pub struct SqliteEventStore;
 
 impl SqliteEventStore {
+    pub fn open(path: impl AsRef<std::path::Path>) -> rusqlite::Result<Self>;
     pub fn new(connection: rusqlite::Connection) -> rusqlite::Result<Self>;
     pub fn insert_event(&mut self, event: &SqlEvent) -> rusqlite::Result<()>;
     pub fn get_event_row(&self, id: &SqlEventId) -> rusqlite::Result<Option<SqliteEventRow>>;
@@ -149,7 +154,8 @@ impl SqliteEventStore {
 
 ### 3. Contracts
 
-- `new` applies `apply_sqlite_schema` before returning a store.
+- `open` opens a file path and delegates to `new`; `new` applies
+  `apply_sqlite_schema` before returning a store.
 - `insert_event` applies `redact_sql_event(event.clone(), &RedactionPolicy::default())`
   before writing.
 - One `SqlEvent` row is inserted into `sql_events`; its parameters are inserted
@@ -174,8 +180,10 @@ impl SqliteEventStore {
 
 Good:
 
-- A caller opens a `rusqlite::Connection`, constructs `SqliteEventStore`, and
-  inserts captured events through `insert_event`.
+- Storage-local tests may open a `rusqlite::Connection`, construct
+  `SqliteEventStore`, and insert captured events through `insert_event`.
+- App runtime opens configured SQLite storage through `SqliteEventStore::open`
+  and sends event copies to a worker over a bounded channel.
 - Tests verify stored SQL and parameters are redacted.
 
 Base:
@@ -187,7 +195,8 @@ Bad:
 
 - Writing unredacted `SqlEvent` parameters to SQLite.
 - Using `INSERT OR REPLACE` without a documented event update contract.
-- Calling SQLite directly from protocol observers or TCP forwarding code.
+- Calling SQLite directly from protocol observers, proxy primitives, API
+  handlers, or TCP forwarding code.
 
 ### 6. Tests Required
 

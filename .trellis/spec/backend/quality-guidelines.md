@@ -592,6 +592,7 @@ Required application startup dependencies include:
 ```toml
 clap = { version = "4", features = ["derive"] }
 sql-lens-config = { path = "../sql-lens-config" }
+sql-lens-storage = { path = "../sql-lens-storage" }
 tokio = { version = "1", features = ["macros", "rt", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
@@ -611,6 +612,10 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 - Runtime startup binds the API server to `web.listen`.
 - Runtime startup creates one shared `ApiState` for REST handlers, WebSocket
   broadcast, live statistics, and ring-buffer event storage.
+- When `storage.type = "sqlite"`, runtime startup opens/migrates
+  `storage.path` through `SqliteEventStore::open` and starts a bounded
+  persistence worker. REST SQL event timeline/detail endpoints still read from
+  the shared ring-buffer `ApiState` until a later API storage-backend task.
 - The CLI owns OS signal handling; `sql-lens-api` owns HTTP graceful shutdown
   primitives and `sql-lens-proxy` owns listener/session primitives.
 - Ctrl-C triggers graceful shutdown of the API server and proxy listeners.
@@ -618,8 +623,8 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 - Logging initialization happens after config validation; follow `logging-guidelines.md`.
 - Runtime startup failures are wrapped in `AppError` and exit with
   `ExitCode::FAILURE`.
-- Do not add config hot reload, frontend static serving, SQLite persistence,
-  auth, TLS termination, or replay execute in the CLI runtime startup path
+- Do not add config hot reload, frontend static serving, auth, TLS termination,
+  replay execute, or new storage backends in the CLI runtime startup path
   without a dedicated task.
 
 ### 4. Validation & Error Matrix
@@ -634,6 +639,9 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 | Running without `--config` | Attempt to load `sql-lens.toml` |
 | `web.listen` cannot bind | Return a runtime startup error and exit non-zero |
 | Any proxy target listen address cannot bind | Return a runtime startup error and exit non-zero |
+| `storage.type = "sqlite"` and `storage.path` is empty | Return a runtime startup error and exit non-zero |
+| SQLite storage cannot be opened or migrated | Return a runtime startup error and exit non-zero |
+| SQLite per-event persistence fails after startup | Log a warning and keep proxy forwarding alive |
 | Ctrl-C is received | Stop API server and proxy listeners before returning success |
 
 ### 5. Good/Base/Bad Cases
@@ -659,10 +667,10 @@ Bad:
 - Duplicating config validation rules in `sql-lens-app`.
 - Calling `unwrap` or `expect` on user-provided config load/validation paths.
 - Starting services from `sql-lens-config` or `sql-lens-api`.
-- Blocking packet forwarding on REST, WebSocket, storage, plugins, or frontend
-  work.
-- Adding hot reload, static frontend hosting, or SQLite persistence to the CLI
-  runtime startup task.
+- Blocking packet forwarding on REST, WebSocket, SQLite persistence, plugins,
+  or frontend work.
+- Adding hot reload, static frontend hosting, replay execute, auth, or new
+  storage backends to the CLI runtime startup task.
 
 ### 6. Tests Required
 

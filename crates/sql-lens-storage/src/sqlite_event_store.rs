@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, num::NonZeroUsize};
+use std::{error::Error, fmt, num::NonZeroUsize, path::Path};
 
 use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
 use serde::Serialize;
@@ -116,6 +116,10 @@ impl From<rusqlite::Error> for SqliteTimelineQueryError {
 }
 
 impl SqliteEventStore {
+    pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        Self::new(Connection::open(path)?)
+    }
+
     pub fn new(connection: Connection) -> rusqlite::Result<Self> {
         apply_sqlite_schema(&connection)?;
 
@@ -738,7 +742,10 @@ fn parameter_value_type(value: &SqlParameterValue) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::{
+        num::NonZeroUsize,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use rusqlite::Connection;
     use serde_json::Value;
@@ -749,6 +756,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn sqlite_event_store_opens_file_path_and_applies_schema() {
+        let path = temporary_sqlite_path("open-file");
+        let store = SqliteEventStore::open(&path).expect("sqlite file store should open");
+        drop(store);
+
+        let connection = Connection::open(&path).expect("sqlite file should reopen");
+        let schema_version: i64 = connection
+            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .expect("schema version row should exist");
+
+        assert_eq!(schema_version, crate::SQLITE_SCHEMA_VERSION);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn sqlite_event_store_inserts_and_reads_event_scalars() {
@@ -1291,6 +1313,18 @@ mod tests {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
 
         SqliteEventStore::new(connection).expect("sqlite store should initialize")
+    }
+
+    fn temporary_sqlite_path(name: &str) -> std::path::PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_millis();
+
+        std::env::temp_dir().join(format!(
+            "sql-lens-storage-{name}-{}-{millis}.sqlite3",
+            std::process::id()
+        ))
     }
 
     fn insert_events(store: &mut SqliteEventStore, events: Vec<SqlEvent>) {

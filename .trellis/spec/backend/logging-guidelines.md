@@ -74,6 +74,11 @@ SQL Lens proxy target listening
 - Proxy target startup logs may include `target_name`, `database_type`, and
   local listener address. They must not include backend credentials, SQL text,
   packet payloads, or unredacted database errors.
+- When configured SQLite persistence is enabled, app runtime may log an
+  info-level lifecycle event with the SQLite file path. Per-event persistence
+  failures, a full persistence queue, or a stopped persistence worker are
+  warn-level recoverable events. These warnings may include the event ID and the
+  storage error display, but must not include SQL text or parameter values.
 - Shutdown signal handling emits an info-level lifecycle event before graceful
   runtime shutdown:
 

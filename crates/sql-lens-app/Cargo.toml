@@ -18,6 +18,7 @@ sql-lens-core = { path = "../sql-lens-core" }
 sql-lens-protocol = { path = "../sql-lens-protocol" }
 sql-lens-protocol-mysql = { path = "../sql-lens-protocol-mysql" }
 sql-lens-proxy = { path = "../sql-lens-proxy" }
+sql-lens-storage = { path = "../sql-lens-storage" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }

@@ -2258,6 +2258,7 @@ dependencies = [
  "sql-lens-protocol",
  "sql-lens-protocol-mysql",
  "sql-lens-proxy",
+ "sql-lens-storage",
  "testcontainers",
  "tokio",
  "tracing",

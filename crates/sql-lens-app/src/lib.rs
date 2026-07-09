@@ -4,12 +4,19 @@ use std::{
     error::Error,
     fmt, io,
     net::SocketAddr,
+    num::NonZeroUsize,
+    path::PathBuf,
+    sync::mpsc::{SyncSender, TrySendError, sync_channel},
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use sql_lens_api::{ApiState, HttpServerConfig, HttpServerError, bind_http_server_with_state};
 use sql_lens_capture::SlowQueryClassifier;
-use sql_lens_config::{DatabaseType as ConfigDatabaseType, ProxyTargetConfig, SqlLensConfig};
+use sql_lens_config::{
+    DatabaseType as ConfigDatabaseType, ProxyTargetConfig, SqlLensConfig, StorageConfig,
+    StorageType,
+};
 use sql_lens_core::{ConnectionInfo, DatabaseType, ProtocolName, SqlEvent, Timestamp};
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
@@ -19,6 +26,7 @@ use sql_lens_proxy::{
     ForwardingSummary, ProxiedConnection, ProxyListenerConfig, ProxyListenerError,
     TcpProxyListener,
 };
+use sql_lens_storage::{RingBufferStore, SqliteEventStore};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{oneshot, watch},
@@ -28,6 +36,7 @@ use tokio::{
 const MYSQL_PROTOCOL_NAME: &str = "mysql";
 const FORWARDING_BUFFER_SIZE: usize = 16 * 1024;
 const DEFAULT_BACKEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const SQLITE_PERSISTENCE_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug)]
 pub struct MinimalMysqlRuntime {
@@ -38,6 +47,8 @@ pub struct MinimalMysqlRuntime {
     proxy_shutdown_tx: watch::Sender<bool>,
     api_task: tokio::task::JoinHandle<Result<(), HttpServerError>>,
     proxy_tasks: Vec<tokio::task::JoinHandle<()>>,
+    persistence: EventPersistence,
+    sqlite_worker: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,14 +102,29 @@ struct MysqlProxyTargetRuntimeConfig {
 
 impl MinimalMysqlRuntime {
     pub async fn shutdown(self) -> Result<(), MinimalMysqlRuntimeError> {
-        let _ = self.api_shutdown_tx.send(());
-        let _ = self.proxy_shutdown_tx.send(true);
+        let Self {
+            api_shutdown_tx,
+            proxy_shutdown_tx,
+            api_task,
+            proxy_tasks,
+            persistence,
+            sqlite_worker,
+            ..
+        } = self;
 
-        self.api_task
-            .await
-            .map_err(MinimalMysqlRuntimeError::Join)??;
-        for proxy_task in self.proxy_tasks {
+        let _ = api_shutdown_tx.send(());
+        let _ = proxy_shutdown_tx.send(true);
+
+        api_task.await.map_err(MinimalMysqlRuntimeError::Join)??;
+        for proxy_task in proxy_tasks {
             proxy_task.await.map_err(MinimalMysqlRuntimeError::Join)?;
+        }
+        drop(persistence);
+
+        if let Some(worker) = sqlite_worker {
+            worker
+                .join()
+                .map_err(|_| MinimalMysqlRuntimeError::SqlitePersistenceWorkerPanicked)?;
         }
 
         Ok(())
@@ -126,11 +152,13 @@ pub async fn start_runtime_from_config(
         .map(MinimalMysqlTargetConfig::from)
         .collect();
     let backend_connect_timeout = Duration::from_millis(config.proxy.connect_timeout_ms);
+    let runtime_storage = RuntimeStorage::from_config(&config.storage)?;
 
-    start_minimal_mysql_runtime_with_options(
+    start_minimal_mysql_runtime_with_runtime_storage(
         HttpServerConfig::from(&config.web),
         backend_connect_timeout,
         targets,
+        runtime_storage,
     )
     .await
 }
@@ -154,11 +182,31 @@ pub async fn start_minimal_mysql_runtime_with_options(
     backend_connect_timeout: Duration,
     targets: Vec<MinimalMysqlTargetConfig>,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
+    start_minimal_mysql_runtime_with_runtime_storage(
+        http_config,
+        backend_connect_timeout,
+        targets,
+        RuntimeStorage::ring_buffer_default(),
+    )
+    .await
+}
+
+async fn start_minimal_mysql_runtime_with_runtime_storage(
+    http_config: HttpServerConfig,
+    backend_connect_timeout: Duration,
+    targets: Vec<MinimalMysqlTargetConfig>,
+    runtime_storage: RuntimeStorage,
+) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
         return Err(MinimalMysqlRuntimeError::NoProxyTargets);
     }
 
-    let state = ApiState::default();
+    let RuntimeStorage {
+        event_store,
+        persistence,
+        sqlite_worker,
+    } = runtime_storage;
+    let state = ApiState::new(event_store);
     let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
     tracing::info!(%api_addr, "SQL Lens API server listening");
@@ -204,6 +252,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
                 proxy_listener,
                 runtime_config,
                 state.clone(),
+                persistence.clone(),
                 proxy_shutdown_rx.clone(),
             ))
         })
@@ -217,13 +266,142 @@ pub async fn start_minimal_mysql_runtime_with_options(
         proxy_shutdown_tx,
         api_task,
         proxy_tasks,
+        persistence,
+        sqlite_worker,
     })
+}
+
+#[derive(Debug)]
+struct RuntimeStorage {
+    event_store: RingBufferStore,
+    persistence: EventPersistence,
+    sqlite_worker: Option<thread::JoinHandle<()>>,
+}
+
+impl RuntimeStorage {
+    fn from_config(config: &StorageConfig) -> Result<Self, MinimalMysqlRuntimeError> {
+        let event_store = RingBufferStore::new(storage_capacity(config.capacity)?);
+
+        match config.storage_type {
+            StorageType::RingBuffer => Ok(Self {
+                event_store,
+                persistence: EventPersistence::default(),
+                sqlite_worker: None,
+            }),
+            StorageType::Sqlite => {
+                let path = sqlite_storage_path(config)?;
+                let store = SqliteEventStore::open(&path).map_err(|source| {
+                    MinimalMysqlRuntimeError::SqliteStorage {
+                        path: path.clone(),
+                        source: Box::new(source),
+                    }
+                })?;
+                let (persistence, sqlite_worker) = EventPersistence::sqlite(store);
+                tracing::info!(path = %path.display(), "SQL Lens SQLite persistence enabled");
+
+                Ok(Self {
+                    event_store,
+                    persistence,
+                    sqlite_worker: Some(sqlite_worker),
+                })
+            }
+            StorageType::DuckDb => Err(MinimalMysqlRuntimeError::StorageConfig(
+                "storage.type = \"duckdb\" is not supported by app runtime yet".to_owned(),
+            )),
+        }
+    }
+
+    fn ring_buffer_default() -> Self {
+        let capacity = NonZeroUsize::new(sql_lens_api::DEFAULT_EVENT_STORE_CAPACITY)
+            .expect("default event store capacity should be non-zero");
+
+        Self {
+            event_store: RingBufferStore::new(capacity),
+            persistence: EventPersistence::default(),
+            sqlite_worker: None,
+        }
+    }
+}
+
+fn storage_capacity(capacity: u64) -> Result<NonZeroUsize, MinimalMysqlRuntimeError> {
+    let capacity = usize::try_from(capacity).unwrap_or(usize::MAX);
+
+    NonZeroUsize::new(capacity).ok_or_else(|| {
+        MinimalMysqlRuntimeError::StorageConfig(
+            "storage.capacity must be greater than zero".to_owned(),
+        )
+    })
+}
+
+fn sqlite_storage_path(config: &StorageConfig) -> Result<PathBuf, MinimalMysqlRuntimeError> {
+    let path = config.path.trim();
+    if path.is_empty() {
+        return Err(MinimalMysqlRuntimeError::StorageConfig(
+            "storage.path is required when storage.type = \"sqlite\"".to_owned(),
+        ));
+    }
+
+    Ok(PathBuf::from(path))
+}
+
+#[derive(Debug, Clone, Default)]
+struct EventPersistence {
+    sqlite_tx: Option<SyncSender<SqlEvent>>,
+}
+
+impl EventPersistence {
+    fn sqlite(mut store: SqliteEventStore) -> (Self, thread::JoinHandle<()>) {
+        let (sqlite_tx, sqlite_rx) = sync_channel::<SqlEvent>(SQLITE_PERSISTENCE_CHANNEL_CAPACITY);
+        let worker = thread::spawn(move || {
+            while let Ok(event) = sqlite_rx.recv() {
+                let event_id = event.id.clone();
+                if let Err(source) = store.insert_event(&event) {
+                    tracing::warn!(
+                        event_id = %event_id.0,
+                        error = %source,
+                        "failed to persist SQL event to SQLite",
+                    );
+                }
+            }
+        });
+
+        (
+            Self {
+                sqlite_tx: Some(sqlite_tx),
+            },
+            worker,
+        )
+    }
+
+    fn persist(&self, event: SqlEvent) {
+        let Some(sqlite_tx) = &self.sqlite_tx else {
+            return;
+        };
+
+        let event_id = event.id.clone();
+        match sqlite_tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(
+                    event_id = %event_id.0,
+                    "SQLite persistence queue is full; dropping persisted event copy",
+                );
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!(
+                    event_id = %event_id.0,
+                    "SQLite persistence worker is stopped; dropping persisted event copy",
+                );
+            }
+        }
+    }
 }
 
 async fn run_mysql_proxy(
     listener: TcpProxyListener,
     target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
+    persistence: EventPersistence,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let id_generator = ConnectionLifecycleIdGenerator::new();
@@ -248,6 +426,7 @@ async fn run_mysql_proxy(
                             accepted,
                             target_config.clone(),
                             state.clone(),
+                            persistence.clone(),
                             id_generator.next_id(),
                         )
                         .await;
@@ -265,6 +444,7 @@ async fn handle_accepted_mysql_client(
     accepted: AcceptedClient,
     target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
+    persistence: EventPersistence,
     connection_id: sql_lens_core::ConnectionId,
 ) {
     let client_peer_addr = accepted.peer_addr();
@@ -280,7 +460,7 @@ async fn handle_accepted_mysql_client(
             );
             tokio::spawn(async move {
                 if let Err(source) =
-                    forward_mysql_connection(connection, connection_info, state).await
+                    forward_mysql_connection(connection, connection_info, state, persistence).await
                 {
                     tracing::warn!(error = %source, "MySQL proxy forwarding failed");
                 }
@@ -320,6 +500,7 @@ async fn forward_mysql_connection(
     connection: ProxiedConnection,
     connection_info: ConnectionInfo,
     state: ApiState,
+    persistence: EventPersistence,
 ) -> Result<ForwardingSummary, ForwardingError> {
     let (mut client_stream, mut backend_stream, client_peer_addr, backend_address) =
         connection.into_parts();
@@ -408,7 +589,7 @@ async fn forward_mysql_connection(
                     )
                 })?;
                 backend_to_client_bytes += bytes_read as u64;
-                store_sql_events(&state, events).await;
+                store_sql_events(&state, &persistence, events).await;
             }
         }
     }
@@ -445,7 +626,7 @@ fn observe_backend_bytes(
     events.events
 }
 
-async fn store_sql_events(state: &ApiState, events: Vec<SqlEvent>) {
+async fn store_sql_events(state: &ApiState, persistence: &EventPersistence, events: Vec<SqlEvent>) {
     if events.is_empty() {
         return;
     }
@@ -461,7 +642,8 @@ async fn store_sql_events(state: &ApiState, events: Vec<SqlEvent>) {
         let event = classifier.classify(event);
         let _ = broadcaster.publish(event.clone());
         statistics.record_sql_event(&event);
-        store.append(event);
+        store.append(event.clone());
+        persistence.persist(event);
     }
 }
 
@@ -639,6 +821,69 @@ connect_timeout_ms = 250
             .expect("runtime should shut down cleanly");
     }
 
+    #[tokio::test]
+    async fn runtime_from_config_rejects_sqlite_without_path() {
+        let listen = unused_loopback_addr();
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[proxy]
+listen = "{listen}"
+
+[web]
+listen = "127.0.0.1:0"
+
+[storage]
+type = "sqlite"
+path = "   "
+"#,
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+
+        let error = start_runtime_from_config(&config)
+            .await
+            .expect_err("sqlite storage without a path should fail startup");
+
+        assert!(matches!(
+            error,
+            MinimalMysqlRuntimeError::StorageConfig(message)
+                if message.contains("storage.path is required")
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_from_config_opens_configured_sqlite_storage() {
+        let listen = unused_loopback_addr();
+        let path = temporary_sqlite_path("runtime-open");
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[proxy]
+listen = "{listen}"
+
+[web]
+listen = "127.0.0.1:0"
+
+[storage]
+type = "sqlite"
+path = "{}"
+"#,
+            path.display()
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+
+        let runtime = start_runtime_from_config(&config)
+            .await
+            .expect("sqlite runtime should start");
+        runtime
+            .shutdown()
+            .await
+            .expect("runtime should shut down cleanly");
+
+        assert!(path.exists(), "sqlite file should be created");
+        let _ = std::fs::remove_file(path);
+    }
+
     fn unused_loopback_addr() -> SocketAddr {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
@@ -652,6 +897,7 @@ connect_timeout_ms = 250
 
         store_sql_events(
             &state,
+            &EventPersistence::default(),
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -683,6 +929,7 @@ connect_timeout_ms = 250
 
         store_sql_events(
             &state,
+            &EventPersistence::default(),
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -697,6 +944,98 @@ connect_timeout_ms = 250
             .get(&event_id)
             .expect("classified event should be stored");
         assert_eq!(stored.status, CaptureStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn store_sql_events_persists_to_sqlite_worker() {
+        let path = temporary_sqlite_path("event-persistence");
+        let store = SqliteEventStore::open(&path).expect("sqlite store should open");
+        let (persistence, worker) = EventPersistence::sqlite(store);
+        let state = ApiState::default();
+        let event_id = SqlEventId("evt_persisted".to_owned());
+
+        store_sql_events(
+            &state,
+            &persistence,
+            vec![test_event(
+                event_id.clone(),
+                CaptureStatus::Ok,
+                DurationMillis(12),
+            )],
+        )
+        .await;
+        drop(persistence);
+        worker
+            .join()
+            .expect("sqlite persistence worker should shut down");
+
+        let reopened = SqliteEventStore::open(&path).expect("sqlite store should reopen");
+        let row = reopened
+            .get_event_row(&event_id)
+            .expect("sqlite event lookup should succeed")
+            .expect("event should be persisted");
+        assert_eq!(row.id, "evt_persisted");
+        assert_eq!(row.status, "ok");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_worker_insert_failure_does_not_stop_capture_state() {
+        let path = temporary_sqlite_path("event-persistence-failure");
+        let store = SqliteEventStore::open(&path).expect("sqlite store should open");
+        let (persistence, worker) = EventPersistence::sqlite(store);
+        let state = ApiState::default();
+        let event_id = SqlEventId("evt_duplicate".to_owned());
+        let event = test_event(event_id.clone(), CaptureStatus::Ok, DurationMillis(12));
+
+        store_sql_events(&state, &persistence, vec![event.clone(), event]).await;
+        drop(persistence);
+        worker
+            .join()
+            .expect("sqlite persistence worker should shut down after insert failure");
+
+        let event_store = state.event_store();
+        let store = event_store.read().await;
+        let stats = store.stats();
+        assert_eq!(stats.total_appended, 2);
+        assert_eq!(stats.len, 2);
+        drop(store);
+
+        let live_statistics = state.live_statistics();
+        let mut statistics = live_statistics.write().await;
+        assert_eq!(statistics.snapshot().total_events, 2);
+
+        let reopened = SqliteEventStore::open(&path).expect("sqlite store should reopen");
+        assert!(
+            reopened
+                .get_event_row(&event_id)
+                .expect("sqlite event lookup should succeed")
+                .is_some()
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_storage_from_ring_buffer_config_has_no_persistence_worker() {
+        let storage = RuntimeStorage::from_config(&StorageConfig::default())
+            .expect("default storage config should be valid");
+
+        assert!(storage.persistence.sqlite_tx.is_none());
+        assert!(storage.sqlite_worker.is_none());
+    }
+
+    fn temporary_sqlite_path(name: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_millis();
+
+        std::env::temp_dir().join(format!(
+            "sql-lens-{name}-{}-{millis}.sqlite3",
+            std::process::id()
+        ))
     }
 
     fn test_event(id: SqlEventId, status: CaptureStatus, duration: DurationMillis) -> SqlEvent {
@@ -737,6 +1076,12 @@ connect_timeout_ms = 250
 #[derive(Debug)]
 pub enum MinimalMysqlRuntimeError {
     NoProxyTargets,
+    StorageConfig(String),
+    SqliteStorage {
+        path: PathBuf,
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+    SqlitePersistenceWorkerPanicked,
     Http(HttpServerError),
     ProxyListener(ProxyListenerError),
     BackendDial(BackendDialError),
@@ -750,6 +1095,17 @@ impl fmt::Display for MinimalMysqlRuntimeError {
                 f,
                 "minimal MySQL runtime requires at least one proxy target"
             ),
+            Self::StorageConfig(message) => write!(f, "invalid runtime storage config: {message}"),
+            Self::SqliteStorage { path, source } => {
+                write!(
+                    f,
+                    "failed to initialize SQLite storage at {}: {source}",
+                    path.display()
+                )
+            }
+            Self::SqlitePersistenceWorkerPanicked => {
+                write!(f, "SQLite persistence worker panicked")
+            }
             Self::Http(source) => write!(f, "minimal MySQL runtime HTTP server failed: {source}"),
             Self::ProxyListener(source) => {
                 write!(f, "minimal MySQL runtime proxy listener failed: {source}")
@@ -766,6 +1122,9 @@ impl Error for MinimalMysqlRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NoProxyTargets => None,
+            Self::StorageConfig(_) => None,
+            Self::SqliteStorage { source, .. } => Some(source.as_ref()),
+            Self::SqlitePersistenceWorkerPanicked => None,
             Self::Http(source) => Some(source),
             Self::ProxyListener(source) => Some(source),
             Self::BackendDial(source) => Some(source),

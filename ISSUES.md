@@ -1800,3 +1800,23 @@ Priority: P2
 Difficulty: Easy
 Estimated Time: 3h
 Dependencies: None
+
+## Issue 112: Wire configured SQLite storage into app runtime
+
+Description: Wire `storage.type = "sqlite"` into `sql-lens-app` runtime so captured SQL events can be persisted locally while the API continues serving the live ring-buffer view.
+
+Acceptance Criteria:
+
+- Runtime initializes SQLite storage when `storage.type = "sqlite"` and `storage.path` is configured.
+- Runtime startup fails clearly when SQLite storage is selected without a usable path.
+- Captured SQL events continue to append to the ring buffer and update live statistics.
+- Captured SQL events are also persisted to SQLite without blocking packet forwarding.
+- SQLite persistence failures are logged as warnings and do not stop proxy forwarding.
+- Default ring-buffer runtime behavior is unchanged.
+- Tests cover ring-buffer-only startup and SQLite-configured persistence with a temporary database path.
+
+Labels: `area:backend`, `area:storage`, `area:app`, `type:feature`
+Priority: P1
+Difficulty: Medium
+Estimated Time: 6h
+Dependencies: Issue 087, Issue 109
