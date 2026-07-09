@@ -71,3 +71,36 @@ Added preview-only replay endpoint with event/raw SQL sources, conservative muta
 ### Next Steps
 
 - None - task complete
+
+
+## Session 63: Implement SQL fingerprinting foundation
+
+**Date**: 2026-07-09
+**Task**: Implement SQL fingerprinting foundation
+**Branch**: `main`
+
+### Summary
+
+Added protocol-neutral fingerprint_sql helper in sql-lens-core with scanner-based literal/whitespace normalization, wired into MySQL COM_QUERY and COM_STMT_EXECUTE event construction, and updated backend quality spec.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4c1300f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
