@@ -97,3 +97,29 @@ status).
 `<Toaster richColors closeButton />` (sonner) is mounted once at the app root
 in `src/main.tsx`, inside `ThemeProvider`. Any feature can call `toast(...)`
 from `sonner` directly — no per-route wiring.
+
+## Server State (TanStack Query)
+
+TanStack Query manages all server state. `QueryClientProvider` is mounted at
+the app root in `src/main.tsx`. Default configuration (`src/lib/query-client.ts`):
+
+| Option | Value | Rationale |
+|---|---|---|
+| `retry` | 1 | Local API; one retry is enough, more adds noise |
+| `staleTime` | 30s | Avoid redundant refetches; data is fresh for 30s |
+| `gcTime` | 5min | Keep unused cache for 5min so tab-switching is instant |
+
+Special case: `useStatistics` polls every 5s (`refetchInterval: 5_000`) as an
+interim solution until WebSocket integration replaces it.
+
+### Adding a new query hook
+
+1. Create `src/lib/api/hooks/use-<resource>.ts`.
+2. Import the typed client function from `@/lib/api/client`.
+3. Return `useQuery({ queryKey: ["resource", params], queryFn: () => ... })`.
+4. Add the export to `src/lib/api/hooks/index.ts`.
+
+Query key convention: `["resource-name", ...filterParams]`.
+
+Hooks live in `src/lib/api/hooks/`. Do not call `fetch` directly — use the
+typed client functions in `@/lib/api/client`.

@@ -117,6 +117,9 @@ typed `target_name` backend/API field.
 ### 2. Signatures
 - `src/lib/api/config.ts` exports `const apiBaseUrl: string`.
 - Reader: `import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5173"`, trailing slash stripped.
+- `src/lib/query-client.ts` exports a `QueryClient` singleton (retry:1, staleTime:30s, gcTime:5min).
+- Query hooks live in `src/lib/api/hooks/` (one file per domain), barrel at `src/lib/api/hooks/index.ts`.
+- `useStatistics` polls every 5s (`refetchInterval: 5_000`) as interim until WebSocket integration.
 
 ### 3. Contracts
 - Environment key `VITE_API_BASE_URL` (optional). Default `http://127.0.0.1:5173` matches the API listener recommended default in `ARCHITECTURE.md`.
