@@ -533,3 +533,36 @@ Added SQL Lens config environment overrides for proxy listen, backend address, a
 ### Next Steps
 
 - None - task complete
+
+
+## Session 77: Capture MySQL COM_QUERY result sets
+
+**Date**: 2026-07-09
+**Task**: Capture MySQL COM_QUERY result sets
+**Branch**: `main`
+
+### Summary
+
+Implemented Issue 114: MySQL COM_QUERY result-set responses now finalize query events with returned row counts; fixed MySQL 8 empty query-attributes SQL extraction; added protocol regressions, Docker-only SELECT smoke coverage, and validated with local proxy SELECT smoke.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `84a2962` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
