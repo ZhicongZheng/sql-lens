@@ -387,6 +387,7 @@ mod tests {
         let server = bind_http_server(&HttpServerConfig {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
+            static_dir: None,
             request_timeout_ms: 30_000,
         })
         .await

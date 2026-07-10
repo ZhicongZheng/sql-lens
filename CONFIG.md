@@ -67,6 +67,7 @@ ca_cert_path = ""
 listen = "127.0.0.1:5173"
 base_url = "http://127.0.0.1:5173"
 cors_origins = ["http://127.0.0.1:5173"]
+static_dir = "crates/sql-lens-app/web/dist"
 
 [storage]
 type = "ring_buffer"
@@ -172,7 +173,9 @@ Fields:
 - `listen`.
 - `base_url`.
 - `cors_origins`.
-- `static_dir`.
+- `static_dir`: optional built frontend directory. When set, `sql-lens` serves
+  the UI and SPA routes from this directory on the same listener as its API and
+  WebSocket endpoints. The directory must contain `index.html`.
 - `request_timeout_ms`.
 
 ### `storage`

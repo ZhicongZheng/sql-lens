@@ -224,6 +224,7 @@ pub async fn start_minimal_mysql_runtime_with_targets(
         HttpServerConfig {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
+            static_dir: None,
             request_timeout_ms: 30_000,
         },
         DEFAULT_BACKEND_CONNECT_TIMEOUT,

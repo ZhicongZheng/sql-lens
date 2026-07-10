@@ -125,13 +125,22 @@ cargo install sql-lens
 
 Target v1 workflow:
 
-1. Start SQL Lens:
+1. Build the web UI:
+
+   ```bash
+   cd crates/sql-lens-app/web
+   npm install
+   npm run build
+   cd ../../..
+   ```
+
+2. Start SQL Lens:
 
    ```bash
    sql-lens --config sql-lens.toml
    ```
 
-2. Configure SQL Lens:
+3. Configure SQL Lens:
 
    ```toml
    [proxy]
@@ -143,15 +152,16 @@ Target v1 workflow:
 
    [web]
    listen = "127.0.0.1:5173"
+   static_dir = "crates/sql-lens-app/web/dist"
    ```
 
-3. Change the application database address:
+4. Change the application database address:
 
    ```text
    mysql://user:password@127.0.0.1:3307/app
    ```
 
-4. Open the dashboard:
+5. Open the dashboard:
 
    ```text
    http://127.0.0.1:5173

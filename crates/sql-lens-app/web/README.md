@@ -26,8 +26,9 @@ npm run typecheck  # type-check only
 ## Configuration
 
 The API base URL is read from the `VITE_API_BASE_URL` environment variable,
-defaulting to `http://127.0.0.1:5173` (the Rust backend's recommended API
-listener port). Override it for local development:
+defaulting to the browser origin so a built UI served by `sql-lens` uses its
+own API listener. The Vite dev server proxies `/api` and `/ws` to
+`http://127.0.0.1:5173`; override the base only for a non-default backend:
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:5173 npm run dev

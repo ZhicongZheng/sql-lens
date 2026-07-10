@@ -655,7 +655,7 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
   `ExitCode::FAILURE`.
 - Do not add config hot reload, frontend static serving, TLS termination,
   replay execute, or new storage backends in the CLI runtime startup path
-  without a dedicated task.
+  without a dedicated task and explicit API router behavior.
 
 ### 4. Validation & Error Matrix
 

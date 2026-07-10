@@ -126,19 +126,24 @@ typed `target_name` backend/API field.
 - Trigger: env wiring that couples the frontend to the backend API listener. Code-spec depth is mandatory because a wrong default or a hardcoded `fetch` breaks the decoupling contract that Issue 064 established.
 
 ### 2. Signatures
-- `src/lib/api/config.ts` exports `const apiBaseUrl: string`.
-- Reader: `import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:5173"`, trailing slash stripped.
+- `src/lib/api/config.ts` exports `const apiBaseUrl: string` and
+  `resolveApiBaseUrl` for deterministic URL configuration tests.
+- Reader: `VITE_API_BASE_URL`, otherwise the browser origin, with trailing
+  slash stripped. The server-side fallback is `http://127.0.0.1:5173`.
 - `src/lib/query-client.ts` exports a `QueryClient` singleton (retry:1, staleTime:30s, gcTime:5min).
 - Query hooks live in `src/lib/api/hooks/` (one file per domain), barrel at `src/lib/api/hooks/index.ts`.
 - `useStatistics` polls every 5s (`refetchInterval: 5_000`) as interim until WebSocket integration.
 
 ### 3. Contracts
-- Environment key `VITE_API_BASE_URL` (optional). Default `http://127.0.0.1:5173` matches the API listener recommended default in `ARCHITECTURE.md`.
+- Environment key `VITE_API_BASE_URL` (optional). Built frontend assets default
+  to their browser origin so the UI can be served by the same `sql-lens` HTTP
+  listener. Vite development proxies `/api` and `/ws` to the local Rust server.
 - `apiBaseUrl` is the **base only** (origin + optional port). It is NOT a full endpoint and must not include a trailing slash or a `/api/v1` path segment.
 - Runtime endpoint construction (base + `/api/v1/...`) is the job of the typed API client in Issue 066, not the skeleton's config module.
 
 ### 4. Validation & Error Matrix
-- `VITE_API_BASE_URL` unset → use `127.0.0.1:5173` default (no error).
+- `VITE_API_BASE_URL` unset in a browser → use `window.location.origin` (no
+  error); non-browser evaluation falls back to `127.0.0.1:5173`.
 - `VITE_API_BASE_URL` set with a trailing slash → stripped at read time (no error).
 - A `fetch(`/api/v1/...`)` or `new WebSocket(...)` call anywhere in the skeleton → **forbidden** (decoupling violation). The skeleton must build and render with no backend running.
 
