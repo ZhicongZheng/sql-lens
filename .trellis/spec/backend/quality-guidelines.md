@@ -1526,8 +1526,7 @@ impl SlowQueryClassifier {
 }
 ```
 
-Config exposes the global threshold under `[proxy]` while runtime composition is
-still proxy-first:
+Config exposes the global threshold under `[proxy]`:
 
 ```toml
 [proxy]
@@ -1543,6 +1542,10 @@ slow_threshold_ms = 500
 - `CaptureStatus::Ok` remains `Ok` below the threshold.
 - `CaptureStatus::Error`, `Unknown`, and already-`Slow` events are unchanged.
 - Threshold `0` is valid and classifies every successful event as slow.
+- `sql-lens-app` constructs one classifier from
+  `SqlLensConfig.proxy.slow_threshold_ms` when the configured runtime starts,
+  then passes it to the capture consumer. Runtime helpers without a config use
+  the classifier default.
 - App fan-out must classify once before cloning the event to storage,
   WebSocket broadcast, and live statistics.
 - Storage, API handlers, WebSocket subscriptions, and statistics counters must
@@ -1583,8 +1586,8 @@ Bad:
 - Classifier unit tests for below, equal, and above threshold.
 - Classifier unit tests for error, unknown, and already-slow statuses.
 - Config default and TOML parsing tests for `slow_threshold_ms`.
-- App fan-out test proving storage and live statistics receive classified
-  events.
+- App tests for at least two non-default configured thresholds, proving the
+  broadcast and stored event receive the same classified status.
 - Run `cargo fmt --check`.
 - Run `cargo test --workspace`.
 - Run `cargo clippy --workspace --all-targets -- -D warnings`.

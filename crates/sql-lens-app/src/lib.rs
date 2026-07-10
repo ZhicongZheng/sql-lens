@@ -21,7 +21,9 @@ use sql_lens_config::{
     DatabaseType as ConfigDatabaseType, ProxyTargetConfig, SqlLensConfig, StorageConfig,
     StorageType,
 };
-use sql_lens_core::{ConnectionInfo, DatabaseType, ProtocolName, SqlEvent, Timestamp};
+use sql_lens_core::{
+    ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, SqlEvent, Timestamp,
+};
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
 use sql_lens_proxy::{
@@ -115,6 +117,7 @@ struct CaptureRuntime {
 impl CaptureRuntime {
     fn start(
         config: CapturePipelineConfig,
+        classifier: SlowQueryClassifier,
         state: ApiState,
         persistence: EventPersistence,
     ) -> Self {
@@ -122,6 +125,7 @@ impl CaptureRuntime {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(run_capture_consumer(
             receiver,
+            classifier,
             state,
             persistence,
             shutdown_rx,
@@ -200,6 +204,7 @@ pub async fn start_runtime_from_config(
     let backend_connect_timeout = Duration::from_millis(config.proxy.connect_timeout_ms);
     let runtime_storage = RuntimeStorage::from_config(&config.storage)?;
     let capture_config = runtime_capture_config(&config.capture)?;
+    let classifier = runtime_slow_query_classifier(config);
 
     start_minimal_mysql_runtime_with_runtime_storage(
         HttpServerConfig::from(&config.web),
@@ -207,6 +212,7 @@ pub async fn start_runtime_from_config(
         targets,
         runtime_storage,
         capture_config,
+        classifier,
     )
     .await
 }
@@ -237,6 +243,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
         targets,
         RuntimeStorage::ring_buffer_default(),
         default_capture_pipeline_config(),
+        SlowQueryClassifier::default(),
     )
     .await
 }
@@ -247,6 +254,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     targets: Vec<MinimalMysqlTargetConfig>,
     runtime_storage: RuntimeStorage,
     capture_config: CapturePipelineConfig,
+    classifier: SlowQueryClassifier,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
         return Err(MinimalMysqlRuntimeError::NoProxyTargets);
@@ -263,7 +271,12 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     } else {
         ApiState::new(event_store)
     };
-    let capture_runtime = CaptureRuntime::start(capture_config, state.clone(), persistence.clone());
+    let capture_runtime = CaptureRuntime::start(
+        capture_config,
+        classifier,
+        state.clone(),
+        persistence.clone(),
+    );
     let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
     tracing::info!(%api_addr, "SQL Lens API server listening");
@@ -349,6 +362,10 @@ fn runtime_capture_config(
 fn default_capture_pipeline_config() -> CapturePipelineConfig {
     runtime_capture_config(&CaptureConfig::default())
         .expect("default capture configuration should be valid")
+}
+
+fn runtime_slow_query_classifier(config: &SqlLensConfig) -> SlowQueryClassifier {
+    SlowQueryClassifier::new(DurationMillis(config.proxy.slow_threshold_ms))
 }
 
 #[derive(Debug)]
@@ -705,6 +722,7 @@ async fn forward_mysql_connection(
 
 async fn run_capture_consumer(
     mut receiver: CaptureEventReceiver,
+    classifier: SlowQueryClassifier,
     state: ApiState,
     persistence: EventPersistence,
     mut shutdown: oneshot::Receiver<()>,
@@ -712,12 +730,12 @@ async fn run_capture_consumer(
     loop {
         tokio::select! {
             event = receiver.recv() => match event {
-                Some(event) => store_sql_events(&state, &persistence, vec![event]).await,
+                Some(event) => store_sql_events(&state, &persistence, classifier, vec![event]).await,
                 None => return,
             },
             _ = &mut shutdown => {
                 while let Some(event) = receiver.try_recv() {
-                    store_sql_events(&state, &persistence, vec![event]).await;
+                    store_sql_events(&state, &persistence, classifier, vec![event]).await;
                 }
                 return;
             }
@@ -799,12 +817,16 @@ fn observe_backend_bytes(
     events.events
 }
 
-async fn store_sql_events(state: &ApiState, persistence: &EventPersistence, events: Vec<SqlEvent>) {
+async fn store_sql_events(
+    state: &ApiState,
+    persistence: &EventPersistence,
+    classifier: SlowQueryClassifier,
+    events: Vec<SqlEvent>,
+) {
     if events.is_empty() {
         return;
     }
 
-    let classifier = SlowQueryClassifier::default();
     let broadcaster = state.sql_event_broadcaster();
     let event_store = state.event_store();
     let live_statistics = state.live_statistics();
@@ -1367,6 +1389,7 @@ path = "{}"
         store_sql_events(
             &state,
             &EventPersistence::default(),
+            SlowQueryClassifier::default(),
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -1392,6 +1415,45 @@ path = "{}"
     }
 
     #[tokio::test]
+    async fn configured_runtime_classifier_marks_and_broadcasts_expected_statuses() {
+        for (threshold_ms, duration_ms, expected_status) in [
+            (100, 100, CaptureStatus::Slow),
+            (900, 899, CaptureStatus::Ok),
+            (900, 900, CaptureStatus::Slow),
+        ] {
+            let state = ApiState::default();
+            let mut subscription = state.sql_event_broadcaster().subscribe();
+            let mut config = SqlLensConfig::default();
+            config.proxy.slow_threshold_ms = threshold_ms;
+            let event_id = SqlEventId(format!("evt_threshold_{threshold_ms}_{duration_ms}"));
+
+            store_sql_events(
+                &state,
+                &EventPersistence::default(),
+                runtime_slow_query_classifier(&config),
+                vec![test_event(
+                    event_id.clone(),
+                    CaptureStatus::Ok,
+                    DurationMillis(duration_ms),
+                )],
+            )
+            .await;
+
+            let broadcast = subscription.recv().await.expect("event should broadcast");
+            assert_eq!(broadcast.status, expected_status);
+
+            let event_store = state.event_store();
+            let stored = event_store
+                .read()
+                .await
+                .get(&event_id)
+                .expect("classified event should be stored")
+                .clone();
+            assert_eq!(stored.status, expected_status);
+        }
+    }
+
+    #[tokio::test]
     async fn capture_consumer_fans_out_events_to_existing_runtime_sinks() {
         let state = ApiState::default();
         let mut subscription = state.sql_event_broadcaster().subscribe();
@@ -1400,6 +1462,7 @@ path = "{}"
                 NonZeroUsize::new(1).expect("non-zero capacity"),
                 CaptureOverloadPolicy::DropNewest,
             ),
+            SlowQueryClassifier::default(),
             state.clone(),
             EventPersistence::default(),
         );
@@ -1465,6 +1528,7 @@ path = "{}"
         store_sql_events(
             &state,
             &EventPersistence::default(),
+            SlowQueryClassifier::default(),
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -1492,6 +1556,7 @@ path = "{}"
         store_sql_events(
             &state,
             &persistence,
+            SlowQueryClassifier::default(),
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -1524,7 +1589,13 @@ path = "{}"
         let event_id = SqlEventId("evt_duplicate".to_owned());
         let event = test_event(event_id.clone(), CaptureStatus::Ok, DurationMillis(12));
 
-        store_sql_events(&state, &persistence, vec![event.clone(), event]).await;
+        store_sql_events(
+            &state,
+            &persistence,
+            SlowQueryClassifier::default(),
+            vec![event.clone(), event],
+        )
+        .await;
         drop(persistence);
         worker
             .join()
