@@ -6,6 +6,7 @@ import { DashboardRoute } from "@/app/routes/dashboard";
 import { ReplayRoute } from "@/app/routes/replay";
 import { SettingsRoute } from "@/app/routes/settings";
 import { SqlEventsRoute } from "@/app/routes/sql-events";
+import { SqlDetailRoute } from "@/app/routes/sql-detail";
 import { StatisticsRoute } from "@/app/routes/statistics";
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<DashboardRoute />} />
         <Route path="sql" element={<SqlEventsRoute />} />
+        <Route path="sql/:id" element={<SqlDetailRoute />} />
         <Route path="connections" element={<ConnectionsRoute />} />
         <Route path="statistics" element={<StatisticsRoute />} />
         <Route path="replay" element={<ReplayRoute />} />

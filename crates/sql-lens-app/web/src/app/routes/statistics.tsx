@@ -1,10 +1,5 @@
-import { PageStub } from "@/components/layout/page-stub";
+import { StatisticsPage } from "@/features/statistics/StatisticsPage";
 
 export function StatisticsRoute() {
-  return (
-    <PageStub
-      title="Statistics"
-      description="QPS, latency percentiles, error rate, and top fingerprints over time."
-    />
-  );
+  return <StatisticsPage />;
 }

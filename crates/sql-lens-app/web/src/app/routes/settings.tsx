@@ -1,10 +1,5 @@
-import { PageStub } from "@/components/layout/page-stub";
+import { SettingsPage } from "@/features/settings/SettingsPage";
 
 export function SettingsRoute() {
-  return (
-    <PageStub
-      title="Settings"
-      description="Proxy, backend, storage, redaction, slow SQL threshold, auth, plugins, and exporters."
-    />
-  );
+  return <SettingsPage />;
 }

@@ -1,10 +1,5 @@
-import { PageStub } from "@/components/layout/page-stub";
+import { ReplayPage } from "@/features/replay/ReplayPage";
 
 export function ReplayRoute() {
-  return (
-    <PageStub
-      title="Replay"
-      description="Preview and execute captured SQL against a target with explicit confirmation for mutations."
-    />
-  );
+  return <ReplayPage />;
 }
