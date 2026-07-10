@@ -106,6 +106,30 @@ Use cases:
 - Webhook.
 - Error aggregation.
 
+## Rust Hook Contract
+
+`sql-lens-plugin` exposes one synchronous, independently implementable trait
+for each hook point:
+
+| Hook | Rust trait | Payload |
+| --- | --- | --- |
+| `OnConnect` | `OnConnect` | `&ConnectionInfo` |
+| `OnQuery` | `OnQuery` | `&SqlEvent`, `&ConnectionInfo` |
+| `OnPrepare` | `OnPrepare` | `&PreparedStatementInfo`, `&ConnectionInfo` |
+| `OnExecute` | `OnExecute` | `&SqlEvent`, `&ConnectionInfo` |
+| `OnError` | `OnError` | `&SqlEvent`, `&ConnectionInfo`, `&ErrorSummary` |
+
+Each callback returns `PluginResult`, which is `Result<(), PluginError>`.
+Dispatchers record or otherwise handle `PluginError` values without allowing a
+hook failure to stop packet forwarding or captured-event delivery. The traits
+are object-safe and receive borrowed protocol-neutral core models; they do not
+provide packet mutation or SQL rewrite access.
+
+The trait contract is synchronous only. A future dispatcher owns scheduling,
+timeouts, redaction, retries, and isolation. Before invoking a hook with a SQL
+event, that dispatcher must provide a redacted event according to the active
+redaction policy.
+
 ## Exporter Interface
 
 Exporter types:
@@ -211,4 +235,3 @@ Rules:
 - Public plugin payloads use stable schemas.
 - Internal struct changes must not break plugin payloads without versioning.
 - Plugin hooks should receive protocol-neutral events plus optional metadata.
-

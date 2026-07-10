@@ -6201,6 +6201,111 @@ SqlEvent {
 }
 ```
 
+## Scenario: Plugin Hook Trait Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-plugin` exposes public in-process extension points for
+  connection, query, prepared statement, execution, and error observation.
+- These contracts are cross-crate boundaries for future runtime dispatchers and
+  exporters. They must stay protocol-neutral and must not affect packet
+  forwarding.
+
+### 2. Signatures
+
+Plugin hooks live in `crates/sql-lens-plugin/src/lib.rs` and use only
+`sql-lens-core` payload models:
+
+```rust
+pub type PluginResult = Result<(), PluginError>;
+
+pub trait OnConnect {
+    fn on_connect(&mut self, connection: &ConnectionInfo) -> PluginResult;
+}
+
+pub trait OnQuery {
+    fn on_query(&mut self, event: &SqlEvent, connection: &ConnectionInfo) -> PluginResult;
+}
+```
+
+`OnPrepare`, `OnExecute`, and `OnError` follow the same synchronous,
+object-safe pattern using `PreparedStatementInfo`, `SqlEvent`, `ConnectionInfo`,
+and `ErrorSummary` as appropriate.
+
+### 3. Contracts
+
+- `OnConnect` receives `ConnectionInfo`; it already includes protocol,
+  database type, client address, and backend address.
+- `OnQuery` and `OnExecute` receive `SqlEvent`; its metadata, parameters, and
+  expanded SQL remain protocol-neutral shared data.
+- `OnPrepare` receives `PreparedStatementInfo`, not a protocol-local statement
+  ID type.
+- `OnError` receives both `SqlEvent` and `ErrorSummary` for direct error
+  handling without requiring consumers to inspect optional event fields.
+- Callback methods are synchronous, borrowed, and object-safe. They return
+  `PluginResult`; no runtime scheduling, timeout, retry, loading, or dispatch
+  behavior belongs in this crate.
+- Dispatchers must pass redacted `SqlEvent` values before hook invocation.
+- `PluginError` crosses the plugin boundary as a typed error, but a returned
+  error must never stop packet forwarding or captured-event delivery.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Hook succeeds | Return `Ok(())` |
+| Hook cannot complete | Return `Err(PluginError::HookFailed { .. })` |
+| Dispatcher receives a plugin error | Record or isolate it; continue forwarding and capture delivery |
+| Hook payload needs protocol-specific data | Read it through `ProtocolMetadata`, not a new MySQL-only field |
+| SQL event reaches a hook | Dispatch only an already-redacted event |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- A webhook exporter implements only `OnError` and returns `PluginResult`.
+- A future dispatcher keeps `Box<dyn OnQuery>` values and handles each returned
+  error independently.
+
+Base:
+
+- A stateful plugin uses `&mut self` to count received events.
+
+Bad:
+
+- Putting `MysqlPreparedStatement` or raw packet bytes in a plugin trait.
+- Adding async runtime or HTTP dependencies solely to define hook traits.
+- Letting a plugin error terminate a proxy session.
+
+### 6. Tests Required
+
+- Construct representative `ConnectionInfo`, `SqlEvent`,
+  `PreparedStatementInfo`, and `ErrorSummary` payloads.
+- Invoke every hook through a trait object to prove object safety.
+- Assert successful callbacks receive the expected protocol-neutral fields.
+- Assert a failing hook returns `PluginError` and that it implements
+  `std::error::Error`.
+- Run `cargo fmt --check`, `cargo test -p sql-lens-plugin`, workspace tests,
+  and workspace clippy.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+pub trait OnQuery {
+    fn on_query(&mut self, statement_id: u32, raw_packet: &[u8]);
+}
+```
+
+#### Correct
+
+```rust
+pub trait OnQuery {
+    fn on_query(&mut self, event: &SqlEvent, connection: &ConnectionInfo) -> PluginResult;
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

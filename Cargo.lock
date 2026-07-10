@@ -2308,6 +2308,9 @@ dependencies = [
 [[package]]
 name = "sql-lens-plugin"
 version = "0.1.0"
+dependencies = [
+ "sql-lens-core",
+]
 
 [[package]]
 name = "sql-lens-protocol"
