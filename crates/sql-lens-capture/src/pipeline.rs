@@ -71,9 +71,12 @@ impl CaptureEventPublisher {
                     }),
                 }
             }
-            Err(TrySendError::Closed(event)) => Err(CapturePublishError::Closed {
-                event: Box::new(event),
-            }),
+            Err(TrySendError::Closed(event)) => {
+                self.counters.increment_closed_events();
+                Err(CapturePublishError::Closed {
+                    event: Box::new(event),
+                })
+            }
         }
     }
 
@@ -91,6 +94,10 @@ pub struct CaptureEventReceiver {
 impl CaptureEventReceiver {
     pub async fn recv(&mut self) -> Option<SqlEvent> {
         self.receiver.recv().await
+    }
+
+    pub fn try_recv(&mut self) -> Option<SqlEvent> {
+        self.receiver.try_recv().ok()
     }
 
     pub fn stats(&self) -> CapturePipelineStats {
@@ -132,11 +139,13 @@ impl Error for CapturePublishError {}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapturePipelineStats {
     pub dropped_events: u64,
+    pub closed_events: u64,
 }
 
 #[derive(Debug, Default)]
 struct CapturePipelineCounters {
     dropped_events: AtomicU64,
+    closed_events: AtomicU64,
 }
 
 impl CapturePipelineCounters {
@@ -144,9 +153,14 @@ impl CapturePipelineCounters {
         self.dropped_events.fetch_add(1, Ordering::Relaxed);
     }
 
+    fn increment_closed_events(&self) {
+        self.closed_events.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn stats(&self) -> CapturePipelineStats {
         CapturePipelineStats {
             dropped_events: self.dropped_events.load(Ordering::Relaxed),
+            closed_events: self.closed_events.load(Ordering::Relaxed),
         }
     }
 }
@@ -212,6 +226,7 @@ mod tests {
         assert_eq!(outcome, CapturePublishOutcome::Enqueued);
         assert_eq!(received, event);
         assert_eq!(publisher.stats().dropped_events, 0);
+        assert_eq!(publisher.stats().closed_events, 0);
         assert_eq!(receiver.stats().dropped_events, 0);
     }
 
@@ -302,6 +317,7 @@ mod tests {
             }
         );
         assert_eq!(publisher.stats().dropped_events, 0);
+        assert_eq!(publisher.stats().closed_events, 1);
         assert!(!error.to_string().is_empty());
     }
 }

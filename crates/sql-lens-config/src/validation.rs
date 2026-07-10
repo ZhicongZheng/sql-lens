@@ -6,6 +6,10 @@ impl SqlLensConfig {
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
         let mut violations = Vec::new();
 
+        if self.capture.capacity == 0 {
+            violations.push(ConfigValidationViolation::InvalidCaptureCapacity);
+        }
+
         if self.targets.is_empty() {
             validate_legacy_target(self, &mut violations);
         } else {

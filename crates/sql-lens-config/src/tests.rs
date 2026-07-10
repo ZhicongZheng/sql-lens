@@ -66,6 +66,11 @@ fn default_config_contains_documented_proxy_and_backend_defaults() {
     assert_eq!(config.proxy.connect_timeout_ms, 5_000);
     assert_eq!(config.proxy.idle_timeout_ms, 300_000);
     assert_eq!(config.proxy.shutdown_timeout_ms, 10_000);
+    assert_eq!(config.capture.capacity, 1_024);
+    assert_eq!(
+        config.capture.overload_policy,
+        CaptureOverloadPolicy::DropNewest
+    );
     assert!(config.targets.is_empty());
     assert_eq!(config.backend.address, "127.0.0.1:3306");
     assert_eq!(config.backend.database_type, DatabaseType::MySql);
@@ -131,6 +136,8 @@ fn public_config_types_support_serde_traits() {
     assert_serde::<DatabaseType>();
     assert_serde::<StorageType>();
     assert_serde::<CaptureMode>();
+    assert_serde::<CaptureConfig>();
+    assert_serde::<CaptureOverloadPolicy>();
 }
 
 #[test]
@@ -163,6 +170,42 @@ fn default_config_passes_validation() {
     let config = SqlLensConfig::default();
 
     assert!(config.validate().is_ok());
+}
+
+#[test]
+fn capture_config_parses_both_overload_policies_and_rejects_zero_capacity() {
+    let config = SqlLensConfig::from_toml_str(
+        r#"
+[capture]
+capacity = 42
+overload_policy = "reject_new"
+"#,
+    )
+    .expect("capture configuration should parse");
+
+    assert_eq!(config.capture.capacity, 42);
+    assert_eq!(
+        config.capture.overload_policy,
+        CaptureOverloadPolicy::RejectNew
+    );
+    assert!(config.validate().is_ok());
+
+    let zero_capacity = SqlLensConfig::from_toml_str(
+        r#"
+[capture]
+capacity = 0
+overload_policy = "drop_newest"
+"#,
+    )
+    .expect("zero capacity configuration should parse before validation");
+    let error = zero_capacity
+        .validate()
+        .expect_err("zero capture capacity should fail validation");
+
+    assert_eq!(
+        error.violations,
+        vec![ConfigValidationViolation::InvalidCaptureCapacity]
+    );
 }
 
 #[test]

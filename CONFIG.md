@@ -31,6 +31,10 @@ connect_timeout_ms = 5000
 idle_timeout_ms = 300000
 shutdown_timeout_ms = 10000
 
+[capture]
+capacity = 1024
+overload_policy = "drop_newest"
+
 [backend]
 address = "127.0.0.1:3306"
 database_type = "mysql"
@@ -114,6 +118,16 @@ Fields:
 ### `backend`
 
 Controls the upstream database.
+
+### `capture`
+
+Controls the bounded handoff from protocol observation to runtime fan-out.
+
+- `capacity`: maximum number of normalized events queued in memory; must be
+  greater than zero.
+- `overload_policy`: `drop_newest` drops an incoming event when the queue is
+  full; `reject_new` reports the rejected event to runtime diagnostics. Neither
+  policy blocks packet forwarding.
 
 Fields:
 

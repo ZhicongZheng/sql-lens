@@ -89,6 +89,7 @@ impl std::error::Error for ConfigValidationError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigValidationViolation {
+    InvalidCaptureCapacity,
     MissingProxyListen,
     MissingBackendAddress,
     UnsupportedProtocol {
@@ -118,6 +119,9 @@ pub enum ConfigValidationViolation {
 impl fmt::Display for ConfigValidationViolation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidCaptureCapacity => {
+                write!(f, "`capture.capacity` must be greater than zero")
+            }
             Self::MissingProxyListen => write!(f, "`proxy.listen` must not be empty"),
             Self::MissingBackendAddress => write!(f, "`backend.address` must not be empty"),
             Self::UnsupportedProtocol { protocol } => write!(

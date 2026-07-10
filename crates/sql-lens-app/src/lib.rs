@@ -12,8 +12,12 @@ use std::{
 };
 
 use sql_lens_api::{ApiState, HttpServerConfig, HttpServerError, bind_http_server_with_state};
-use sql_lens_capture::SlowQueryClassifier;
+use sql_lens_capture::{
+    CaptureEventPublisher, CaptureEventReceiver, CaptureOverloadPolicy, CapturePipeline,
+    CapturePipelineConfig, CapturePublishOutcome, SlowQueryClassifier,
+};
 use sql_lens_config::{
+    CaptureConfig, CaptureOverloadPolicy as ConfigCaptureOverloadPolicy,
     DatabaseType as ConfigDatabaseType, ProxyTargetConfig, SqlLensConfig, StorageConfig,
     StorageType,
 };
@@ -47,6 +51,7 @@ pub struct MinimalMysqlRuntime {
     proxy_shutdown_tx: watch::Sender<bool>,
     api_task: tokio::task::JoinHandle<Result<(), HttpServerError>>,
     proxy_tasks: Vec<tokio::task::JoinHandle<()>>,
+    capture_runtime: CaptureRuntime,
     persistence: EventPersistence,
     sqlite_worker: Option<thread::JoinHandle<()>>,
 }
@@ -100,6 +105,45 @@ struct MysqlProxyTargetRuntimeConfig {
     backend_config: BackendDialConfig,
 }
 
+#[derive(Debug)]
+struct CaptureRuntime {
+    publisher: CaptureEventPublisher,
+    shutdown_tx: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CaptureRuntime {
+    fn start(
+        config: CapturePipelineConfig,
+        state: ApiState,
+        persistence: EventPersistence,
+    ) -> Self {
+        let (publisher, receiver) = CapturePipeline::channel(config);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_capture_consumer(
+            receiver,
+            state,
+            persistence,
+            shutdown_rx,
+        ));
+
+        Self {
+            publisher,
+            shutdown_tx,
+            task,
+        }
+    }
+
+    fn publisher(&self) -> CaptureEventPublisher {
+        self.publisher.clone()
+    }
+
+    async fn shutdown(self) -> Result<(), MinimalMysqlRuntimeError> {
+        let _ = self.shutdown_tx.send(());
+        self.task.await.map_err(MinimalMysqlRuntimeError::Join)
+    }
+}
+
 impl MinimalMysqlRuntime {
     pub async fn shutdown(self) -> Result<(), MinimalMysqlRuntimeError> {
         let Self {
@@ -107,6 +151,7 @@ impl MinimalMysqlRuntime {
             proxy_shutdown_tx,
             api_task,
             proxy_tasks,
+            capture_runtime,
             persistence,
             sqlite_worker,
             ..
@@ -119,6 +164,7 @@ impl MinimalMysqlRuntime {
         for proxy_task in proxy_tasks {
             proxy_task.await.map_err(MinimalMysqlRuntimeError::Join)?;
         }
+        capture_runtime.shutdown().await?;
         drop(persistence);
 
         if let Some(worker) = sqlite_worker {
@@ -153,12 +199,14 @@ pub async fn start_runtime_from_config(
         .collect();
     let backend_connect_timeout = Duration::from_millis(config.proxy.connect_timeout_ms);
     let runtime_storage = RuntimeStorage::from_config(&config.storage)?;
+    let capture_config = runtime_capture_config(&config.capture)?;
 
     start_minimal_mysql_runtime_with_runtime_storage(
         HttpServerConfig::from(&config.web),
         backend_connect_timeout,
         targets,
         runtime_storage,
+        capture_config,
     )
     .await
 }
@@ -188,6 +236,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
         backend_connect_timeout,
         targets,
         RuntimeStorage::ring_buffer_default(),
+        default_capture_pipeline_config(),
     )
     .await
 }
@@ -197,6 +246,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     backend_connect_timeout: Duration,
     targets: Vec<MinimalMysqlTargetConfig>,
     runtime_storage: RuntimeStorage,
+    capture_config: CapturePipelineConfig,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
         return Err(MinimalMysqlRuntimeError::NoProxyTargets);
@@ -213,6 +263,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     } else {
         ApiState::new(event_store)
     };
+    let capture_runtime = CaptureRuntime::start(capture_config, state.clone(), persistence.clone());
     let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
     tracing::info!(%api_addr, "SQL Lens API server listening");
@@ -258,7 +309,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
                 proxy_listener,
                 runtime_config,
                 state.clone(),
-                persistence.clone(),
+                capture_runtime.publisher(),
                 proxy_shutdown_rx.clone(),
             ))
         })
@@ -272,9 +323,32 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         proxy_shutdown_tx,
         api_task,
         proxy_tasks,
+        capture_runtime,
         persistence,
         sqlite_worker,
     })
+}
+
+fn runtime_capture_config(
+    config: &CaptureConfig,
+) -> Result<CapturePipelineConfig, MinimalMysqlRuntimeError> {
+    let capacity = usize::try_from(config.capacity).unwrap_or(usize::MAX);
+    let capacity = NonZeroUsize::new(capacity).ok_or_else(|| {
+        MinimalMysqlRuntimeError::CaptureConfig(
+            "capture.capacity must be greater than zero".to_owned(),
+        )
+    })?;
+    let overload_policy = match config.overload_policy {
+        ConfigCaptureOverloadPolicy::DropNewest => CaptureOverloadPolicy::DropNewest,
+        ConfigCaptureOverloadPolicy::RejectNew => CaptureOverloadPolicy::RejectNew,
+    };
+
+    Ok(CapturePipelineConfig::new(capacity, overload_policy))
+}
+
+fn default_capture_pipeline_config() -> CapturePipelineConfig {
+    runtime_capture_config(&CaptureConfig::default())
+        .expect("default capture configuration should be valid")
 }
 
 #[derive(Debug)]
@@ -417,7 +491,7 @@ async fn run_mysql_proxy(
     listener: TcpProxyListener,
     target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
-    persistence: EventPersistence,
+    publisher: CaptureEventPublisher,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let id_generator = ConnectionLifecycleIdGenerator::new();
@@ -442,7 +516,7 @@ async fn run_mysql_proxy(
                             accepted,
                             target_config.clone(),
                             state.clone(),
-                            persistence.clone(),
+                            publisher.clone(),
                             id_generator.next_id(),
                         )
                         .await;
@@ -460,7 +534,7 @@ async fn handle_accepted_mysql_client(
     accepted: AcceptedClient,
     target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
-    persistence: EventPersistence,
+    publisher: CaptureEventPublisher,
     connection_id: sql_lens_core::ConnectionId,
 ) {
     let client_peer_addr = accepted.peer_addr();
@@ -479,7 +553,7 @@ async fn handle_accepted_mysql_client(
 
             tokio::spawn(async move {
                 if let Err(source) =
-                    forward_mysql_connection(connection, lifecycle, state, persistence).await
+                    forward_mysql_connection(connection, lifecycle, state, publisher).await
                 {
                     tracing::warn!(error = %source, "MySQL proxy forwarding failed");
                 }
@@ -519,7 +593,7 @@ async fn forward_mysql_connection(
     connection: ProxiedConnection,
     mut lifecycle: ConnectionLifecycleRecord,
     state: ApiState,
-    persistence: EventPersistence,
+    publisher: CaptureEventPublisher,
 ) -> Result<ForwardingSummary, ForwardingError> {
     let connection_info = lifecycle.info().clone();
     let (mut client_stream, mut backend_stream, client_peer_addr, backend_address) =
@@ -610,7 +684,7 @@ async fn forward_mysql_connection(
                         )
                     })?;
                     backend_to_client_bytes += bytes_read as u64;
-                    store_sql_events(&state, &persistence, events).await;
+                    publish_sql_events(&publisher, events);
                 }
             }
         }
@@ -627,6 +701,43 @@ async fn forward_mysql_connection(
     finalize_forwarding_lifecycle(&state, &mut lifecycle, &forwarding_result).await;
 
     forwarding_result
+}
+
+async fn run_capture_consumer(
+    mut receiver: CaptureEventReceiver,
+    state: ApiState,
+    persistence: EventPersistence,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            event = receiver.recv() => match event {
+                Some(event) => store_sql_events(&state, &persistence, vec![event]).await,
+                None => return,
+            },
+            _ = &mut shutdown => {
+                while let Some(event) = receiver.try_recv() {
+                    store_sql_events(&state, &persistence, vec![event]).await;
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn publish_sql_events(publisher: &CaptureEventPublisher, events: Vec<SqlEvent>) {
+    for event in events {
+        let event_id = event.id.clone();
+        match publisher.publish(event) {
+            Ok(CapturePublishOutcome::Enqueued) => {}
+            Ok(CapturePublishOutcome::Dropped) => {
+                tracing::warn!(event_id = %event_id.0, "capture pipeline full; dropped event");
+            }
+            Err(error) => {
+                tracing::warn!(event_id = %event_id.0, error = %error, "capture pipeline rejected event");
+            }
+        }
+    }
 }
 
 async fn record_connection_started(state: &ApiState, lifecycle: &ConnectionLifecycleRecord) {
@@ -1281,6 +1392,72 @@ path = "{}"
     }
 
     #[tokio::test]
+    async fn capture_consumer_fans_out_events_to_existing_runtime_sinks() {
+        let state = ApiState::default();
+        let mut subscription = state.sql_event_broadcaster().subscribe();
+        let capture = CaptureRuntime::start(
+            CapturePipelineConfig::new(
+                NonZeroUsize::new(1).expect("non-zero capacity"),
+                CaptureOverloadPolicy::DropNewest,
+            ),
+            state.clone(),
+            EventPersistence::default(),
+        );
+        let event = test_event(
+            SqlEventId("evt_capture_fanout".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(12),
+        );
+
+        capture
+            .publisher()
+            .publish(event.clone())
+            .expect("event should enqueue");
+        let broadcast = subscription.recv().await.expect("event should broadcast");
+        assert_eq!(broadcast.id, event.id);
+
+        capture.shutdown().await.expect("capture should drain");
+
+        let event_store = state.event_store();
+        assert!(event_store.read().await.get(&event.id).is_some());
+        let live_statistics = state.live_statistics();
+        assert_eq!(live_statistics.write().await.snapshot().total_events, 1);
+    }
+
+    #[test]
+    fn capture_publication_reports_full_and_closed_pipelines_without_forwarding_errors() {
+        let config = CapturePipelineConfig::new(
+            NonZeroUsize::new(1).expect("non-zero capacity"),
+            CaptureOverloadPolicy::DropNewest,
+        );
+        let (publisher, receiver) = CapturePipeline::channel(config);
+        let first = test_event(
+            SqlEventId("evt_capture_first".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(12),
+        );
+        let second = test_event(
+            SqlEventId("evt_capture_second".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(12),
+        );
+
+        publish_sql_events(&publisher, vec![first, second]);
+        assert_eq!(publisher.stats().dropped_events, 1);
+
+        drop(receiver);
+        publish_sql_events(
+            &publisher,
+            vec![test_event(
+                SqlEventId("evt_capture_closed".to_owned()),
+                CaptureStatus::Ok,
+                DurationMillis(12),
+            )],
+        );
+        assert_eq!(publisher.stats().closed_events, 1);
+    }
+
+    #[tokio::test]
     async fn store_sql_events_keeps_below_threshold_events_ok() {
         let state = ApiState::default();
         let event_id = SqlEventId("evt_ok".to_owned());
@@ -1434,6 +1611,7 @@ path = "{}"
 #[derive(Debug)]
 pub enum MinimalMysqlRuntimeError {
     NoProxyTargets,
+    CaptureConfig(String),
     StorageConfig(String),
     SqliteStorage {
         path: PathBuf,
@@ -1453,6 +1631,7 @@ impl fmt::Display for MinimalMysqlRuntimeError {
                 f,
                 "minimal MySQL runtime requires at least one proxy target"
             ),
+            Self::CaptureConfig(message) => write!(f, "invalid capture configuration: {message}"),
             Self::StorageConfig(message) => write!(f, "invalid runtime storage config: {message}"),
             Self::SqliteStorage { path, source } => {
                 write!(
@@ -1480,6 +1659,7 @@ impl Error for MinimalMysqlRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NoProxyTargets => None,
+            Self::CaptureConfig(_) => None,
             Self::StorageConfig(_) => None,
             Self::SqliteStorage { source, .. } => Some(source.as_ref()),
             Self::SqlitePersistenceWorkerPanicked => None,

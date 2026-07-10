@@ -13,8 +13,8 @@ pub use error::{
     ConfigLoadError, ConfigOverrideError, ConfigValidationError, ConfigValidationViolation,
 };
 pub use model::{
-    BackendConfig, CaptureMode, DatabaseType, LoggingConfig, LoggingFormat, LoggingLevel,
-    PluginsConfig, Protocol, ProxyConfig, ProxyTargetConfig, RedactionConfig, ReplayConfig,
-    RetentionConfig, RetentionDropPolicy, SqlLensConfig, StorageConfig, StorageType, TlsConfig,
-    TlsMode, WebConfig,
+    BackendConfig, CaptureConfig, CaptureMode, CaptureOverloadPolicy, DatabaseType, LoggingConfig,
+    LoggingFormat, LoggingLevel, PluginsConfig, Protocol, ProxyConfig, ProxyTargetConfig,
+    RedactionConfig, ReplayConfig, RetentionConfig, RetentionDropPolicy, SqlLensConfig,
+    StorageConfig, StorageType, TlsConfig, TlsMode, WebConfig,
 };

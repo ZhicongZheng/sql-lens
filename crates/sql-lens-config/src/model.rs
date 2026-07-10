@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct SqlLensConfig {
     pub proxy: ProxyConfig,
+    pub capture: CaptureConfig,
     pub backend: BackendConfig,
     pub targets: Vec<ProxyTargetConfig>,
     pub tls: TlsConfig,
@@ -14,6 +15,30 @@ pub struct SqlLensConfig {
     pub redaction: RedactionConfig,
     pub replay: ReplayConfig,
     pub plugins: PluginsConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaptureConfig {
+    pub capacity: u64,
+    pub overload_policy: CaptureOverloadPolicy,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            capacity: 1_024,
+            overload_policy: CaptureOverloadPolicy::DropNewest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureOverloadPolicy {
+    #[default]
+    DropNewest,
+    RejectNew,
 }
 
 impl SqlLensConfig {

@@ -1411,6 +1411,7 @@ impl CaptureEventPublisher {
 
 impl CaptureEventReceiver {
     pub async fn recv(&mut self) -> Option<sql_lens_core::SqlEvent>;
+    pub fn try_recv(&mut self) -> Option<sql_lens_core::SqlEvent>;
     pub fn stats(&self) -> CapturePipelineStats;
 }
 ```
@@ -1431,8 +1432,12 @@ Do not add proxy, protocol, storage, API, plugin, app, database client, HTTP, ex
 - `CaptureEventPublisher::publish` must use `tokio::sync::mpsc::Sender::try_send`; it must not await.
 - `CaptureOverloadPolicy::DropNewest` drops the incoming event when the channel is full, increments `dropped_events`, and returns `CapturePublishOutcome::Dropped`.
 - `CaptureOverloadPolicy::RejectNew` returns `CapturePublishError::Full { event }`, increments `dropped_events`, and leaves the queued event unchanged.
-- Closed receivers return `CapturePublishError::Closed { event }` and do not increment the overload dropped counter.
-- `CapturePipelineStats.dropped_events` is shared between publisher and receiver handles.
+- Closed receivers return `CapturePublishError::Closed { event }`, increment
+  `closed_events`, and do not increment the overload dropped counter.
+- `CapturePipelineStats.dropped_events` and `closed_events` are shared between
+  publisher and receiver handles.
+- Runtime consumers may use `try_recv` to drain already-accepted events during
+  shutdown without waiting on detached publisher clones.
 
 ### 4. Validation & Error Matrix
 
@@ -1441,7 +1446,7 @@ Do not add proxy, protocol, storage, API, plugin, app, database client, HTTP, ex
 | Channel has capacity | `publish` returns `Enqueued` and receiver can read the same `SqlEvent` |
 | Channel is full and policy is `DropNewest` | Incoming event is dropped, return `Dropped`, increment `dropped_events` |
 | Channel is full and policy is `RejectNew` | Return `Full { event }`, increment `dropped_events`, keep queued event |
-| Receiver is dropped | Return `Closed { event }`, do not increment `dropped_events` |
+| Receiver is dropped | Return `Closed { event }`, increment `closed_events`, do not increment `dropped_events` |
 | Future storage fan-out is needed | Add a consumer task later; do not write storage inside publisher |
 
 ### 5. Good/Base/Bad Cases
