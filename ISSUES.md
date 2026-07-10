@@ -1810,3 +1810,253 @@ Priority: P0
 Difficulty: Medium
 Estimated Time: 6h
 Dependencies: Issue 043, Issue 044, Issue 112, Issue 113
+
+## Issue 115: Wire capture pipeline into app runtime fan-out
+
+Description: Route normalized SQL events through the bounded capture pipeline
+before the app fans them out to storage, live statistics, WebSocket subscribers,
+and optional SQLite persistence.
+
+Acceptance Criteria:
+
+- The app runtime creates one bounded capture pipeline for its shared API state.
+- Protocol-emitted SQL events use non-blocking publication and never await
+  storage, WebSocket, or SQLite work in the packet-forwarding path.
+- One consumer applies the existing classification and fans accepted events out
+  to the ring buffer, live statistics, WebSocket broadcaster, and configured
+  SQLite persistence.
+- The configured overload policy has explicit behavior for full and closed
+  channels, and dropped-event counts are observable through runtime diagnostics
+  or statistics.
+- Existing ring-buffer-only and SQLite persistence behavior remain supported.
+- Tests cover successful fan-out, a full pipeline, and a closed consumer.
+
+Labels: `area:backend`, `area:capture`, `area:app`, `type:feature`
+Priority: P0
+Difficulty: Hard
+Estimated Time: 8h
+Dependencies: Issue 018, Issue 109, Issue 112
+
+## Issue 116: Apply configured slow-query threshold at runtime
+
+Description: Make slow SQL classification use `proxy.slow_threshold_ms` from
+the validated runtime configuration instead of the classifier default.
+
+Acceptance Criteria:
+
+- Runtime construction creates the slow-query classifier from
+  `proxy.slow_threshold_ms`.
+- Events at or above the configured threshold are stored and broadcast as
+  `slow`; lower-duration events preserve their prior status.
+- The default configuration retains the documented default threshold behavior.
+- Tests cover at least two non-default configured thresholds.
+
+Labels: `area:backend`, `area:capture`, `area:config`, `type:bug`
+Priority: P0
+Difficulty: Easy
+Estimated Time: 3h
+Dependencies: Issue 082, Issue 109
+
+## Issue 117: Enforce configured retention in app runtime
+
+Description: Apply configured maximum age and maximum event retention to active
+ring-buffer and SQLite runtime storage without blocking packet forwarding.
+
+Acceptance Criteria:
+
+- Runtime converts the configured retention age and event limits into storage
+  cleanup inputs with validation errors for unsupported values.
+- Ring-buffer retention runs after redaction and preserves the configured
+  newest events.
+- SQLite retention deletes expired and excess events asynchronously, including
+  their parameter rows.
+- Cleanup scheduling does not block packet forwarding or SQLite event inserts.
+- Maximum byte retention remains explicitly unsupported until a separate
+  SQLite file-size cleanup design exists.
+- Tests cover age and event-count cleanup for ring-buffer and SQLite runtimes.
+
+Labels: `area:backend`, `area:storage`, `area:config`, `type:feature`
+Priority: P1
+Difficulty: Hard
+Estimated Time: 8h
+Dependencies: Issue 089, Issue 112
+
+## Issue 118: Drain active proxy sessions during app shutdown
+
+Description: Integrate proxy session tracking and `ActiveSessionDrain` into the
+app runtime so graceful shutdown stops listeners, notifies active sessions, and
+waits only up to the configured timeout.
+
+Acceptance Criteria:
+
+- The app runtime tracks each spawned forwarding session until it reaches a
+  terminal lifecycle outcome.
+- Shutdown stops new accepts before requesting active-session shutdown.
+- Active sessions receive a shutdown notification and are drained using
+  `proxy.shutdown_timeout_ms`.
+- Timed-out sessions are reported without preventing API and listener shutdown.
+- Connection lifecycle records reach a terminal state during shutdown when
+  possible.
+- Loopback tests cover a draining session and a session that exceeds timeout.
+
+Labels: `area:backend`, `area:proxy`, `area:app`, `type:feature`
+Priority: P1
+Difficulty: Hard
+Estimated Time: 8h
+Dependencies: Issue 016, Issue 109
+
+## Issue 119: Implement configured TLS modes in proxy runtime
+
+Description: Apply the configured TLS mode to client and backend proxy streams
+instead of treating all modes as raw TCP forwarding.
+
+Acceptance Criteria:
+
+- `disabled`, `passthrough`, `terminate`, and `upstream` modes have documented,
+  validated runtime behavior.
+- Termination and upstream modes validate required certificate and key paths at
+  startup and fail with clear errors when material is unusable.
+- Passthrough forwards encrypted traffic without attempting protocol decoding
+  after the TLS boundary.
+- TLS secrets and certificate contents are never logged.
+- Loopback tests cover disabled/passthrough behavior and startup validation for
+  termination/upstream requirements.
+
+Labels: `area:backend`, `area:proxy`, `area:config`, `type:feature`
+Priority: P1
+Difficulty: Hard
+Estimated Time: 12h
+Dependencies: Issue 007, Issue 014
+
+## Issue 120: Add plugin runtime dispatch and loading
+
+Description: Load configured in-process plugins and dispatch the stable hook
+contracts from the capture runtime without allowing plugin failures to affect
+packet forwarding or capture persistence.
+
+Acceptance Criteria:
+
+- Runtime respects `plugins.enabled`, plugin directory, network permission,
+  and timeout configuration.
+- A dispatcher invokes matching connect, query, prepare, execute, and error
+  hooks with protocol-neutral payloads.
+- Plugin failures and timeouts are isolated, observable, and do not interrupt
+  forwarding, storage, or other plugins.
+- Hooks receive already-redacted events where event data can contain parameters
+  or expanded SQL.
+- Tests cover disabled plugins, successful dispatch, a failing hook, and a
+  timed-out hook.
+
+Labels: `area:backend`, `area:plugin`, `area:app`, `type:feature`
+Priority: P2
+Difficulty: Hard
+Estimated Time: 12h
+Dependencies: Issue 090, Issue 115
+
+## Issue 121: Add DuckDB storage backend
+
+Description: Implement the configured DuckDB storage backend for local
+analytical capture queries while preserving the ring buffer as the hot path.
+
+Acceptance Criteria:
+
+- `storage.type = "duckdb"` initializes a local DuckDB store instead of being
+  rejected by app startup.
+- Captured redacted events are persisted asynchronously and remain queryable
+  through the existing timeline, detail, export, and replay-preview contracts.
+- Schema initialization, migrations, retention, and file-path failures have
+  explicit behavior.
+- Ring-buffer and SQLite runtime behavior remain unchanged.
+- Tests cover startup, insert/readback, filtering, and retention basics.
+
+Labels: `area:backend`, `area:storage`, `area:app`, `type:feature`
+Priority: P3
+Difficulty: Hard
+Estimated Time: 16h
+Dependencies: Issue 021, Issue 109
+
+## Issue 122: Add guarded replay execution API
+
+Description: Add an explicit-confirmation replay execution endpoint for a
+configured target without turning SQL Lens into a traffic-routing or SQL-rewrite
+middleware.
+
+Acceptance Criteria:
+
+- Request identifies the target and includes an explicit confirmation for
+  mutating SQL.
+- The endpoint rejects missing confirmation, unknown targets, and SQL that
+  differs from the previewed source.
+- Execution result returns a bounded summary without exposing result-row data.
+- No request is replayed automatically from a captured event.
+- Tests cover read-only execution, rejected mutation, confirmed mutation, and
+  target validation.
+
+Labels: `area:backend`, `area:api`, `area:replay`, `type:feature`
+Priority: P2
+Difficulty: Hard
+Estimated Time: 12h
+Dependencies: Issue 080
+
+## Issue 123: Add EXPLAIN helper API
+
+Description: Provide a guarded API that derives an EXPLAIN request from a
+captured or supplied read-only SQL statement for a selected target.
+
+Acceptance Criteria:
+
+- The API accepts exactly one SQL source and an explicit target.
+- Mutating or multi-statement SQL is rejected before contacting the database.
+- The helper uses the target's supported EXPLAIN syntax and returns a bounded,
+  text-safe plan summary.
+- EXPLAIN execution does not alter captured-event storage or replay state.
+- Tests cover source validation, mutation rejection, and target-specific
+  request construction.
+
+Labels: `area:backend`, `area:api`, `area:replay`, `type:feature`
+Priority: P2
+Difficulty: Medium
+Estimated Time: 8h
+Dependencies: Issue 080
+
+## Issue 124: Capture MySQL COM_QUERY attributes
+
+Description: Parse supported MySQL COM_QUERY attributes so attribute-bearing
+text queries are captured instead of being skipped as unsupported commands.
+
+Acceptance Criteria:
+
+- Parser recognizes the COM_QUERY attribute envelope and preserves clean SQL
+  text without attribute bytes.
+- Supported attribute parameter values are represented through shared,
+  protocol-neutral event fields or MySQL metadata as appropriate.
+- Malformed or unsupported attribute payloads remain non-fatal to forwarding.
+- Golden packet fixtures cover a query with attributes and a malformed payload.
+
+Labels: `area:backend`, `area:protocol-mysql`, `type:feature`
+Priority: P2
+Difficulty: Hard
+Estimated Time: 10h
+Dependencies: Issue 043
+
+## Issue 125: Decode additional MySQL prepared-statement parameter types
+
+Description: Extend COM_STMT_EXECUTE decoding for useful MySQL parameter types
+that currently become `unsupported` values.
+
+Acceptance Criteria:
+
+- The issue scope identifies each added MySQL type and its protocol encoding
+  before implementation.
+- Successfully decoded values use existing protocol-neutral parameter value
+  variants or a justified shared extension.
+- Unsupported and malformed values remain non-fatal and preserve safe capture
+  behavior.
+- Fixture and unit tests cover each new type, NULL interaction, and expanded
+  SQL rendering where applicable.
+
+Labels: `area:backend`, `area:protocol-mysql`, `type:feature`
+Priority: P3
+Difficulty: Hard
+Estimated Time: 10h
+Dependencies: Issue 050, Issue 051, Issue 054
