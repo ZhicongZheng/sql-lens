@@ -1266,6 +1266,115 @@ let mut lifecycle = ConnectionLifecycleRecord::accepted(
 lifecycle.mark_backend_connected(backend_connected_at);
 ```
 
+## Scenario: Application Connection Lifecycle Runtime Wiring
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` composes accepted MySQL proxy sessions with the
+  existing lifecycle, connection-store, and live-statistics contracts.
+- The app runtime owns this fan-out; `sql-lens-proxy` stays protocol-neutral
+  and must not depend on storage or API crates.
+
+### 2. Signatures
+
+Runtime composition uses the existing types and private app helpers:
+
+```rust
+async fn record_connection_started(
+    state: &sql_lens_api::ApiState,
+    lifecycle: &sql_lens_proxy::ConnectionLifecycleRecord,
+);
+
+async fn finalize_forwarding_lifecycle(
+    state: &sql_lens_api::ApiState,
+    lifecycle: &mut sql_lens_proxy::ConnectionLifecycleRecord,
+    forwarding_result: &Result<
+        sql_lens_proxy::ForwardingSummary,
+        sql_lens_proxy::ForwardingError,
+    >,
+);
+```
+
+### 3. Contracts
+
+- Create one `ConnectionLifecycleRecord` immediately after accepting a client,
+  before backend dialing, using the configured target identity and backend
+  address.
+- After a successful backend dial, mark the record `backend_connected`, upsert
+  it in `ConnectionStore`, and call `LiveStatistics::record_connection_opened`
+  before starting forwarding.
+- A backend dial failure becomes a retained terminal `failed` connection
+  record. It must not be recorded as active.
+- On either forwarding outcome, update the same lifecycle record first, then
+  upsert the final `ConnectionInfo` and call
+  `LiveStatistics::record_connection_closed`. Normal completion is `closed`;
+  I/O failure is `failed` and retains available byte counters.
+- Connection history remains in-memory and bounded by `ConnectionStore`.
+  Do not persist it to SQLite or change REST schemas in runtime wiring work.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Backend dial succeeds | Store `backend_connected`; increment active connections once |
+| Forwarding closes normally | Store `closed` with final byte counts and `closed_at`; decrement active connections |
+| Forwarding returns I/O error | Store `failed` with available byte counts and `closed_at`; decrement active connections |
+| Backend dial fails | Store `failed` with `closed_at`; active connections stay unchanged |
+| Closing an already non-active connection | Rely on idempotent statistics close behavior; do not remove its history record |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- App runtime creates a lifecycle record before dialing, so an unreachable
+  backend is visible through `GET /api/v1/connections`.
+- A completed session replaces its active record under the same connection ID.
+
+Base:
+
+- Runtime uses `ApiState` accessors to obtain existing lock-protected stores;
+  it does not add locks inside `sql-lens-storage`.
+
+Bad:
+
+- Recording active connections from SQL events instead of connection lifecycle.
+- Dropping backend dial failures because no forwarding task was started.
+- Writing storage or statistics state from `sql-lens-proxy`.
+
+### 6. Tests Required
+
+- Unit tests for active-to-closed and active-to-failed lifecycle finalization,
+  including byte counters and active-connection count.
+- Unit test that retains a dial failure without increasing active connections.
+- Loopback runtime tests that assert the connections API exposes a completed
+  proxied session and a failed backend dial.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let connection = BackendDialer::dial(accepted, &config).await?;
+tokio::spawn(forward_mysql_connection(connection));
+```
+
+#### Correct
+
+```rust
+let mut lifecycle = ConnectionLifecycleRecord::accepted(/* target context */);
+match BackendDialer::dial(accepted, &config).await {
+    Ok(connection) => {
+        lifecycle.mark_backend_connected(runtime_timestamp());
+        record_connection_started(&state, &lifecycle).await;
+        // Forwarding finalizes and retains the same lifecycle record.
+    }
+    Err(error) => {
+        lifecycle.mark_backend_dial_failed(error.failure(), runtime_timestamp());
+        record_connection_finished(&state, lifecycle.into_info()).await;
+    }
+}
+```
+
 ## Scenario: Capture Pipeline Channel Contracts
 
 ### 1. Scope / Trigger

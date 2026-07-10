@@ -464,38 +464,43 @@ async fn handle_accepted_mysql_client(
     connection_id: sql_lens_core::ConnectionId,
 ) {
     let client_peer_addr = accepted.peer_addr();
+    let mut lifecycle = runtime_connection_lifecycle(
+        connection_id,
+        target_config.name.clone(),
+        target_config.database_type.clone(),
+        client_peer_addr,
+        target_config.backend_config.address.clone(),
+    );
 
     match BackendDialer::dial(accepted, &target_config.backend_config).await {
         Ok(connection) => {
-            let connection_info = runtime_connection_info(
-                connection_id,
-                target_config.name,
-                target_config.database_type,
-                client_peer_addr,
-                connection.backend_address().to_owned(),
-            );
+            lifecycle.mark_backend_connected(runtime_timestamp());
+            record_connection_started(&state, &lifecycle).await;
+
             tokio::spawn(async move {
                 if let Err(source) =
-                    forward_mysql_connection(connection, connection_info, state, persistence).await
+                    forward_mysql_connection(connection, lifecycle, state, persistence).await
                 {
                     tracing::warn!(error = %source, "MySQL proxy forwarding failed");
                 }
             });
         }
         Err(source) => {
+            lifecycle.mark_backend_dial_failed(source.failure(), runtime_timestamp());
+            record_connection_finished(&state, lifecycle.into_info()).await;
             tracing::warn!(error = %source, "failed to dial MySQL backend");
         }
     }
 }
 
-fn runtime_connection_info(
+fn runtime_connection_lifecycle(
     connection_id: sql_lens_core::ConnectionId,
     target_name: String,
     database_type: DatabaseType,
     client_addr: SocketAddr,
     backend_addr: String,
-) -> ConnectionInfo {
-    let record = ConnectionLifecycleRecord::accepted(
+) -> ConnectionLifecycleRecord {
+    ConnectionLifecycleRecord::accepted(
         connection_id,
         Some(target_name),
         ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
@@ -503,9 +508,7 @@ fn runtime_connection_info(
         client_addr.to_string(),
         backend_addr,
         runtime_timestamp(),
-    );
-
-    record.into_info()
+    )
 }
 
 fn config_database_type_value(database_type: ConfigDatabaseType) -> &'static str {
@@ -514,10 +517,11 @@ fn config_database_type_value(database_type: ConfigDatabaseType) -> &'static str
 
 async fn forward_mysql_connection(
     connection: ProxiedConnection,
-    connection_info: ConnectionInfo,
+    mut lifecycle: ConnectionLifecycleRecord,
     state: ApiState,
     persistence: EventPersistence,
 ) -> Result<ForwardingSummary, ForwardingError> {
+    let connection_info = lifecycle.info().clone();
     let (mut client_stream, mut backend_stream, client_peer_addr, backend_address) =
         connection.into_parts();
     let adapter = MysqlProtocolAdapter::new();
@@ -530,92 +534,134 @@ async fn forward_mysql_connection(
     let mut client_buffer = [0_u8; FORWARDING_BUFFER_SIZE];
     let mut backend_buffer = [0_u8; FORWARDING_BUFFER_SIZE];
 
-    while client_open || backend_open {
-        tokio::select! {
-            client_read = client_stream.read(&mut client_buffer), if client_open => {
-                let bytes_read = client_read.map_err(|source| forwarding_io_error(
-                    client_peer_addr,
-                    backend_address.clone(),
-                    client_to_backend_bytes,
-                    backend_to_client_bytes,
-                    source,
-                ))?;
-
-                if bytes_read == 0 {
-                    client_open = false;
-                    backend_stream.shutdown().await.map_err(|source| forwarding_io_error(
+    let forwarding_result = async {
+        while client_open || backend_open {
+            tokio::select! {
+                client_read = client_stream.read(&mut client_buffer), if client_open => {
+                    let bytes_read = client_read.map_err(|source| forwarding_io_error(
                         client_peer_addr,
                         backend_address.clone(),
                         client_to_backend_bytes,
                         backend_to_client_bytes,
                         source,
                     ))?;
-                    continue;
+
+                    if bytes_read == 0 {
+                        client_open = false;
+                        backend_stream.shutdown().await.map_err(|source| forwarding_io_error(
+                            client_peer_addr,
+                            backend_address.clone(),
+                            client_to_backend_bytes,
+                            backend_to_client_bytes,
+                            source,
+                        ))?;
+                        continue;
+                    }
+
+                    observe_client_bytes(
+                        &adapter,
+                        protocol_state.as_mut(),
+                        &client_buffer[..bytes_read],
+                    );
+                    backend_stream.write_all(&client_buffer[..bytes_read]).await.map_err(|source| {
+                        forwarding_io_error(
+                            client_peer_addr,
+                            backend_address.clone(),
+                            client_to_backend_bytes,
+                            backend_to_client_bytes,
+                            source,
+                        )
+                    })?;
+                    client_to_backend_bytes += bytes_read as u64;
                 }
-
-                observe_client_bytes(
-                    &adapter,
-                    protocol_state.as_mut(),
-                    &client_buffer[..bytes_read],
-                );
-                backend_stream.write_all(&client_buffer[..bytes_read]).await.map_err(|source| {
-                    forwarding_io_error(
-                        client_peer_addr,
-                        backend_address.clone(),
-                        client_to_backend_bytes,
-                        backend_to_client_bytes,
-                        source,
-                    )
-                })?;
-                client_to_backend_bytes += bytes_read as u64;
-            }
-            backend_read = backend_stream.read(&mut backend_buffer), if backend_open => {
-                let bytes_read = backend_read.map_err(|source| forwarding_io_error(
-                    client_peer_addr,
-                    backend_address.clone(),
-                    client_to_backend_bytes,
-                    backend_to_client_bytes,
-                    source,
-                ))?;
-
-                if bytes_read == 0 {
-                    backend_open = false;
-                    client_stream.shutdown().await.map_err(|source| forwarding_io_error(
+                backend_read = backend_stream.read(&mut backend_buffer), if backend_open => {
+                    let bytes_read = backend_read.map_err(|source| forwarding_io_error(
                         client_peer_addr,
                         backend_address.clone(),
                         client_to_backend_bytes,
                         backend_to_client_bytes,
                         source,
                     ))?;
-                    continue;
-                }
 
-                let events = observe_backend_bytes(
-                    &adapter,
-                    protocol_state.as_mut(),
-                    &backend_buffer[..bytes_read],
-                );
-                client_stream.write_all(&backend_buffer[..bytes_read]).await.map_err(|source| {
-                    forwarding_io_error(
-                        client_peer_addr,
-                        backend_address.clone(),
-                        client_to_backend_bytes,
-                        backend_to_client_bytes,
-                        source,
-                    )
-                })?;
-                backend_to_client_bytes += bytes_read as u64;
-                store_sql_events(&state, &persistence, events).await;
+                    if bytes_read == 0 {
+                        backend_open = false;
+                        client_stream.shutdown().await.map_err(|source| forwarding_io_error(
+                            client_peer_addr,
+                            backend_address.clone(),
+                            client_to_backend_bytes,
+                            backend_to_client_bytes,
+                            source,
+                        ))?;
+                        continue;
+                    }
+
+                    let events = observe_backend_bytes(
+                        &adapter,
+                        protocol_state.as_mut(),
+                        &backend_buffer[..bytes_read],
+                    );
+                    client_stream.write_all(&backend_buffer[..bytes_read]).await.map_err(|source| {
+                        forwarding_io_error(
+                            client_peer_addr,
+                            backend_address.clone(),
+                            client_to_backend_bytes,
+                            backend_to_client_bytes,
+                            source,
+                        )
+                    })?;
+                    backend_to_client_bytes += bytes_read as u64;
+                    store_sql_events(&state, &persistence, events).await;
+                }
             }
         }
-    }
 
-    Ok(ForwardingSummary {
-        client_peer_addr,
-        backend_address,
-        client_to_backend_bytes,
-        backend_to_client_bytes,
-    })
+        Ok(ForwardingSummary {
+            client_peer_addr,
+            backend_address,
+            client_to_backend_bytes,
+            backend_to_client_bytes,
+        })
+    }
+    .await;
+
+    finalize_forwarding_lifecycle(&state, &mut lifecycle, &forwarding_result).await;
+
+    forwarding_result
+}
+
+async fn record_connection_started(state: &ApiState, lifecycle: &ConnectionLifecycleRecord) {
+    let connection = lifecycle.info().clone();
+    let connection_id = connection.id.clone();
+
+    state.connection_store().write().await.upsert(connection);
+    state
+        .live_statistics()
+        .write()
+        .await
+        .record_connection_opened(connection_id);
+}
+
+async fn record_connection_finished(state: &ApiState, connection: ConnectionInfo) {
+    let connection_id = connection.id.clone();
+
+    state.connection_store().write().await.upsert(connection);
+    state
+        .live_statistics()
+        .write()
+        .await
+        .record_connection_closed(&connection_id);
+}
+
+async fn finalize_forwarding_lifecycle(
+    state: &ApiState,
+    lifecycle: &mut ConnectionLifecycleRecord,
+    forwarding_result: &Result<ForwardingSummary, ForwardingError>,
+) {
+    match forwarding_result {
+        Ok(summary) => lifecycle.mark_forwarding_closed(summary, runtime_timestamp()),
+        Err(source) => lifecycle.mark_forwarding_failed(source.failure(), runtime_timestamp()),
+    }
+    record_connection_finished(state, lifecycle.info().clone()).await;
 }
 
 fn observe_client_bytes(
@@ -706,24 +752,267 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use sql_lens_core::{
-        CaptureStatus, ConnectionId, DurationMillis, ProtocolMetadata, QueryTiming, SqlEventId,
-        SqlEventKind,
+        CaptureStatus, ConnectionId, ConnectionState, DurationMillis, ProtocolMetadata,
+        QueryTiming, SqlEventId, SqlEventKind,
     };
+    use sql_lens_proxy::{BackendDialFailure, BackendDialFailureKind};
 
     #[test]
-    fn runtime_connection_info_carries_target_identity() {
-        let info = runtime_connection_info(
+    fn runtime_connection_lifecycle_carries_target_identity() {
+        let info = runtime_connection_lifecycle(
             ConnectionId("conn_1".to_owned()),
             "starrocks-local".to_owned(),
             DatabaseType("starrocks".to_owned()),
             "127.0.0.1:51000".parse().expect("valid client address"),
             "127.0.0.1:9030".to_owned(),
-        );
+        )
+        .into_info();
 
         assert_eq!(info.target_name.as_deref(), Some("starrocks-local"));
         assert_eq!(info.database_type, DatabaseType("starrocks".to_owned()));
         assert_eq!(info.protocol, ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()));
         assert_eq!(info.backend_addr, "127.0.0.1:9030");
+    }
+
+    #[tokio::test]
+    async fn runtime_connection_lifecycle_records_active_and_closed_sessions() {
+        let state = ApiState::default();
+        let mut lifecycle = test_connection_lifecycle("conn_closed");
+        lifecycle.mark_backend_connected(Timestamp("connected".to_owned()));
+
+        record_connection_started(&state, &lifecycle).await;
+
+        assert_runtime_connection(
+            &state,
+            "conn_closed",
+            ConnectionState::BackendConnected,
+            0,
+            0,
+            false,
+        )
+        .await;
+        assert_active_connection_count(&state, 1).await;
+
+        finalize_forwarding_lifecycle(
+            &state,
+            &mut lifecycle,
+            &Ok(ForwardingSummary {
+                client_peer_addr: "127.0.0.1:51000".parse().expect("valid client address"),
+                backend_address: "127.0.0.1:3306".to_owned(),
+                client_to_backend_bytes: 12,
+                backend_to_client_bytes: 34,
+            }),
+        )
+        .await;
+
+        assert_runtime_connection(&state, "conn_closed", ConnectionState::Closed, 12, 34, true)
+            .await;
+        assert_active_connection_count(&state, 0).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_connection_lifecycle_records_forwarding_failures() {
+        let state = ApiState::default();
+        let mut lifecycle = test_connection_lifecycle("conn_forwarding_failed");
+        lifecycle.mark_backend_connected(Timestamp("connected".to_owned()));
+        record_connection_started(&state, &lifecycle).await;
+
+        finalize_forwarding_lifecycle(
+            &state,
+            &mut lifecycle,
+            &Err(ForwardingError::Io {
+                failure: ForwardingFailure {
+                    client_peer_addr: "127.0.0.1:51000".parse().expect("valid client address"),
+                    backend_address: "127.0.0.1:3306".to_owned(),
+                    client_to_backend_bytes: Some(12),
+                    backend_to_client_bytes: None,
+                },
+                source: io::Error::other("simulated forwarding failure"),
+            }),
+        )
+        .await;
+
+        assert_runtime_connection(
+            &state,
+            "conn_forwarding_failed",
+            ConnectionState::Failed,
+            12,
+            0,
+            true,
+        )
+        .await;
+        assert_active_connection_count(&state, 0).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_connection_lifecycle_retains_backend_dial_failures_without_marking_active() {
+        let state = ApiState::default();
+        let mut lifecycle = test_connection_lifecycle("conn_dial_failed");
+        let failure = BackendDialFailure {
+            client_peer_addr: "127.0.0.1:51000".parse().expect("valid client address"),
+            backend_address: "127.0.0.1:3306".to_owned(),
+            kind: BackendDialFailureKind::Connect,
+        };
+
+        lifecycle.mark_backend_dial_failed(&failure, Timestamp("failed".to_owned()));
+        record_connection_finished(&state, lifecycle.into_info()).await;
+
+        assert_runtime_connection(
+            &state,
+            "conn_dial_failed",
+            ConnectionState::Failed,
+            0,
+            0,
+            true,
+        )
+        .await;
+        assert_active_connection_count(&state, 0).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_exposes_completed_proxy_sessions_through_connections_api() {
+        let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("backend listener should bind");
+        let backend_addr = backend_listener
+            .local_addr()
+            .expect("backend listener should have an address");
+        let backend_task = tokio::spawn(async move {
+            let (mut backend_stream, _) = backend_listener
+                .accept()
+                .await
+                .expect("backend should accept proxied connection");
+            let mut request = [0_u8; 4];
+            backend_stream
+                .read_exact(&mut request)
+                .await
+                .expect("backend should receive forwarded request");
+            assert_eq!(&request, b"ping");
+            backend_stream
+                .write_all(b"pong")
+                .await
+                .expect("backend should write forwarded response");
+            backend_stream
+                .shutdown()
+                .await
+                .expect("backend should close cleanly");
+        });
+        let runtime = start_minimal_mysql_runtime(backend_addr.to_string())
+            .await
+            .expect("runtime should start");
+
+        let mut client_stream = tokio::net::TcpStream::connect(runtime.proxy_addr)
+            .await
+            .expect("client should connect to proxy");
+        client_stream
+            .write_all(b"ping")
+            .await
+            .expect("client should write through proxy");
+        let mut response = [0_u8; 4];
+        client_stream
+            .read_exact(&mut response)
+            .await
+            .expect("client should receive backend response");
+        assert_eq!(&response, b"pong");
+        client_stream
+            .shutdown()
+            .await
+            .expect("client should close cleanly");
+        backend_task.await.expect("backend task should finish");
+
+        let connection = wait_for_runtime_connection(&runtime, "conn_1", "closed").await;
+        assert_eq!(connection["bytes_in"], 4);
+        assert_eq!(connection["bytes_out"], 4);
+        assert!(connection["closed_at"].is_string());
+
+        runtime.shutdown().await.expect("runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn runtime_retains_backend_dial_failures_through_connections_api() {
+        let runtime = start_minimal_mysql_runtime(unused_loopback_addr().to_string())
+            .await
+            .expect("runtime should start");
+        let client_stream = tokio::net::TcpStream::connect(runtime.proxy_addr)
+            .await
+            .expect("client should connect to proxy");
+
+        let connection = wait_for_runtime_connection(&runtime, "conn_1", "failed").await;
+        assert_eq!(connection["bytes_in"], 0);
+        assert_eq!(connection["bytes_out"], 0);
+        assert!(connection["closed_at"].is_string());
+        drop(client_stream);
+
+        runtime.shutdown().await.expect("runtime should shut down");
+    }
+
+    fn test_connection_lifecycle(id: &str) -> ConnectionLifecycleRecord {
+        runtime_connection_lifecycle(
+            ConnectionId(id.to_owned()),
+            "mysql-local".to_owned(),
+            DatabaseType("mysql".to_owned()),
+            "127.0.0.1:51000".parse().expect("valid client address"),
+            "127.0.0.1:3306".to_owned(),
+        )
+    }
+
+    async fn assert_runtime_connection(
+        state: &ApiState,
+        id: &str,
+        expected_state: ConnectionState,
+        expected_bytes_in: u64,
+        expected_bytes_out: u64,
+        expected_closed: bool,
+    ) {
+        let connection_store = state.connection_store();
+        let store = connection_store.read().await;
+        let connection = store
+            .get(&ConnectionId(id.to_owned()))
+            .expect("connection should be retained");
+
+        assert_eq!(connection.state, expected_state);
+        assert_eq!(connection.bytes_in, expected_bytes_in);
+        assert_eq!(connection.bytes_out, expected_bytes_out);
+        assert_eq!(connection.closed_at.is_some(), expected_closed);
+    }
+
+    async fn assert_active_connection_count(state: &ApiState, expected: usize) {
+        let live_statistics = state.live_statistics();
+        let mut statistics = live_statistics.write().await;
+
+        assert_eq!(statistics.snapshot().active_connections, expected);
+    }
+
+    async fn wait_for_runtime_connection(
+        runtime: &MinimalMysqlRuntime,
+        expected_id: &str,
+        expected_state: &str,
+    ) -> Value {
+        for _ in 0..50 {
+            let response: Value =
+                reqwest::get(format!("http://{}/api/v1/connections", runtime.api_addr))
+                    .await
+                    .expect("connections request should succeed")
+                    .json()
+                    .await
+                    .expect("connections response should be JSON");
+            let matching = response["items"].as_array().and_then(|connections| {
+                connections
+                    .iter()
+                    .find(|connection| {
+                        connection["id"] == expected_id && connection["state"] == expected_state
+                    })
+                    .cloned()
+            });
+
+            if let Some(connection) = matching {
+                return connection;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("connection {expected_id} did not reach state {expected_state}");
     }
 
     #[test]
