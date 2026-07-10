@@ -632,3 +632,36 @@ Added protocol-neutral, object-safe plugin hook traits with typed errors, unit c
 ### Next Steps
 
 - None - task complete
+
+
+## Session 80: Wire connection lifecycle runtime
+
+**Date**: 2026-07-10
+**Task**: Wire connection lifecycle runtime
+**Branch**: `main`
+
+### Summary
+
+Wired accepted MySQL proxy sessions into the connection store and live statistics, retained terminal dial and forwarding failures, added runtime lifecycle regression coverage, and documented the runtime contract.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b9bd236` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
