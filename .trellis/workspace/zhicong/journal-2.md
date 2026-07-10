@@ -830,3 +830,36 @@ Wired web.static_dir into the HTTP runtime, added SPA/static serving with API an
 ### Next Steps
 
 - None - task complete
+
+
+## Session 86: Wire configured SQLite storage into app runtime (Issue 112)
+
+**Date**: 2026-07-10
+**Task**: Wire configured SQLite storage into app runtime (Issue 112)
+**Branch**: `main`
+
+### Summary
+
+Verified SQLite storage wiring for Issue 112. Confirmed RuntimeStorage::from_config() handles StorageType::Sqlite with separate reader connection and EventPersistence::sqlite() async worker. All 9 storage/SQLite tests pass. Error handling provides clear messages for invalid paths. DuckDB explicitly unsupported. No code changes needed. Implementation complete and tested.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e449bcb` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
