@@ -1,0 +1,21 @@
+{
+  "slug": "07-10-wire-configured-sqlite-storage-runtime",
+  "title": "Wire configured SQLite storage into app runtime",
+  "issue": 112,
+  "status": "completed",
+  "priority": "P1",
+  "difficulty": "Medium",
+  "estimated_hours": 6,
+  "labels": [
+    "area:backend",
+    "area:storage",
+    "area:app",
+    "type:feature"
+  ],
+  "dependencies": [
+    "Issue 087",
+    "Issue 109"
+  ],
+  "created_at": "2026-07-10T00:00:00Z",
+  "completedAt": "2026-07-10"
+}
