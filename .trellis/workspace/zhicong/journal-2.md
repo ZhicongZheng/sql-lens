@@ -665,3 +665,36 @@ Wired accepted MySQL proxy sessions into the connection store and live statistic
 ### Next Steps
 
 - None - task complete
+
+
+## Session 81: Plan backend core follow-up issues
+
+**Date**: 2026-07-10
+**Task**: Plan backend core follow-up issues
+**Branch**: `main`
+
+### Summary
+
+Added Issues 115-125 for backend runtime closure, configuration wiring, extensibility, replay, storage, and MySQL protocol coverage while preserving completed issue history.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7171611` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
