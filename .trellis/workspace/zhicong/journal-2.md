@@ -698,3 +698,36 @@ Added Issues 115-125 for backend runtime closure, configuration wiring, extensib
 ### Next Steps
 
 - None - task complete
+
+
+## Session 82: Wire capture pipeline runtime fan-out
+
+**Date**: 2026-07-10
+**Task**: Wire capture pipeline runtime fan-out
+**Branch**: `main`
+
+### Summary
+
+Wired the bounded capture pipeline into the app runtime, added capture configuration, runtime fan-out and shutdown draining, and validated the full workspace.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `94636f5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

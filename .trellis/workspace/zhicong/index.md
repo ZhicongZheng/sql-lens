@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 81
+- **Total Sessions**: 82
 - **Last Active**: 2026-07-10
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~700 | Active |
+| `journal-2.md` | ~733 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 82 | 2026-07-10 | Wire capture pipeline runtime fan-out | `94636f5` | `main` |
 | 81 | 2026-07-10 | Plan backend core follow-up issues | `7171611` | `main` |
 | 80 | 2026-07-10 | Wire connection lifecycle runtime | `b9bd236` | `main` |
 | 79 | 2026-07-10 | Issue 090 plugin hook trait definitions | `77c61ff` | `main` |
