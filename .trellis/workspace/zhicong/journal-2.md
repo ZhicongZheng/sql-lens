@@ -731,3 +731,36 @@ Wired the bounded capture pipeline into the app runtime, added capture configura
 ### Next Steps
 
 - None - task complete
+
+
+## Session 83: Apply configured slow-query threshold at runtime
+
+**Date**: 2026-07-10
+**Task**: Apply configured slow-query threshold at runtime
+**Branch**: `main`
+
+### Summary
+
+Implemented runtime wiring for configured slow-query threshold (Issue 116). start_runtime_from_config builds SlowQueryClassifier from SqlLensConfig, passes it through CaptureRuntime → consumer → store_sql_events. Added threshold tests, updated quality guidelines. All checks passed; committed and archived.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e2a2b82` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

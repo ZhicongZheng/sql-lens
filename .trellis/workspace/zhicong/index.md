@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 82
+- **Total Sessions**: 83
 - **Last Active**: 2026-07-10
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~733 | Active |
+| `journal-2.md` | ~766 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 83 | 2026-07-10 | Apply configured slow-query threshold at runtime | `e2a2b82` | `main` |
 | 82 | 2026-07-10 | Wire capture pipeline runtime fan-out | `94636f5` | `main` |
 | 81 | 2026-07-10 | Plan backend core follow-up issues | `7171611` | `main` |
 | 80 | 2026-07-10 | Wire connection lifecycle runtime | `b9bd236` | `main` |
