@@ -797,3 +797,36 @@ Verified storage layer retention cleanup capability for Issue 089. Confirmed Rin
 ### Next Steps
 
 - None - task complete
+
+
+## Session 85: Serve built web UI from app runtime
+
+**Date**: 2026-07-10
+**Task**: Serve built web UI from app runtime
+**Branch**: `main`
+
+### Summary
+
+Wired web.static_dir into the HTTP runtime, added SPA/static serving with API and WebSocket fallbacks, and aligned frontend origin and Vite proxy behavior.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `fc38673` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

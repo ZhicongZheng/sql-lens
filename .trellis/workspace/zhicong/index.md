@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 84
+- **Total Sessions**: 85
 - **Last Active**: 2026-07-10
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~799 | Active |
+| `journal-2.md` | ~832 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 85 | 2026-07-10 | Serve built web UI from app runtime | `fc38673` | `main` |
 | 84 | 2026-07-10 | Add retention policy enforcement (Issue 089) | `0d12b34` | `main` |
 | 83 | 2026-07-10 | Apply configured slow-query threshold at runtime | `e2a2b82` | `main` |
 | 82 | 2026-07-10 | Wire capture pipeline runtime fan-out | `94636f5` | `main` |
