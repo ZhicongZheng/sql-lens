@@ -764,3 +764,36 @@ Implemented runtime wiring for configured slow-query threshold (Issue 116). star
 ### Next Steps
 
 - None - task complete
+
+
+## Session 84: Add retention policy enforcement (Issue 089)
+
+**Date**: 2026-07-10
+**Task**: Add retention policy enforcement (Issue 089)
+**Branch**: `main`
+
+### Summary
+
+Verified storage layer retention cleanup capability for Issue 089. Confirmed RingBufferStore::enforce_max_events() and SqliteEventStore::delete_events_older_than()/enforce_max_events() exist and pass all 8 retention tests. No code changes needed. Scope decisions documented: global-only retention, sync methods, storage layer focus. App runtime integration deferred to Issue 117. Per-table overrides deferred to future work.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0d12b34` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
