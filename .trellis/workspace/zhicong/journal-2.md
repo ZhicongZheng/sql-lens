@@ -566,3 +566,36 @@ Implemented Issue 114: MySQL COM_QUERY result-set responses now finalize query e
 ### Next Steps
 
 - None - task complete
+
+
+## Session 78: Add XSS regression tests (Issue 103)
+
+**Date**: 2026-07-10
+**Task**: Add XSS regression tests (Issue 103)
+**Branch**: `main`
+
+### Summary
+
+Implemented 12 XSS regression tests covering SQL List and SQL Detail pages. All tests pass, verifying safe rendering of malicious payloads. trellis-check passed, committed.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `947df55` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
