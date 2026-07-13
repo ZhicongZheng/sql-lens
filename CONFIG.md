@@ -77,6 +77,8 @@ path = ""
 [retention]
 max_age = "24h"
 max_events = 100000
+enforcement_enabled = true
+enforcement_interval = "1h"
 
 [logging]
 level = "info"
@@ -192,6 +194,9 @@ Retention policy:
 
 - `max_age`.
 - `max_events`.
+- `enforcement_enabled`: starts periodic runtime cleanup when true.
+- `enforcement_interval`: positive `ms`, `s`, `m`, or `h` duration between
+  cleanup runs; the default is `1h`.
 - `max_bytes`.
 - `drop_policy`: `oldest` or `reject_new`.
 

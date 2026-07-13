@@ -17,4 +17,5 @@ pub use model::{
     LoggingFormat, LoggingLevel, PluginsConfig, Protocol, ProxyConfig, ProxyTargetConfig,
     RedactionConfig, ReplayConfig, RetentionConfig, RetentionDropPolicy, SqlLensConfig,
     StorageConfig, StorageType, TlsConfig, TlsMode, WebConfig,
+    parse_retention_enforcement_interval,
 };

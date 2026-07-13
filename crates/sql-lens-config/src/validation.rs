@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use crate::{ConfigValidationError, ConfigValidationViolation, Protocol, SqlLensConfig};
+use crate::{
+    ConfigValidationError, ConfigValidationViolation, Protocol, SqlLensConfig,
+    parse_retention_enforcement_interval,
+};
 
 impl SqlLensConfig {
     pub fn validate(&self) -> Result<(), ConfigValidationError> {
@@ -8,6 +11,10 @@ impl SqlLensConfig {
 
         if self.capture.capacity == 0 {
             violations.push(ConfigValidationViolation::InvalidCaptureCapacity);
+        }
+
+        if parse_retention_enforcement_interval(&self.retention.enforcement_interval).is_none() {
+            violations.push(ConfigValidationViolation::InvalidRetentionEnforcementInterval);
         }
 
         if self.targets.is_empty() {

@@ -96,6 +96,8 @@ fn default_config_contains_documented_web_storage_and_retention_defaults() {
     assert_eq!(config.retention.max_age, "24h");
     assert_eq!(config.retention.max_events, 100_000);
     assert_eq!(config.retention.drop_policy, RetentionDropPolicy::Oldest);
+    assert!(config.retention.enforcement_enabled);
+    assert_eq!(config.retention.enforcement_interval, "1h");
 }
 
 #[test]
@@ -495,6 +497,8 @@ max_age = "1h"
 max_events = 42
 max_bytes = 1048576
 drop_policy = "reject_new"
+enforcement_enabled = false
+enforcement_interval = "15m"
 
 [logging]
 level = "debug"
@@ -531,6 +535,8 @@ timeout_ms = 200
     assert_eq!(config.web.static_dir.as_deref(), Some("web/dist"));
     assert_eq!(config.storage.storage_type, StorageType::RingBuffer);
     assert_eq!(config.retention.drop_policy, RetentionDropPolicy::RejectNew);
+    assert!(!config.retention.enforcement_enabled);
+    assert_eq!(config.retention.enforcement_interval, "15m");
     assert_eq!(config.logging.level, LoggingLevel::Debug);
     assert_eq!(config.logging.format, LoggingFormat::Pretty);
     assert!(!config.logging.redact_secrets);
@@ -538,6 +544,29 @@ timeout_ms = 200
     assert!(!config.replay.enabled);
     assert!(config.plugins.enabled);
     assert_eq!(config.plugins.timeout_ms, 200);
+}
+
+#[test]
+fn retention_enforcement_interval_requires_a_positive_supported_duration() {
+    assert_eq!(
+        parse_retention_enforcement_interval("10ms"),
+        Some(std::time::Duration::from_millis(10))
+    );
+    assert_eq!(
+        parse_retention_enforcement_interval("1h"),
+        Some(std::time::Duration::from_secs(3_600))
+    );
+
+    let mut config = SqlLensConfig::default();
+    config.retention.enforcement_interval = "0".to_owned();
+
+    let error = config
+        .validate()
+        .expect_err("zero retention enforcement interval should fail validation");
+    assert_eq!(
+        error.violations,
+        vec![ConfigValidationViolation::InvalidRetentionEnforcementInterval]
+    );
 }
 
 #[test]

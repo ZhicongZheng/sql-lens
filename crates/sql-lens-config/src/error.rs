@@ -90,6 +90,7 @@ impl std::error::Error for ConfigValidationError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigValidationViolation {
     InvalidCaptureCapacity,
+    InvalidRetentionEnforcementInterval,
     MissingProxyListen,
     MissingBackendAddress,
     UnsupportedProtocol {
@@ -122,6 +123,10 @@ impl fmt::Display for ConfigValidationViolation {
             Self::InvalidCaptureCapacity => {
                 write!(f, "`capture.capacity` must be greater than zero")
             }
+            Self::InvalidRetentionEnforcementInterval => write!(
+                f,
+                "`retention.enforcement_interval` must be a positive duration using ms, s, m, or h"
+            ),
             Self::MissingProxyListen => write!(f, "`proxy.listen` must not be empty"),
             Self::MissingBackendAddress => write!(f, "`backend.address` must not be empty"),
             Self::UnsupportedProtocol { protocol } => write!(

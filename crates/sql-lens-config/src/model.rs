@@ -176,6 +176,8 @@ pub struct RetentionConfig {
     pub max_events: u64,
     pub max_bytes: Option<u64>,
     pub drop_policy: RetentionDropPolicy,
+    pub enforcement_enabled: bool,
+    pub enforcement_interval: String,
 }
 
 impl Default for RetentionConfig {
@@ -185,8 +187,31 @@ impl Default for RetentionConfig {
             max_events: 100_000,
             max_bytes: None,
             drop_policy: RetentionDropPolicy::default(),
+            enforcement_enabled: true,
+            enforcement_interval: "1h".to_owned(),
         }
     }
+}
+
+pub fn parse_retention_enforcement_interval(value: &str) -> Option<std::time::Duration> {
+    let value = value.trim();
+    let (amount, unit) = value
+        .strip_suffix("ms")
+        .map(|amount| (amount, "ms"))
+        .or_else(|| value.strip_suffix('s').map(|amount| (amount, "s")))
+        .or_else(|| value.strip_suffix('m').map(|amount| (amount, "m")))
+        .or_else(|| value.strip_suffix('h').map(|amount| (amount, "h")))?;
+    let amount = amount.parse::<u64>().ok()?;
+
+    let duration = match unit {
+        "ms" => std::time::Duration::from_millis(amount),
+        "s" => std::time::Duration::from_secs(amount),
+        "m" => std::time::Duration::from_secs(amount.checked_mul(60)?),
+        "h" => std::time::Duration::from_secs(amount.checked_mul(3_600)?),
+        _ => return None,
+    };
+
+    (!duration.is_zero()).then_some(duration)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

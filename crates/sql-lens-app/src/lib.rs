@@ -1,12 +1,17 @@
 //! Minimal runtime composition helpers for SQL Lens integration tests.
 
+mod retention;
+
 use std::{
     error::Error,
     fmt, io,
     net::SocketAddr,
     num::NonZeroUsize,
     path::PathBuf,
-    sync::mpsc::{SyncSender, TrySendError, sync_channel},
+    sync::{
+        Arc, Mutex,
+        mpsc::{SyncSender, TrySendError, sync_channel},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,8 +23,8 @@ use sql_lens_capture::{
 };
 use sql_lens_config::{
     CaptureConfig, CaptureOverloadPolicy as ConfigCaptureOverloadPolicy,
-    DatabaseType as ConfigDatabaseType, ProxyTargetConfig, SqlLensConfig, StorageConfig,
-    StorageType,
+    DatabaseType as ConfigDatabaseType, ProxyTargetConfig, RetentionConfig, SqlLensConfig,
+    StorageConfig, StorageType, parse_retention_enforcement_interval,
 };
 use sql_lens_core::{
     ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, SqlEvent, Timestamp,
@@ -35,9 +40,12 @@ use sql_lens_proxy::{
 use sql_lens_storage::{RingBufferStore, SqliteEventStore};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{oneshot, watch},
+    sync::{RwLock, oneshot, watch},
     task::JoinError,
+    time::{Instant, MissedTickBehavior},
 };
+
+use crate::retention::RetentionEnforcer;
 
 const MYSQL_PROTOCOL_NAME: &str = "mysql";
 const FORWARDING_BUFFER_SIZE: usize = 16 * 1024;
@@ -54,6 +62,7 @@ pub struct MinimalMysqlRuntime {
     api_task: tokio::task::JoinHandle<Result<(), HttpServerError>>,
     proxy_tasks: Vec<tokio::task::JoinHandle<()>>,
     capture_runtime: CaptureRuntime,
+    retention_runtime: Option<RetentionRuntime>,
     persistence: EventPersistence,
     sqlite_worker: Option<thread::JoinHandle<()>>,
 }
@@ -148,6 +157,92 @@ impl CaptureRuntime {
     }
 }
 
+#[derive(Debug)]
+struct RetentionRuntime {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RetentionRuntime {
+    fn drop(&mut self) {
+        // Do not leave the scheduler detached if startup fails before the
+        // runtime is returned to its caller.
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl RetentionRuntime {
+    fn start(
+        config: RetentionConfig,
+        ring_buffer: Arc<RwLock<RingBufferStore>>,
+        sqlite_store: Option<Arc<Mutex<SqliteEventStore>>>,
+    ) -> Result<Option<Self>, MinimalMysqlRuntimeError> {
+        if !config.enforcement_enabled {
+            tracing::info!("retention enforcement disabled");
+            return Ok(None);
+        }
+
+        let interval = parse_retention_enforcement_interval(&config.enforcement_interval)
+            .ok_or_else(|| {
+                MinimalMysqlRuntimeError::RetentionConfig(
+                    "retention.enforcement_interval must be a positive duration using ms, s, m, or h"
+                        .to_owned(),
+                )
+            })?;
+        let enforcer = Arc::new(RetentionEnforcer::new(config, ring_buffer, sqlite_store));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(run_retention_scheduler(enforcer, interval, shutdown_rx));
+
+        Ok(Some(Self {
+            shutdown_tx: Some(shutdown_tx),
+            task: Some(task),
+        }))
+    }
+
+    async fn shutdown(mut self) -> Result<(), MinimalMysqlRuntimeError> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+
+        self.task
+            .take()
+            .expect("retention scheduler task should be present")
+            .await
+            .map_err(MinimalMysqlRuntimeError::Join)
+    }
+}
+
+async fn run_retention_scheduler(
+    enforcer: Arc<RetentionEnforcer>,
+    interval: Duration,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    let mut ticker = tokio::time::interval_at(Instant::now() + interval, interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let enforcer = Arc::clone(&enforcer);
+                match tokio::task::spawn_blocking(move || enforcer.enforce_blocking()).await {
+                    Ok(Ok(deleted_events)) => {
+                        tracing::info!(deleted_events, "retention enforcement completed");
+                    }
+                    Ok(Err(error)) => {
+                        tracing::error!(error = %error, "retention enforcement failed");
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, "retention enforcement worker panicked");
+                    }
+                }
+            }
+            _ = &mut shutdown => return,
+        }
+    }
+}
+
 impl MinimalMysqlRuntime {
     pub async fn shutdown(self) -> Result<(), MinimalMysqlRuntimeError> {
         let Self {
@@ -156,6 +251,7 @@ impl MinimalMysqlRuntime {
             api_task,
             proxy_tasks,
             capture_runtime,
+            retention_runtime,
             persistence,
             sqlite_worker,
             ..
@@ -167,6 +263,9 @@ impl MinimalMysqlRuntime {
         api_task.await.map_err(MinimalMysqlRuntimeError::Join)??;
         for proxy_task in proxy_tasks {
             proxy_task.await.map_err(MinimalMysqlRuntimeError::Join)?;
+        }
+        if let Some(retention_runtime) = retention_runtime {
+            retention_runtime.shutdown().await?;
         }
         capture_runtime.shutdown().await?;
         drop(persistence);
@@ -213,6 +312,7 @@ pub async fn start_runtime_from_config(
         runtime_storage,
         capture_config,
         classifier,
+        config.retention.clone(),
     )
     .await
 }
@@ -245,6 +345,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
         RuntimeStorage::ring_buffer_default(),
         default_capture_pipeline_config(),
         SlowQueryClassifier::default(),
+        RetentionConfig::default(),
     )
     .await
 }
@@ -256,6 +357,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     runtime_storage: RuntimeStorage,
     capture_config: CapturePipelineConfig,
     classifier: SlowQueryClassifier,
+    retention_config: RetentionConfig,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
         return Err(MinimalMysqlRuntimeError::NoProxyTargets);
@@ -264,6 +366,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     let RuntimeStorage {
         event_store,
         sqlite_event_reader,
+        retention_sqlite_store,
         persistence,
         sqlite_worker,
     } = runtime_storage;
@@ -272,6 +375,11 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     } else {
         ApiState::new(event_store)
     };
+    let retention_runtime = RetentionRuntime::start(
+        retention_config,
+        state.event_store(),
+        retention_sqlite_store,
+    )?;
     let capture_runtime = CaptureRuntime::start(
         capture_config,
         classifier,
@@ -338,6 +446,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         api_task,
         proxy_tasks,
         capture_runtime,
+        retention_runtime,
         persistence,
         sqlite_worker,
     })
@@ -373,6 +482,7 @@ fn runtime_slow_query_classifier(config: &SqlLensConfig) -> SlowQueryClassifier 
 struct RuntimeStorage {
     event_store: RingBufferStore,
     sqlite_event_reader: Option<SqliteEventStore>,
+    retention_sqlite_store: Option<Arc<Mutex<SqliteEventStore>>>,
     persistence: EventPersistence,
     sqlite_worker: Option<thread::JoinHandle<()>>,
 }
@@ -385,6 +495,7 @@ impl RuntimeStorage {
             StorageType::RingBuffer => Ok(Self {
                 event_store,
                 sqlite_event_reader: None,
+                retention_sqlite_store: None,
                 persistence: EventPersistence::default(),
                 sqlite_worker: None,
             }),
@@ -402,12 +513,19 @@ impl RuntimeStorage {
                         source: Box::new(source),
                     }
                 })?;
+                let retention_sqlite_store = SqliteEventStore::open(&path).map_err(|source| {
+                    MinimalMysqlRuntimeError::SqliteStorage {
+                        path: path.clone(),
+                        source: Box::new(source),
+                    }
+                })?;
                 let (persistence, sqlite_worker) = EventPersistence::sqlite(store);
                 tracing::info!(path = %path.display(), "SQL Lens SQLite persistence enabled");
 
                 Ok(Self {
                     event_store,
                     sqlite_event_reader: Some(sqlite_event_reader),
+                    retention_sqlite_store: Some(Arc::new(Mutex::new(retention_sqlite_store))),
                     persistence,
                     sqlite_worker: Some(sqlite_worker),
                 })
@@ -425,6 +543,7 @@ impl RuntimeStorage {
         Self {
             event_store: RingBufferStore::new(capacity),
             sqlite_event_reader: None,
+            retention_sqlite_store: None,
             persistence: EventPersistence::default(),
             sqlite_worker: None,
         }
@@ -1631,6 +1750,100 @@ path = "{}"
 
         assert!(storage.persistence.sqlite_tx.is_none());
         assert!(storage.sqlite_worker.is_none());
+        assert!(storage.retention_sqlite_store.is_none());
+    }
+
+    #[tokio::test]
+    async fn retention_scheduler_enforces_ring_buffer_limits_in_the_background() {
+        let state = ApiState::default();
+        let event_store = state.event_store();
+        {
+            let mut store = event_store.write().await;
+            for index in 0..3 {
+                store.append(test_event(
+                    SqlEventId(format!("evt_retention_{index}")),
+                    CaptureStatus::Ok,
+                    DurationMillis(1),
+                ));
+            }
+        }
+        let retention = RetentionRuntime::start(
+            RetentionConfig {
+                max_events: 1,
+                enforcement_interval: "1ms".to_owned(),
+                ..RetentionConfig::default()
+            },
+            state.event_store(),
+            None,
+        )
+        .expect("retention runtime should start")
+        .expect("retention should be enabled");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.event_store().read().await.len() == 1 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("retention scheduler should enforce the configured event limit");
+
+        retention
+            .shutdown()
+            .await
+            .expect("retention scheduler should stop cleanly");
+    }
+
+    #[test]
+    fn disabled_retention_does_not_spawn_a_background_task() {
+        let runtime = RetentionRuntime::start(
+            RetentionConfig {
+                enforcement_enabled: false,
+                ..RetentionConfig::default()
+            },
+            ApiState::default().event_store(),
+            None,
+        )
+        .expect("disabled retention configuration should be valid");
+
+        assert!(runtime.is_none());
+    }
+
+    #[test]
+    fn enabled_retention_rejects_an_invalid_interval() {
+        let error = RetentionRuntime::start(
+            RetentionConfig {
+                enforcement_interval: "not-a-duration".to_owned(),
+                ..RetentionConfig::default()
+            },
+            ApiState::default().event_store(),
+            None,
+        )
+        .expect_err("invalid retention interval should prevent startup");
+
+        assert!(matches!(
+            error,
+            MinimalMysqlRuntimeError::RetentionConfig(message)
+                if message.contains("retention.enforcement_interval")
+        ));
+    }
+
+    #[tokio::test]
+    async fn retention_scheduler_shutdown_does_not_wait_for_the_next_interval() {
+        let retention = RetentionRuntime::start(
+            RetentionConfig::default(),
+            ApiState::default().event_store(),
+            None,
+        )
+        .expect("default retention configuration should be valid")
+        .expect("retention should be enabled");
+
+        tokio::time::timeout(Duration::from_millis(100), retention.shutdown())
+            .await
+            .expect("retention scheduler shutdown should not wait for one hour")
+            .expect("retention scheduler should stop cleanly");
     }
 
     fn temporary_sqlite_path(name: &str) -> PathBuf {
@@ -1684,6 +1897,7 @@ path = "{}"
 pub enum MinimalMysqlRuntimeError {
     NoProxyTargets,
     CaptureConfig(String),
+    RetentionConfig(String),
     StorageConfig(String),
     SqliteStorage {
         path: PathBuf,
@@ -1704,6 +1918,9 @@ impl fmt::Display for MinimalMysqlRuntimeError {
                 "minimal MySQL runtime requires at least one proxy target"
             ),
             Self::CaptureConfig(message) => write!(f, "invalid capture configuration: {message}"),
+            Self::RetentionConfig(message) => {
+                write!(f, "invalid retention configuration: {message}")
+            }
             Self::StorageConfig(message) => write!(f, "invalid runtime storage config: {message}"),
             Self::SqliteStorage { path, source } => {
                 write!(
@@ -1732,6 +1949,7 @@ impl Error for MinimalMysqlRuntimeError {
         match self {
             Self::NoProxyTargets => None,
             Self::CaptureConfig(_) => None,
+            Self::RetentionConfig(_) => None,
             Self::StorageConfig(_) => None,
             Self::SqliteStorage { source, .. } => Some(source.as_ref()),
             Self::SqlitePersistenceWorkerPanicked => None,
