@@ -2174,7 +2174,9 @@ Do not add `tokio`, `async-trait`, `sql-lens-capture`, proxy, storage, API, app,
 - Registry storage uses `Arc<dyn ProtocolAdapter>` so resolved adapters can be shared by runtime tasks.
 - Unknown adapter names return `ProtocolAdapterRegistryError::UnknownAdapter`.
 - Duplicate adapter names return `ProtocolAdapterRegistryError::DuplicateAdapter`.
-- Config validation mapping is a later composition task; do not make `sql-lens-config` depend on `sql-lens-protocol`.
+- Config validation mapping stays in `sql-lens-config`; app composition maps
+  validated protocol values to registry names without making config depend on
+  `sql-lens-protocol`.
 
 ### 4. Validation & Error Matrix
 
@@ -2196,13 +2198,14 @@ Do not add `tokio`, `async-trait`, `sql-lens-capture`, proxy, storage, API, app,
 Good:
 
 - A MySQL adapter owns a MySQL-specific state struct but exposes it as `Box<dyn ProtocolConnectionState>`.
-- A test adapter proves `Box<dyn ProtocolAdapter>` works before the registry task starts.
+- A test adapter proves `Box<dyn ProtocolAdapter>` works independently of app runtime wiring.
 
 Base:
 
 - Unit tests use dummy bytes and synthetic `SqlEvent` values.
 - Invalid state errors are structured without adding third-party error crates.
-- Registry errors are structured in protocol crate and mapped to user-facing config errors later.
+- Registry errors are structured in protocol crate and mapped to app startup
+  errors by `sql-lens-app`.
 
 Bad:
 
@@ -2251,6 +2254,88 @@ pub trait ProtocolAdapter {
 ```
 
 > Gotcha: when downcasting a boxed state in callers or tests, use `state.as_ref().as_any()` or `state.as_mut().as_any_mut()`. Calling `state.as_any()` directly on `Box<dyn ProtocolConnectionState>` can target the box's blanket implementation instead of the inner state.
+
+## Scenario: Application Protocol Registry Runtime Wiring
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` starts proxy targets and chooses protocol adapters for their forwarding sessions.
+- The app owns registry population and target resolution; protocol crates own adapter contracts and concrete implementations.
+- This layer must not make `sql-lens-config` depend on protocol crates or add dynamic plugin loading.
+
+### 2. Signatures
+
+```rust
+pub struct MinimalMysqlTargetConfig {
+    pub name: String,
+    pub listen: String,
+    pub protocol: String,
+    pub backend_address: String,
+    pub database_type: String,
+}
+
+fn runtime_protocol_registry() -> Result<ProtocolAdapterRegistry, MinimalMysqlRuntimeError>;
+fn runtime_protocol_name(protocol: &str) -> Result<ProtocolName, MinimalMysqlRuntimeError>;
+```
+
+### 3. Contracts
+
+- Startup registers the built-in `MysqlProtocolAdapter` once in a `ProtocolAdapterRegistry`.
+- Each target preserves its configured protocol and resolves one `Arc<dyn ProtocolAdapter>` before listeners start.
+- The resolved adapter is shared by the target's forwarding sessions and owns connection state creation/observation.
+- MySQL behavior and protocol-neutral lifecycle/event contracts remain unchanged.
+- Unknown protocols fail startup with a target-specific registry error; the runtime does not fall through to MySQL.
+- Unsupported protocols are still validated in `sql-lens-config`; config remains independent from protocol crates.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Built-in MySQL registry setup | Register and resolve `ProtocolName("mysql")` |
+| Target protocol is `mysql` | Pass the resolved adapter into the forwarding session |
+| Target protocol is unknown/unsupported | Return `UnsupportedProtocol` or target-specific adapter error before listener startup |
+| Multiple targets use supported protocols | Resolve each target independently |
+| Adapter observes client/backend bytes | Preserve existing observation and capture behavior |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Resolve adapters during runtime composition and pass `Arc<dyn ProtocolAdapter>` down to the session.
+
+Base:
+
+- Only MySQL is registered in this task; future protocol crates add registrations in app composition.
+
+Bad:
+
+- Construct `MysqlProtocolAdapter::new()` inside every forwarding loop.
+- Infer the protocol from backend address or database type.
+- Put adapter selection logic in `sql-lens-config`.
+
+### 6. Tests Required
+
+- Registry resolves the built-in MySQL adapter.
+- Unsupported runtime protocol returns a structured startup error.
+- Multiple configured targets bind and resolve adapters independently.
+- Existing MySQL query and prepared-statement capture tests remain green.
+- Run `cargo fmt --check`, targeted protocol/app tests, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let adapter = MysqlProtocolAdapter::new();
+forward_connection(connection, adapter).await?;
+```
+
+#### Correct
+
+```rust
+let adapter = registry.resolve(&target_protocol)?;
+forward_connection(connection, adapter).await?;
+```
 
 ## Scenario: MySQL Protocol Adapter Foundation
 

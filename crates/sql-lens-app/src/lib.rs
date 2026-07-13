@@ -37,7 +37,10 @@ use sql_lens_core::{
     ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, RedactionPolicy, SqlEvent,
     Timestamp,
 };
-use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
+use sql_lens_protocol::{
+    CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterRegistry, ProtocolAdapterRegistryError,
+    ProtocolConnectionContext,
+};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
 use sql_lens_proxy::{
     AcceptedClient, ActiveSessionDrain, BackendDialConfig, BackendDialError, BackendDialer,
@@ -88,6 +91,7 @@ pub struct MinimalMysqlRuntimeTarget {
 pub struct MinimalMysqlTargetConfig {
     pub name: String,
     pub listen: String,
+    pub protocol: String,
     pub backend_address: String,
     pub database_type: String,
 }
@@ -102,6 +106,7 @@ impl MinimalMysqlTargetConfig {
         Self {
             name: name.into(),
             listen: listen.into(),
+            protocol: MYSQL_PROTOCOL_NAME.to_owned(),
             backend_address: backend_address.into(),
             database_type: database_type.into(),
         }
@@ -113,6 +118,7 @@ impl From<&ProxyTargetConfig> for MinimalMysqlTargetConfig {
         Self {
             name: target.name.clone(),
             listen: target.listen.clone(),
+            protocol: target.protocol.config_value().to_owned(),
             backend_address: target.backend_address.clone(),
             database_type: config_database_type_value(target.database_type).to_owned(),
         }
@@ -122,6 +128,8 @@ impl From<&ProxyTargetConfig> for MinimalMysqlTargetConfig {
 #[derive(Debug, Clone)]
 struct MysqlProxyTargetRuntimeConfig {
     name: String,
+    protocol: ProtocolName,
+    adapter: Arc<dyn ProtocolAdapter>,
     database_type: DatabaseType,
     backend_config: BackendDialConfig,
 }
@@ -496,6 +504,7 @@ pub async fn start_runtime_from_config(
         .iter()
         .map(MinimalMysqlTargetConfig::from)
         .collect();
+    let protocol_registry = runtime_protocol_registry()?;
     let proxy_runtime_config = runtime_proxy_config(&config.proxy)?;
     let redaction_policy = runtime_redaction_policy(&config.redaction);
     let runtime_storage = RuntimeStorage::from_config(&config.storage, &redaction_policy)?;
@@ -523,6 +532,7 @@ pub async fn start_runtime_from_config(
     start_minimal_mysql_runtime_with_runtime_storage(
         HttpServerConfig::from(&config.web),
         targets,
+        protocol_registry,
         runtime_storage,
         options,
     )
@@ -553,6 +563,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
     start_minimal_mysql_runtime_with_runtime_storage(
         http_config,
         targets,
+        runtime_protocol_registry().expect("built-in protocol registry should be valid"),
         RuntimeStorage::ring_buffer_default(),
         RuntimeOptions {
             backend_connect_timeout,
@@ -572,12 +583,27 @@ pub async fn start_minimal_mysql_runtime_with_options(
 async fn start_minimal_mysql_runtime_with_runtime_storage(
     http_config: HttpServerConfig,
     targets: Vec<MinimalMysqlTargetConfig>,
+    protocol_registry: ProtocolAdapterRegistry,
     runtime_storage: RuntimeStorage,
     options: RuntimeOptions,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
         return Err(MinimalMysqlRuntimeError::NoProxyTargets);
     }
+
+    let resolved_targets = targets
+        .into_iter()
+        .map(|target| {
+            let protocol = runtime_protocol_name(&target.protocol)?;
+            let adapter = protocol_registry.resolve(&protocol).map_err(|error| {
+                MinimalMysqlRuntimeError::ProtocolAdapter {
+                    target: target.name.clone(),
+                    source: error,
+                }
+            })?;
+            Ok::<_, MinimalMysqlRuntimeError>((target, protocol, adapter))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let RuntimeStorage {
         event_store,
@@ -616,10 +642,10 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
     let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
     tracing::info!(%api_addr, "SQL Lens API server listening");
-    let mut bound_targets = Vec::with_capacity(targets.len());
-    let mut proxy_targets = Vec::with_capacity(targets.len());
+    let mut bound_targets = Vec::with_capacity(resolved_targets.len());
+    let mut proxy_targets = Vec::with_capacity(resolved_targets.len());
 
-    for target in targets {
+    for (target, protocol, adapter) in resolved_targets {
         let proxy_listener =
             TcpProxyListener::bind(ProxyListenerConfig::new(target.listen.clone())).await?;
         let proxy_addr = proxy_listener.local_addr()?;
@@ -631,6 +657,8 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         );
         let runtime_config = MysqlProxyTargetRuntimeConfig {
             name: target.name.clone(),
+            protocol,
+            adapter,
             database_type: DatabaseType(target.database_type.clone()),
             backend_config: BackendDialConfig::new(
                 target.backend_address,
@@ -711,6 +739,25 @@ fn default_capture_pipeline_config() -> CapturePipelineConfig {
 
 fn runtime_slow_query_classifier(config: &SqlLensConfig) -> SlowQueryClassifier {
     SlowQueryClassifier::new(DurationMillis(config.proxy.slow_threshold_ms))
+}
+
+fn runtime_protocol_registry() -> Result<ProtocolAdapterRegistry, MinimalMysqlRuntimeError> {
+    let mut registry = ProtocolAdapterRegistry::new();
+    registry
+        .register(MysqlProtocolAdapter::new())
+        .map_err(|source| MinimalMysqlRuntimeError::ProtocolRegistry { source })?;
+    Ok(registry)
+}
+
+fn runtime_protocol_name(protocol: &str) -> Result<ProtocolName, MinimalMysqlRuntimeError> {
+    let protocol = protocol.trim();
+    if protocol == MYSQL_PROTOCOL_NAME {
+        return Ok(ProtocolName(protocol.to_owned()));
+    }
+
+    Err(MinimalMysqlRuntimeError::UnsupportedProtocol {
+        protocol: protocol.to_owned(),
+    })
 }
 
 fn runtime_proxy_config(
@@ -935,6 +982,7 @@ async fn run_mysql_proxy(
                             let mut lifecycle = runtime_connection_lifecycle(
                                 connection_id,
                                 target_config.name.clone(),
+                                target_config.protocol.clone(),
                                 target_config.database_type.clone(),
                                 client_peer_addr,
                                 target_config.backend_config.address.clone(),
@@ -983,6 +1031,7 @@ async fn handle_accepted_mysql_client(
     let mut lifecycle = runtime_connection_lifecycle(
         connection_id,
         target_config.name.clone(),
+        target_config.protocol.clone(),
         target_config.database_type.clone(),
         client_peer_addr,
         target_config.backend_config.address.clone(),
@@ -993,9 +1042,15 @@ async fn handle_accepted_mysql_client(
             lifecycle.mark_backend_connected(runtime_timestamp());
             record_connection_started(&state, &lifecycle).await;
 
-            if let Err(source) =
-                forward_mysql_connection(connection, lifecycle, state, publisher, idle_timeout)
-                    .await
+            if let Err(source) = forward_protocol_connection(
+                connection,
+                lifecycle,
+                target_config.adapter,
+                state,
+                publisher,
+                idle_timeout,
+            )
+            .await
             {
                 tracing::warn!(error = %source, "MySQL proxy forwarding failed");
             }
@@ -1011,6 +1066,7 @@ async fn handle_accepted_mysql_client(
 fn runtime_connection_lifecycle(
     connection_id: sql_lens_core::ConnectionId,
     target_name: String,
+    protocol: ProtocolName,
     database_type: DatabaseType,
     client_addr: SocketAddr,
     backend_addr: String,
@@ -1018,7 +1074,7 @@ fn runtime_connection_lifecycle(
     ConnectionLifecycleRecord::accepted(
         connection_id,
         Some(target_name),
-        ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
+        protocol,
         database_type,
         client_addr.to_string(),
         backend_addr,
@@ -1030,9 +1086,10 @@ fn config_database_type_value(database_type: ConfigDatabaseType) -> &'static str
     database_type.config_value()
 }
 
-async fn forward_mysql_connection(
+async fn forward_protocol_connection(
     connection: ProxiedConnection,
     mut lifecycle: ConnectionLifecycleRecord,
+    adapter: Arc<dyn ProtocolAdapter>,
     state: ApiState,
     publisher: CaptureEventPublisher,
     idle_timeout: Duration,
@@ -1040,7 +1097,6 @@ async fn forward_mysql_connection(
     let connection_info = lifecycle.info().clone();
     let (mut client_stream, mut backend_stream, client_peer_addr, backend_address) =
         connection.into_parts();
-    let adapter = MysqlProtocolAdapter::new();
     let context = ProtocolConnectionContext::new(connection_info);
     let mut protocol_state = adapter.create_connection_state(&context);
     let mut client_to_backend_bytes = 0_u64;
@@ -1076,7 +1132,7 @@ async fn forward_mysql_connection(
                         }
 
                         observe_client_bytes(
-                            &adapter,
+                            adapter.as_ref(),
                             protocol_state.as_mut(),
                             &client_buffer[..bytes_read],
                         );
@@ -1114,7 +1170,7 @@ async fn forward_mysql_connection(
                         }
 
                         let events = observe_backend_bytes(
-                            &adapter,
+                            adapter.as_ref(),
                             protocol_state.as_mut(),
                             &backend_buffer[..bytes_read],
                         );
@@ -1236,7 +1292,7 @@ async fn finalize_forwarding_lifecycle(
 }
 
 fn observe_client_bytes(
-    adapter: &MysqlProtocolAdapter,
+    adapter: &dyn ProtocolAdapter,
     protocol_state: &mut dyn sql_lens_protocol::ProtocolConnectionState,
     bytes: &[u8],
 ) {
@@ -1247,7 +1303,7 @@ fn observe_client_bytes(
 }
 
 fn observe_backend_bytes(
-    adapter: &MysqlProtocolAdapter,
+    adapter: &dyn ProtocolAdapter,
     protocol_state: &mut dyn sql_lens_protocol::ProtocolConnectionState,
     bytes: &[u8],
 ) -> Vec<SqlEvent> {
@@ -1337,6 +1393,7 @@ mod tests {
         let info = runtime_connection_lifecycle(
             ConnectionId("conn_1".to_owned()),
             "starrocks-local".to_owned(),
+            ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
             DatabaseType("starrocks".to_owned()),
             "127.0.0.1:51000".parse().expect("valid client address"),
             "127.0.0.1:9030".to_owned(),
@@ -1525,6 +1582,7 @@ mod tests {
         runtime_connection_lifecycle(
             ConnectionId(id.to_owned()),
             "mysql-local".to_owned(),
+            ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()),
             DatabaseType("mysql".to_owned()),
             "127.0.0.1:51000".parse().expect("valid client address"),
             "127.0.0.1:3306".to_owned(),
@@ -1605,10 +1663,33 @@ mod tests {
             MinimalMysqlTargetConfig {
                 name: "starrocks-local".to_owned(),
                 listen: "127.0.0.1:9037".to_owned(),
+                protocol: "mysql".to_owned(),
                 backend_address: "127.0.0.1:9030".to_owned(),
                 database_type: "starrocks".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn runtime_protocol_registry_resolves_builtin_mysql_adapter() {
+        let registry = runtime_protocol_registry().expect("registry should initialize");
+        let adapter = registry
+            .resolve(&ProtocolName(MYSQL_PROTOCOL_NAME.to_owned()))
+            .expect("built-in MySQL adapter should resolve");
+
+        assert_eq!(adapter.protocol_name(), ProtocolName("mysql".to_owned()));
+    }
+
+    #[test]
+    fn runtime_protocol_name_rejects_unsupported_protocols() {
+        let error = runtime_protocol_name("postgresql")
+            .expect_err("unsupported protocol should fail runtime resolution");
+
+        assert!(matches!(
+            error,
+            MinimalMysqlRuntimeError::UnsupportedProtocol { protocol }
+                if protocol == "postgresql"
+        ));
     }
 
     #[tokio::test]
@@ -2625,6 +2706,16 @@ path = "{}"
 #[derive(Debug)]
 pub enum MinimalMysqlRuntimeError {
     NoProxyTargets,
+    UnsupportedProtocol {
+        protocol: String,
+    },
+    ProtocolRegistry {
+        source: ProtocolAdapterRegistryError,
+    },
+    ProtocolAdapter {
+        target: String,
+        source: ProtocolAdapterRegistryError,
+    },
     ProxyConfig(String),
     CaptureConfig(String),
     RetentionConfig(String),
@@ -2646,6 +2737,16 @@ impl fmt::Display for MinimalMysqlRuntimeError {
             Self::NoProxyTargets => write!(
                 f,
                 "minimal MySQL runtime requires at least one proxy target"
+            ),
+            Self::UnsupportedProtocol { protocol } => {
+                write!(f, "unsupported runtime protocol: {protocol}")
+            }
+            Self::ProtocolRegistry { source } => {
+                write!(f, "failed to build protocol adapter registry: {source}")
+            }
+            Self::ProtocolAdapter { target, source } => write!(
+                f,
+                "failed to resolve protocol adapter for target {target}: {source}"
             ),
             Self::ProxyConfig(message) => write!(f, "invalid proxy configuration: {message}"),
             Self::CaptureConfig(message) => write!(f, "invalid capture configuration: {message}"),
@@ -2679,6 +2780,9 @@ impl Error for MinimalMysqlRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NoProxyTargets => None,
+            Self::UnsupportedProtocol { .. } => None,
+            Self::ProtocolRegistry { source } => Some(source),
+            Self::ProtocolAdapter { source, .. } => Some(source),
             Self::ProxyConfig(_) => None,
             Self::CaptureConfig(_) => None,
             Self::RetentionConfig(_) => None,
