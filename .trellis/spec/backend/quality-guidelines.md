@@ -4340,6 +4340,10 @@ impl SqlEventBroadcaster {
   still masked when the parameter is sensitive.
 - `RingBufferStore::append` must call `redact_sql_event` before retaining the
   event.
+- Application startup must map `RedactionConfig` into one `RedactionPolicy`
+  and pass that policy to every runtime-owned storage and broadcast sink.
+- Runtime-owned SQLite stores must use the explicit policy constructors for
+  persistence, timeline reads, and retention cleanup handles.
 - `SqlEventBroadcaster::publish` must call `redact_sql_event` before sending
   the event to subscribers.
 - REST SQL event responses inherit storage redaction and must not duplicate
@@ -4372,8 +4376,7 @@ Good:
 
 Base:
 
-- Later app composition can convert `RedactionConfig` into `RedactionPolicy`.
-- Later central capture fan-out can redact once before cloning events to
+- Central capture fan-out may later redact once before cloning events to
   storage, WebSocket, exporters, and statistics.
 - Later security work can add SQL parsing, regex, classifiers, or plugin rules
   behind a new task design.

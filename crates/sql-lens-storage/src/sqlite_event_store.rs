@@ -12,6 +12,7 @@ use crate::{SqlEventFilter, SqlEventFilterError, apply_sqlite_schema};
 #[derive(Debug)]
 pub struct SqliteEventStore {
     connection: Connection,
+    redaction_policy: RedactionPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,17 +118,34 @@ impl From<rusqlite::Error> for SqliteTimelineQueryError {
 
 impl SqliteEventStore {
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Self::new(Connection::open(path)?)
+        Self::open_with_redaction_policy(path, RedactionPolicy::default())
+    }
+
+    pub fn open_with_redaction_policy(
+        path: impl AsRef<Path>,
+        redaction_policy: RedactionPolicy,
+    ) -> rusqlite::Result<Self> {
+        Self::new_with_redaction_policy(Connection::open(path)?, redaction_policy)
     }
 
     pub fn new(connection: Connection) -> rusqlite::Result<Self> {
+        Self::new_with_redaction_policy(connection, RedactionPolicy::default())
+    }
+
+    pub fn new_with_redaction_policy(
+        connection: Connection,
+        redaction_policy: RedactionPolicy,
+    ) -> rusqlite::Result<Self> {
         apply_sqlite_schema(&connection)?;
 
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            redaction_policy,
+        })
     }
 
     pub fn insert_event(&mut self, event: &SqlEvent) -> rusqlite::Result<()> {
-        let event = redact_sql_event(event.clone(), &RedactionPolicy::default());
+        let event = redact_sql_event(event.clone(), &self.redaction_policy);
         let metadata_json = serialize_json(&event.metadata)?;
         let affected_rows = event
             .result
@@ -751,8 +769,8 @@ mod tests {
     use serde_json::Value;
     use sql_lens_core::{
         CaptureStatus, ConnectionId, DatabaseType, DurationMillis, ErrorSummary, MetadataField,
-        MetadataValue, ProtocolMetadata, ProtocolName, QueryTiming, ResultSummary, SqlEvent,
-        SqlEventId, SqlEventKind, SqlParameter, SqlParameterValue, Timestamp,
+        MetadataValue, ProtocolMetadata, ProtocolName, QueryTiming, RedactionPolicy, ResultSummary,
+        SqlEvent, SqlEventId, SqlEventKind, SqlParameter, SqlParameterValue, Timestamp,
     };
 
     use super::*;
@@ -896,6 +914,52 @@ mod tests {
             Some("SELECT * FROM users WHERE password = '***'".to_owned())
         );
         assert_eq!(parameters[0].value_json, "\"***\"");
+        assert!(parameters[0].redacted);
+    }
+
+    #[test]
+    fn sqlite_event_store_uses_configured_redaction_policy() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        let policy = RedactionPolicy {
+            mask: "[MASK]".to_owned(),
+            parameter_names: vec!["password".to_owned()],
+            sql_patterns: vec!["secret_value".to_owned()],
+            ..RedactionPolicy::default()
+        };
+        let mut store = SqliteEventStore::new_with_redaction_policy(connection, policy)
+            .expect("sqlite store should initialize");
+        let mut event = test_event("evt_custom_policy");
+        event.original_sql = "SELECT secret_value FROM users WHERE password = ?".to_owned();
+        event.expanded_sql =
+            Some("SELECT secret_value FROM users WHERE password = 'top-secret'".to_owned());
+        event.parameters = vec![SqlParameter {
+            index: 0,
+            name: Some("password".to_owned()),
+            value: SqlParameterValue::String("top-secret".to_owned()),
+            redacted: false,
+        }];
+
+        store
+            .insert_event(&event)
+            .expect("event insert should succeed");
+
+        let row = store
+            .get_event_row(&event.id)
+            .expect("event lookup should succeed")
+            .expect("event should exist");
+        let parameters = store
+            .get_parameter_rows(&event.id)
+            .expect("parameter lookup should succeed");
+
+        assert_eq!(
+            row.original_sql,
+            "SELECT [MASK] FROM users WHERE password = ?"
+        );
+        assert_eq!(
+            row.expanded_sql,
+            Some("SELECT [MASK] FROM users WHERE password = '[MASK]'".to_owned())
+        );
+        assert_eq!(parameters[0].value_json, "\"[MASK]\"");
         assert!(parameters[0].redacted);
     }
 

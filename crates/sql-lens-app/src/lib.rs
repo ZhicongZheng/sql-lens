@@ -23,11 +23,13 @@ use sql_lens_capture::{
 };
 use sql_lens_config::{
     CaptureConfig, CaptureOverloadPolicy as ConfigCaptureOverloadPolicy,
-    DatabaseType as ConfigDatabaseType, ProxyConfig, ProxyTargetConfig, RetentionConfig,
-    SqlLensConfig, StorageConfig, StorageType, parse_retention_enforcement_interval,
+    DatabaseType as ConfigDatabaseType, ProxyConfig, ProxyTargetConfig, RedactionConfig,
+    RetentionConfig, SqlLensConfig, StorageConfig, StorageType,
+    parse_retention_enforcement_interval,
 };
 use sql_lens_core::{
-    ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, SqlEvent, Timestamp,
+    ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, RedactionPolicy, SqlEvent,
+    Timestamp,
 };
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
@@ -131,6 +133,7 @@ struct RuntimeOptions {
     capture_config: CapturePipelineConfig,
     classifier: SlowQueryClassifier,
     retention_config: RetentionConfig,
+    redaction_policy: RedactionPolicy,
     proxy: ProxyRuntimeConfig,
 }
 
@@ -359,12 +362,14 @@ pub async fn start_runtime_from_config(
         .map(MinimalMysqlTargetConfig::from)
         .collect();
     let proxy_runtime_config = runtime_proxy_config(&config.proxy)?;
-    let runtime_storage = RuntimeStorage::from_config(&config.storage)?;
+    let redaction_policy = runtime_redaction_policy(&config.redaction);
+    let runtime_storage = RuntimeStorage::from_config(&config.storage, &redaction_policy)?;
     let options = RuntimeOptions {
         backend_connect_timeout: Duration::from_millis(config.proxy.connect_timeout_ms),
         capture_config: runtime_capture_config(&config.capture)?,
         classifier: runtime_slow_query_classifier(config),
         retention_config: config.retention.clone(),
+        redaction_policy,
         proxy: proxy_runtime_config,
     };
 
@@ -407,6 +412,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
             capture_config: default_capture_pipeline_config(),
             classifier: SlowQueryClassifier::default(),
             retention_config: RetentionConfig::default(),
+            redaction_policy: RedactionPolicy::default(),
             proxy: runtime_proxy_config(&ProxyConfig::default())
                 .expect("default proxy configuration should be valid"),
         },
@@ -431,10 +437,15 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         persistence,
         sqlite_worker,
     } = runtime_storage;
+    let redaction_policy = options.redaction_policy.clone();
     let state = if let Some(sqlite_event_reader) = sqlite_event_reader {
-        ApiState::with_sqlite_event_reader(event_store, sqlite_event_reader)
+        ApiState::with_sqlite_event_reader_and_redaction(
+            event_store,
+            sqlite_event_reader,
+            redaction_policy,
+        )
     } else {
-        ApiState::new(event_store)
+        ApiState::with_redaction_policy(event_store, redaction_policy)
     };
     let retention_runtime = RetentionRuntime::start(
         options.retention_config,
@@ -585,8 +596,14 @@ struct RuntimeStorage {
 }
 
 impl RuntimeStorage {
-    fn from_config(config: &StorageConfig) -> Result<Self, MinimalMysqlRuntimeError> {
-        let event_store = RingBufferStore::new(storage_capacity(config.capacity)?);
+    fn from_config(
+        config: &StorageConfig,
+        redaction_policy: &RedactionPolicy,
+    ) -> Result<Self, MinimalMysqlRuntimeError> {
+        let event_store = RingBufferStore::with_redaction_policy(
+            storage_capacity(config.capacity)?,
+            redaction_policy.clone(),
+        );
 
         match config.storage_type {
             StorageType::RingBuffer => Ok(Self {
@@ -598,24 +615,24 @@ impl RuntimeStorage {
             }),
             StorageType::Sqlite => {
                 let path = sqlite_storage_path(config)?;
-                let store = SqliteEventStore::open(&path).map_err(|source| {
-                    MinimalMysqlRuntimeError::SqliteStorage {
+                let store =
+                    SqliteEventStore::open_with_redaction_policy(&path, redaction_policy.clone())
+                        .map_err(|source| MinimalMysqlRuntimeError::SqliteStorage {
                         path: path.clone(),
                         source: Box::new(source),
-                    }
-                })?;
-                let sqlite_event_reader = SqliteEventStore::open(&path).map_err(|source| {
-                    MinimalMysqlRuntimeError::SqliteStorage {
+                    })?;
+                let sqlite_event_reader =
+                    SqliteEventStore::open_with_redaction_policy(&path, redaction_policy.clone())
+                        .map_err(|source| MinimalMysqlRuntimeError::SqliteStorage {
                         path: path.clone(),
                         source: Box::new(source),
-                    }
-                })?;
-                let retention_sqlite_store = SqliteEventStore::open(&path).map_err(|source| {
-                    MinimalMysqlRuntimeError::SqliteStorage {
+                    })?;
+                let retention_sqlite_store =
+                    SqliteEventStore::open_with_redaction_policy(&path, redaction_policy.clone())
+                        .map_err(|source| MinimalMysqlRuntimeError::SqliteStorage {
                         path: path.clone(),
                         source: Box::new(source),
-                    }
-                })?;
+                    })?;
                 let (persistence, sqlite_worker) = EventPersistence::sqlite(store);
                 tracing::info!(path = %path.display(), "SQL Lens SQLite persistence enabled");
 
@@ -655,6 +672,15 @@ fn storage_capacity(capacity: u64) -> Result<NonZeroUsize, MinimalMysqlRuntimeEr
             "storage.capacity must be greater than zero".to_owned(),
         )
     })
+}
+
+fn runtime_redaction_policy(config: &RedactionConfig) -> RedactionPolicy {
+    RedactionPolicy {
+        enabled: config.enabled,
+        mask: config.mask.clone(),
+        parameter_names: config.parameter_names.clone(),
+        sql_patterns: config.sql_patterns.clone(),
+    }
 }
 
 fn sqlite_storage_path(config: &StorageConfig) -> Result<PathBuf, MinimalMysqlRuntimeError> {
@@ -1147,7 +1173,7 @@ mod tests {
     use serde_json::Value;
     use sql_lens_core::{
         CaptureStatus, ConnectionId, ConnectionState, DurationMillis, ProtocolMetadata,
-        QueryTiming, SqlEventId, SqlEventKind,
+        QueryTiming, SqlEventId, SqlEventKind, SqlParameter, SqlParameterValue,
     };
     use sql_lens_proxy::{BackendDialFailure, BackendDialFailureKind};
 
@@ -2023,12 +2049,102 @@ path = "{}"
 
     #[test]
     fn runtime_storage_from_ring_buffer_config_has_no_persistence_worker() {
-        let storage = RuntimeStorage::from_config(&StorageConfig::default())
-            .expect("default storage config should be valid");
+        let storage =
+            RuntimeStorage::from_config(&StorageConfig::default(), &RedactionPolicy::default())
+                .expect("default storage config should be valid");
 
         assert!(storage.persistence.sqlite_tx.is_none());
         assert!(storage.sqlite_worker.is_none());
         assert!(storage.retention_sqlite_store.is_none());
+    }
+
+    #[test]
+    fn runtime_redaction_policy_maps_configured_values() {
+        let policy = runtime_redaction_policy(&RedactionConfig {
+            enabled: false,
+            mask: "[MASK]".to_owned(),
+            parameter_names: vec!["credential".to_owned()],
+            sql_patterns: vec!["secret_value".to_owned()],
+        });
+
+        assert_eq!(
+            policy,
+            RedactionPolicy {
+                enabled: false,
+                mask: "[MASK]".to_owned(),
+                parameter_names: vec!["credential".to_owned()],
+                sql_patterns: vec!["secret_value".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_storage_applies_configured_redaction_policy() {
+        let policy = RedactionPolicy {
+            mask: "[MASK]".to_owned(),
+            parameter_names: vec!["credential".to_owned()],
+            sql_patterns: vec!["secret_value".to_owned()],
+            ..RedactionPolicy::default()
+        };
+        let mut storage = RuntimeStorage::from_config(&StorageConfig::default(), &policy)
+            .expect("runtime storage should initialize");
+        let mut event = test_event(
+            SqlEventId("evt_runtime_redaction".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(1),
+        );
+        event.original_sql = "SELECT secret_value WHERE credential = ?".to_owned();
+        event.expanded_sql = Some("SELECT secret_value WHERE credential = 's3cr3t'".to_owned());
+        event.parameters = vec![SqlParameter {
+            index: 0,
+            name: Some("credential".to_owned()),
+            value: SqlParameterValue::String("s3cr3t".to_owned()),
+            redacted: false,
+        }];
+
+        storage.event_store.append(event);
+        let stored = storage
+            .event_store
+            .get(&SqlEventId("evt_runtime_redaction".to_owned()))
+            .expect("event should be retained");
+
+        assert_eq!(stored.original_sql, "SELECT [MASK] WHERE credential = ?");
+        assert_eq!(
+            stored.expanded_sql.as_deref(),
+            Some("SELECT [MASK] WHERE credential = '[MASK]'")
+        );
+        assert_eq!(
+            stored.parameters[0].value,
+            SqlParameterValue::String("[MASK]".to_owned())
+        );
+        assert!(stored.parameters[0].redacted);
+    }
+
+    #[test]
+    fn runtime_storage_preserves_events_when_redaction_is_disabled() {
+        let policy = RedactionPolicy {
+            enabled: false,
+            mask: "[MASK]".to_owned(),
+            parameter_names: vec!["credential".to_owned()],
+            sql_patterns: vec!["secret_value".to_owned()],
+        };
+        let mut storage = RuntimeStorage::from_config(&StorageConfig::default(), &policy)
+            .expect("runtime storage should initialize");
+        let mut event = test_event(
+            SqlEventId("evt_runtime_redaction_disabled".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(1),
+        );
+        event.original_sql = "SELECT secret_value WHERE credential = 's3cr3t'".to_owned();
+
+        storage.event_store.append(event.clone());
+        let stored = storage
+            .event_store
+            .get(&event.id)
+            .expect("event should be retained");
+
+        assert_eq!(stored.original_sql, event.original_sql);
+        assert!(!stored.parameters.iter().any(|parameter| parameter.redacted));
     }
 
     #[tokio::test]

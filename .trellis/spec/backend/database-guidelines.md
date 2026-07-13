@@ -145,7 +145,15 @@ pub struct SqliteEventStore;
 
 impl SqliteEventStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> rusqlite::Result<Self>;
+    pub fn open_with_redaction_policy(
+        path: impl AsRef<std::path::Path>,
+        redaction_policy: RedactionPolicy,
+    ) -> rusqlite::Result<Self>;
     pub fn new(connection: rusqlite::Connection) -> rusqlite::Result<Self>;
+    pub fn new_with_redaction_policy(
+        connection: rusqlite::Connection,
+        redaction_policy: RedactionPolicy,
+    ) -> rusqlite::Result<Self>;
     pub fn insert_event(&mut self, event: &SqlEvent) -> rusqlite::Result<()>;
     pub fn get_event_row(&self, id: &SqlEventId) -> rusqlite::Result<Option<SqliteEventRow>>;
     pub fn get_parameter_rows(&self, id: &SqlEventId) -> rusqlite::Result<Vec<SqliteParameterRow>>;
@@ -154,9 +162,11 @@ impl SqliteEventStore {
 
 ### 3. Contracts
 
-- `open` opens a file path and delegates to `new`; `new` applies
-  `apply_sqlite_schema` before returning a store.
-- `insert_event` applies `redact_sql_event(event.clone(), &RedactionPolicy::default())`
+- `open` and `new` keep the default redaction policy for compatibility;
+  `open_with_redaction_policy` and `new_with_redaction_policy` accept the
+  runtime policy explicitly. All constructors apply `apply_sqlite_schema`
+  before returning a store.
+- `insert_event` applies `redact_sql_event(event.clone(), &self.redaction_policy)`
   before writing.
 - One `SqlEvent` row is inserted into `sql_events`; its parameters are inserted
   into `sql_parameters`.
@@ -221,7 +231,7 @@ connection.execute("INSERT INTO sql_events ...", params![event.original_sql])?;
 #### Correct
 
 ```rust
-let event = redact_sql_event(event.clone(), &RedactionPolicy::default());
+let event = redact_sql_event(event.clone(), &self.redaction_policy);
 let tx = connection.transaction()?;
 // Insert sql_events and sql_parameters in tx, then commit.
 ```

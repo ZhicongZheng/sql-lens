@@ -3,7 +3,7 @@
   "name": "wire-runtime-redaction-config",
   "title": "Wire configured redaction policy through runtime storage and API",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

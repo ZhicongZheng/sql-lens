@@ -161,6 +161,7 @@ impl SqlEventBroadcastCounters {
 mod tests {
     use std::num::NonZeroUsize;
 
+    use sql_lens_core::RedactionPolicy;
     use sql_lens_core::SqlParameterValue;
 
     use crate::test_support::test_event;
@@ -234,6 +235,32 @@ mod tests {
                 .expect("expanded SQL should be present")
                 .contains("s3cr3t")
         );
+    }
+
+    #[tokio::test]
+    async fn publish_uses_configured_redaction_policy() {
+        let broadcaster = SqlEventBroadcaster::with_redaction_policy(
+            capacity(1),
+            RedactionPolicy {
+                mask: "[MASK]".to_owned(),
+                parameter_names: vec!["credential".to_owned()],
+                ..RedactionPolicy::default()
+            },
+        );
+        let mut subscription = broadcaster.subscribe();
+        let mut event = test_event("evt_custom_policy");
+        event.parameters[0].name = Some("credential".to_owned());
+        event.parameters[0].value = SqlParameterValue::String("s3cr3t".to_owned());
+        event.expanded_sql = Some("SELECT 's3cr3t'".to_owned());
+
+        broadcaster.publish(event);
+        let event = subscription.recv().await.expect("event should be received");
+
+        assert_eq!(
+            event.parameters[0].value,
+            SqlParameterValue::String("[MASK]".to_owned())
+        );
+        assert_eq!(event.expanded_sql.as_deref(), Some("SELECT '[MASK]'"));
     }
 
     #[tokio::test]
