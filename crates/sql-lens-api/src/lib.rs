@@ -31,7 +31,11 @@ pub use live_sql_events::{
 };
 pub use openapi::{openapi, openapi_yaml};
 pub use protocols::{PROTOCOLS_PATH, ProtocolListResponse, ProtocolResponse};
-pub use replay::{REPLAY_PREVIEW_PATH, ReplayPreviewRequest, ReplayPreviewResponse};
+pub use replay::{
+    REPLAY_EXECUTE_PATH, REPLAY_PREVIEW_PATH, ReplayExecuteRequest, ReplayExecuteResponse,
+    ReplayExecutionError, ReplayExecutionFuture, ReplayExecutionRequest, ReplayExecutionResult,
+    ReplayExecutor, ReplayPolicy, ReplayPreviewRequest, ReplayPreviewResponse,
+};
 pub use request_id::{REQUEST_ID_HEADER, RequestId};
 pub use server::{
     BoundHttpServer, HttpServerConfig, HttpServerError, bind_http_server,

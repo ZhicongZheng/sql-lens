@@ -4,8 +4,9 @@ use utoipa::OpenApi;
 
 use crate::{
     ApiErrorEnvelope, ConnectionListResponse, ConnectionResponse, HealthResponse,
-    ProtocolListResponse, ReplayPreviewRequest, ReplayPreviewResponse, SqlEventDetailResponse,
-    SqlEventListResponse, StatisticsResponse,
+    ProtocolListResponse, ReplayExecuteRequest, ReplayExecuteResponse, ReplayExecutionResult,
+    ReplayPreviewRequest, ReplayPreviewResponse, SqlEventDetailResponse, SqlEventListResponse,
+    StatisticsResponse,
 };
 
 #[derive(OpenApi)]
@@ -25,6 +26,7 @@ use crate::{
         get_statistics,
         list_protocols,
         preview_replay,
+        execute_replay,
     ),
     components(schemas(
         ApiErrorEnvelope,
@@ -34,6 +36,9 @@ use crate::{
         ProtocolListResponse,
         ReplayPreviewRequest,
         ReplayPreviewResponse,
+        ReplayExecuteRequest,
+        ReplayExecuteResponse,
+        ReplayExecutionResult,
         SqlEventDetailResponse,
         SqlEventListResponse,
         StatisticsResponse,
@@ -197,6 +202,25 @@ fn list_protocols() {}
     )
 )]
 fn preview_replay() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/replay/execute",
+    tag = "replay",
+    request_body(
+        content = ReplayExecuteRequest,
+        description = "Requires target_name and exactly one of event_id or sql",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "Replay execution result", body = ReplayExecuteResponse),
+        (status = 400, description = "Invalid replay execution request", body = ApiErrorEnvelope),
+        (status = 404, description = "SQL event or target not found", body = ApiErrorEnvelope),
+        (status = 409, description = "Replay policy rejected the request", body = ApiErrorEnvelope),
+        (status = 503, description = "Replay executor unavailable or timed out", body = ApiErrorEnvelope)
+    )
+)]
+fn execute_replay() {}
 
 #[cfg(test)]
 mod tests {

@@ -88,6 +88,49 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProtocolListResponse'
+  /api/v1/replay/execute:
+    post:
+      tags:
+      - replay
+      operationId: execute_replay
+      requestBody:
+        description: Requires target_name and exactly one of event_id or sql
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayExecuteRequest'
+        required: true
+      responses:
+        '200':
+          description: Replay execution result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayExecuteResponse'
+        '400':
+          description: Invalid replay execution request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '404':
+          description: SQL event or target not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '409':
+          description: Replay policy rejected the request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '503':
+          description: Replay executor unavailable or timed out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
   /api/v1/replay/preview:
     post:
       tags:
@@ -594,6 +637,66 @@ components:
           - 'null'
         started_at:
           type: string
+    ReplayExecuteRequest:
+      type: object
+      required:
+      - target_name
+      properties:
+        confirm_mutation:
+          type: boolean
+        event_id:
+          type:
+          - string
+          - 'null'
+        sql:
+          type:
+          - string
+          - 'null'
+        target_name:
+          type: string
+    ReplayExecuteResponse:
+      type: object
+      required:
+      - source
+      - target_name
+      - result
+      properties:
+        event_id:
+          type:
+          - string
+          - 'null'
+        result:
+          $ref: '#/components/schemas/ReplayExecutionResult'
+        source:
+          type: string
+        target_name:
+          type: string
+    ReplayExecutionResult:
+      type: object
+      required:
+      - columns
+      - rows
+      properties:
+        affected_rows:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        columns:
+          type: array
+          items:
+            type: string
+        returned_rows:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          minimum: 0
+        rows:
+          type: array
+          items:
+            type: object
     ReplayPreviewRequest:
       type: object
       properties:

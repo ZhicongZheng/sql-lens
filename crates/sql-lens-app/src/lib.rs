@@ -3,6 +3,7 @@
 mod retention;
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt, io,
     net::SocketAddr,
@@ -16,7 +17,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use sql_lens_api::{ApiState, HttpServerConfig, HttpServerError, bind_http_server_with_state};
+use mysql_async::{Opts, Pool, Row, Value, prelude::Queryable};
+use sql_lens_api::{
+    ApiState, HttpServerConfig, HttpServerError, ReplayExecutionError, ReplayExecutionFuture,
+    ReplayExecutionRequest, ReplayExecutionResult, ReplayExecutor, ReplayPolicy,
+    bind_http_server_with_state,
+};
 use sql_lens_capture::{
     CaptureEventPublisher, CaptureEventReceiver, CaptureOverloadPolicy, CapturePipeline,
     CapturePipelineConfig, CapturePublishOutcome, SlowQueryClassifier,
@@ -134,7 +140,130 @@ struct RuntimeOptions {
     classifier: SlowQueryClassifier,
     retention_config: RetentionConfig,
     redaction_policy: RedactionPolicy,
+    replay_policy: ReplayPolicy,
+    replay_executor: Option<Arc<dyn ReplayExecutor>>,
     proxy: ProxyRuntimeConfig,
+}
+
+#[derive(Debug, Clone)]
+struct MysqlReplayExecutor {
+    targets: Arc<BTreeMap<String, String>>,
+    timeout: Duration,
+}
+
+impl MysqlReplayExecutor {
+    fn new(targets: &[MinimalMysqlTargetConfig], timeout: Duration) -> Self {
+        Self {
+            targets: Arc::new(
+                targets
+                    .iter()
+                    .map(|target| (target.name.clone(), target.backend_address.clone()))
+                    .collect(),
+            ),
+            timeout,
+        }
+    }
+
+    async fn execute_inner(
+        &self,
+        request: ReplayExecutionRequest,
+    ) -> Result<ReplayExecutionResult, ReplayExecutionError> {
+        let address = self
+            .targets
+            .get(&request.target_name)
+            .ok_or(ReplayExecutionError::InvalidTarget)?;
+        let url = mysql_replay_url(address);
+        let opts = Opts::from_url(&url).map_err(|_| ReplayExecutionError::Backend)?;
+        let pool = Pool::new(opts);
+        let execution = tokio::time::timeout(self.timeout, async {
+            let mut connection = pool
+                .get_conn()
+                .await
+                .map_err(|_| ReplayExecutionError::Backend)?;
+            let mut result = connection
+                .query_iter(request.sql)
+                .await
+                .map_err(|_| ReplayExecutionError::Backend)?;
+            let columns = result
+                .columns_ref()
+                .iter()
+                .map(|column| column.name_str().to_string())
+                .collect::<Vec<_>>();
+            let affected_rows = result.affected_rows();
+            let mut rows = Vec::new();
+
+            while let Some(row) = result
+                .next()
+                .await
+                .map_err(|_| ReplayExecutionError::Backend)?
+            {
+                rows.push(mysql_row_to_json(row));
+            }
+            result
+                .drop_result()
+                .await
+                .map_err(|_| ReplayExecutionError::Backend)?;
+
+            Ok(ReplayExecutionResult {
+                affected_rows: (columns.is_empty()).then_some(affected_rows),
+                returned_rows: (!columns.is_empty()).then_some(rows.len() as u64),
+                columns,
+                rows,
+            })
+        })
+        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
+
+        match execution {
+            Ok(result) => result,
+            Err(_) => Err(ReplayExecutionError::Timeout),
+        }
+    }
+}
+
+impl ReplayExecutor for MysqlReplayExecutor {
+    fn execute(&self, request: ReplayExecutionRequest) -> ReplayExecutionFuture {
+        let executor = self.clone();
+        Box::pin(async move { executor.execute_inner(request).await })
+    }
+}
+
+fn mysql_replay_url(address: &str) -> String {
+    if address.starts_with("mysql://") {
+        address.to_owned()
+    } else {
+        format!("mysql://root@{address}")
+    }
+}
+
+fn mysql_row_to_json(row: Row) -> Vec<serde_json::Value> {
+    row.unwrap().into_iter().map(mysql_value_to_json).collect()
+}
+
+fn mysql_value_to_json(value: Value) -> serde_json::Value {
+    match value {
+        Value::NULL => serde_json::Value::Null,
+        Value::Bytes(value) => {
+            serde_json::Value::String(String::from_utf8_lossy(&value).into_owned())
+        }
+        Value::Int(value) => serde_json::Value::from(value),
+        Value::UInt(value) => serde_json::Value::from(value),
+        Value::Float(value) => serde_json::Number::from_f64(value as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Double(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Date(year, month, day, hour, minute, second, micros) => serde_json::Value::String(
+            format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{micros:06}"),
+        ),
+        Value::Time(negative, days, hours, minutes, seconds, micros) => {
+            let sign = if negative { "-" } else { "" };
+            serde_json::Value::String(format!(
+                "{sign}{days} {hours:02}:{minutes:02}:{seconds:02}.{micros:06}"
+            ))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -362,7 +491,7 @@ pub async fn start_minimal_mysql_runtime(
 pub async fn start_runtime_from_config(
     config: &SqlLensConfig,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
-    let targets = config
+    let targets: Vec<MinimalMysqlTargetConfig> = config
         .effective_targets()
         .iter()
         .map(MinimalMysqlTargetConfig::from)
@@ -370,12 +499,24 @@ pub async fn start_runtime_from_config(
     let proxy_runtime_config = runtime_proxy_config(&config.proxy)?;
     let redaction_policy = runtime_redaction_policy(&config.redaction);
     let runtime_storage = RuntimeStorage::from_config(&config.storage, &redaction_policy)?;
+    let replay_policy = ReplayPolicy {
+        enabled: config.replay.enabled,
+        require_confirmation_for_mutations: config.replay.require_confirmation_for_mutations,
+    };
+    let replay_executor = config.replay.enabled.then(|| {
+        Arc::new(MysqlReplayExecutor::new(
+            &targets,
+            Duration::from_millis(config.proxy.connect_timeout_ms),
+        )) as Arc<dyn ReplayExecutor>
+    });
     let options = RuntimeOptions {
         backend_connect_timeout: Duration::from_millis(config.proxy.connect_timeout_ms),
         capture_config: runtime_capture_config(&config.capture)?,
         classifier: runtime_slow_query_classifier(config),
         retention_config: config.retention.clone(),
         redaction_policy,
+        replay_policy,
+        replay_executor,
         proxy: proxy_runtime_config,
     };
 
@@ -419,6 +560,8 @@ pub async fn start_minimal_mysql_runtime_with_options(
             classifier: SlowQueryClassifier::default(),
             retention_config: RetentionConfig::default(),
             redaction_policy: RedactionPolicy::default(),
+            replay_policy: ReplayPolicy::default(),
+            replay_executor: None,
             proxy: runtime_proxy_config(&ProxyConfig::default())
                 .expect("default proxy configuration should be valid"),
         },
@@ -444,6 +587,8 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         sqlite_worker,
     } = runtime_storage;
     let redaction_policy = options.redaction_policy.clone();
+    let replay_policy = options.replay_policy;
+    let replay_executor = options.replay_executor.clone();
     let state = if let Some(sqlite_event_reader) = sqlite_event_reader {
         ApiState::with_sqlite_event_reader_and_redaction(
             event_store,
@@ -452,6 +597,10 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         )
     } else {
         ApiState::with_redaction_policy(event_store, redaction_policy)
+    };
+    let state = match replay_executor {
+        Some(replay_executor) => state.with_replay_runtime(replay_policy, replay_executor),
+        None => state,
     };
     let retention_runtime = RetentionRuntime::start(
         options.retention_config,
@@ -1683,6 +1832,56 @@ connect_timeout_ms = 250
             runtime.proxy_targets[0].proxy_addr,
             runtime.proxy_targets[1].proxy_addr
         );
+
+        runtime
+            .shutdown()
+            .await
+            .expect("runtime should shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn runtime_from_config_wires_guarded_replay_executor() {
+        let listen = unused_loopback_addr();
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[proxy]
+listen = "{listen}"
+connect_timeout_ms = 50
+
+[backend]
+address = "127.0.0.1:1"
+
+[web]
+listen = "127.0.0.1:0"
+
+[replay]
+enabled = true
+require_confirmation_for_mutations = true
+"#
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+
+        let runtime = start_runtime_from_config(&config)
+            .await
+            .expect("runtime should start");
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/api/v1/replay/execute", runtime.api_addr))
+            .json(&serde_json::json!({
+                "target_name": "default",
+                "sql": "SELECT 1"
+            }))
+            .send()
+            .await
+            .expect("replay request should complete");
+        let status = response.status();
+        let body: Value = response
+            .json()
+            .await
+            .expect("replay response should be JSON");
+
+        assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["message"], "replay execution failed");
 
         runtime
             .shutdown()

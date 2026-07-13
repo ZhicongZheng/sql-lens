@@ -4,7 +4,11 @@ use sql_lens_core::RedactionPolicy;
 use sql_lens_storage::{ConnectionStore, LiveStatistics, RingBufferStore, SqliteEventStore};
 use tokio::sync::RwLock;
 
-use crate::{SqlEventBroadcaster, event_reader::SqlEventReadStore};
+use crate::{
+    SqlEventBroadcaster,
+    event_reader::SqlEventReadStore,
+    replay::{ReplayExecutor, ReplayPolicy},
+};
 
 pub const DEFAULT_EVENT_STORE_CAPACITY: usize = 100_000;
 pub const DEFAULT_CONNECTION_STORE_CAPACITY: usize = 10_000;
@@ -16,6 +20,8 @@ pub struct ApiState {
     connection_store: Arc<RwLock<ConnectionStore>>,
     live_statistics: Arc<RwLock<LiveStatistics>>,
     sql_event_broadcaster: SqlEventBroadcaster,
+    replay_policy: ReplayPolicy,
+    replay_executor: Option<Arc<dyn ReplayExecutor>>,
 }
 
 impl ApiState {
@@ -77,6 +83,8 @@ impl ApiState {
                 broadcaster_capacity,
                 redaction_policy,
             ),
+            replay_policy: ReplayPolicy::default(),
+            replay_executor: None,
         }
     }
 
@@ -148,7 +156,19 @@ impl ApiState {
                 broadcaster_capacity,
                 redaction_policy,
             ),
+            replay_policy: ReplayPolicy::default(),
+            replay_executor: None,
         }
+    }
+
+    pub fn with_replay_runtime(
+        mut self,
+        replay_policy: ReplayPolicy,
+        replay_executor: Arc<dyn ReplayExecutor>,
+    ) -> Self {
+        self.replay_policy = replay_policy;
+        self.replay_executor = Some(replay_executor);
+        self
     }
 
     pub fn event_store(&self) -> Arc<RwLock<RingBufferStore>> {
@@ -169,6 +189,14 @@ impl ApiState {
 
     pub fn sql_event_broadcaster(&self) -> SqlEventBroadcaster {
         self.sql_event_broadcaster.clone()
+    }
+
+    pub(crate) fn replay_policy(&self) -> ReplayPolicy {
+        self.replay_policy
+    }
+
+    pub(crate) fn replay_executor(&self) -> Option<Arc<dyn ReplayExecutor>> {
+        self.replay_executor.clone()
     }
 }
 

@@ -66,6 +66,22 @@ impl ApiEndpointError {
         )
     }
 
+    pub(crate) fn conflict(message: impl Into<String>, field: impl Into<String>) -> Self {
+        Self::new(
+            ApiErrorCode::Conflict,
+            message,
+            BTreeMap::from([("field".to_owned(), field.into())]),
+        )
+    }
+
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::Internal, message, BTreeMap::new())
+    }
+
+    pub(crate) fn proxy_not_ready(message: impl Into<String>) -> Self {
+        Self::new(ApiErrorCode::ProxyNotReady, message, BTreeMap::new())
+    }
+
     pub(crate) fn storage_unavailable(message: impl Into<String>) -> Self {
         Self::new(ApiErrorCode::StorageUnavailable, message, BTreeMap::new())
     }

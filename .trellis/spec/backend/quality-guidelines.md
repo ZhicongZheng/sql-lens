@@ -653,9 +653,9 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 - Logging initialization happens after config validation; follow `logging-guidelines.md`.
 - Runtime startup failures are wrapped in `AppError` and exit with
   `ExitCode::FAILURE`.
-- Do not add config hot reload, frontend static serving, TLS termination,
-  replay execute, or new storage backends in the CLI runtime startup path
-  without a dedicated task and explicit API router behavior.
+- Replay execution is only enabled by the dedicated replay runtime task and
+  must resolve an explicit configured target before opening a separate client
+  session.
 
 ### 4. Validation & Error Matrix
 
@@ -5044,6 +5044,97 @@ let handle = tokio::spawn(async move {
     forward_session(connection).await;
 });
 sessions.register(handle).await;
+```
+
+## Scenario: Guarded MySQL Replay Execution Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: the API executes a selected SQL statement against a configured MySQL-compatible target.
+- Preview and execution are separate operations; preview never opens a backend connection.
+- The API owns policy gates and protocol-neutral response types; `sql-lens-app` owns the MySQL client implementation.
+
+### 2. Signatures
+
+```rust
+pub const REPLAY_EXECUTE_PATH: &str = "/api/v1/replay/execute";
+
+pub struct ReplayExecuteRequest {
+    pub target_name: String,
+    pub event_id: Option<String>,
+    pub sql: Option<String>,
+    pub confirm_mutation: bool,
+}
+
+pub trait ReplayExecutor {
+    fn execute(&self, request: ReplayExecutionRequest) -> ReplayExecutionFuture;
+}
+```
+
+### 3. Contracts
+
+- `replay.enabled = false` rejects execution before source lookup or backend access.
+- Every request supplies a non-empty `target_name`; the executor resolves it from configured targets and never infers a destination from an event alone.
+- Exactly one of `event_id` or `sql` is accepted.
+- Captured events with redacted parameters cannot be executed because their display SQL is not a faithful executable statement.
+- Mutation statements require `confirm_mutation = true` when configured.
+- The app executor opens a new bounded MySQL client session, applies the configured connect timeout, and never reuses proxy connections.
+- Backend errors and timeouts return typed API errors without SQL text, parameter values, passwords, or backend error payloads in logs/responses.
+- SELECT-like results expose column names, JSON-safe cell values, and returned row count; non-row statements expose affected rows.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Replay disabled | Return `409 CONFLICT` |
+| Empty target | Return `400 BAD_REQUEST` |
+| Unknown target | Return `404 NOT_FOUND` |
+| Missing or ambiguous source | Return `400 BAD_REQUEST` |
+| Missing event | Return `404 NOT_FOUND` |
+| Captured parameters are redacted | Return `409 CONFLICT` and do not connect |
+| Unconfirmed mutation | Return `409 CONFLICT` and do not connect |
+| Backend timeout | Return `503 PROXY_NOT_READY` |
+| Backend failure | Return `500 INTERNAL` without raw backend details |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Inject a mock `ReplayExecutor` into `ApiState` for API policy tests and inject the MySQL implementation only from app composition.
+
+Base:
+
+- Raw SQL execution is supported for explicitly selected targets; transaction orchestration and rollback guarantees remain out of scope.
+
+Bad:
+
+- Reusing a proxy backend connection for replay.
+- Treating redacted expanded SQL as executable SQL.
+- Selecting a backend from the captured event's address without a configured target name.
+- Including the submitted SQL or database error string in replay logs.
+
+### 6. Tests Required
+
+- API tests for successful read-only execution, disabled replay, missing event, mutation confirmation, and explicit target validation.
+- Runtime test proving replay is wired from config and backend failures are bounded.
+- MySQL executor tests for result rows, affected rows, and timeout/error mapping when a live backend is available.
+- OpenAPI snapshot includes `POST /api/v1/replay/execute`.
+- Run `cargo fmt --check`, targeted API/app tests, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let sql = event.expanded_sql.unwrap_or(event.original_sql);
+proxy_backend.execute(sql).await?;
+```
+
+#### Correct
+
+```rust
+let target = configured_targets.require(request.target_name)?;
+executor.execute(ReplayExecutionRequest { target_name: target.name, sql }).await?;
 ```
 
 ## Scenario: Application Retention Runtime Contracts

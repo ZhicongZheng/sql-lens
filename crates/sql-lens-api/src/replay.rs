@@ -1,3 +1,5 @@
+use std::{fmt, future::Future, pin::Pin};
+
 use axum::{Extension, Json, Router, routing::post};
 use serde::{Deserialize, Serialize};
 use sql_lens_core::SqlEventId;
@@ -6,11 +8,58 @@ use utoipa::ToSchema;
 use crate::{ApiState, api_error::ApiEndpointError};
 
 pub const REPLAY_PREVIEW_PATH: &str = "/api/v1/replay/preview";
+pub const REPLAY_EXECUTE_PATH: &str = "/api/v1/replay/execute";
 const MUTATION_WARNING: &str =
     "SQL may modify data or schema and will require explicit confirmation before execution.";
 
 pub(crate) fn routes() -> Router {
-    Router::new().route(REPLAY_PREVIEW_PATH, post(preview_replay))
+    Router::new()
+        .route(REPLAY_PREVIEW_PATH, post(preview_replay))
+        .route(REPLAY_EXECUTE_PATH, post(execute_replay))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayPolicy {
+    pub enabled: bool,
+    pub require_confirmation_for_mutations: bool,
+}
+
+impl Default for ReplayPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_confirmation_for_mutations: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayExecutionRequest {
+    pub target_name: String,
+    pub sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ReplayExecutionResult {
+    pub affected_rows: Option<u64>,
+    pub returned_rows: Option<u64>,
+    pub columns: Vec<String>,
+    #[schema(value_type = Vec<Object>)]
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayExecutionError {
+    InvalidTarget,
+    Timeout,
+    Backend,
+}
+
+pub type ReplayExecutionFuture =
+    Pin<Box<dyn Future<Output = Result<ReplayExecutionResult, ReplayExecutionError>> + Send>>;
+
+pub trait ReplayExecutor: fmt::Debug + Send + Sync {
+    fn execute(&self, request: ReplayExecutionRequest) -> ReplayExecutionFuture;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -28,6 +77,23 @@ pub struct ReplayPreviewResponse {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReplayExecuteRequest {
+    pub target_name: String,
+    pub event_id: Option<String>,
+    pub sql: Option<String>,
+    #[serde(default)]
+    pub confirm_mutation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ReplayExecuteResponse {
+    pub source: String,
+    pub event_id: Option<String>,
+    pub target_name: String,
+    pub result: ReplayExecutionResult,
+}
+
 async fn preview_replay(
     Extension(state): Extension<ApiState>,
     Json(request): Json<ReplayPreviewRequest>,
@@ -41,6 +107,95 @@ async fn preview_replay(
     };
 
     Ok(Json(preview))
+}
+
+async fn execute_replay(
+    Extension(state): Extension<ApiState>,
+    Json(request): Json<ReplayExecuteRequest>,
+) -> Result<Json<ReplayExecuteResponse>, ApiEndpointError> {
+    let policy = state.replay_policy();
+    if !policy.enabled {
+        return Err(ApiEndpointError::conflict(
+            "replay execution is disabled",
+            "replay.enabled",
+        ));
+    }
+
+    let target_name = request.target_name.trim().to_owned();
+    if target_name.is_empty() {
+        return Err(ApiEndpointError::bad_request(
+            "target_name must not be empty",
+            "target_name",
+        ));
+    }
+
+    let source = ReplayExecuteSource::try_from_request(&request)?;
+    let (event_id, sql) = match source {
+        ReplayExecuteSource::Event { event_id } => {
+            let event = state
+                .event_reader()
+                .get_detail(&SqlEventId(event_id.clone()))
+                .await?
+                .ok_or_else(|| {
+                    ApiEndpointError::not_found("SQL event not found", "event_id", event_id.clone())
+                })?;
+            if event.parameters.iter().any(|parameter| parameter.redacted) {
+                return Err(ApiEndpointError::conflict(
+                    "captured event contains redacted parameters and cannot be replayed",
+                    "event_id",
+                ));
+            }
+            (Some(event_id), replay_sql_from_event_detail(&event))
+        }
+        ReplayExecuteSource::RawSql { sql } => (None, sql),
+    };
+
+    if sql.trim().is_empty() {
+        return Err(ApiEndpointError::bad_request(
+            "sql must not be empty",
+            "sql",
+        ));
+    }
+
+    if policy.require_confirmation_for_mutations
+        && is_mutation_sql(&sql)
+        && !request.confirm_mutation
+    {
+        return Err(ApiEndpointError::conflict(
+            "mutation replay requires explicit confirmation",
+            "confirm_mutation",
+        ));
+    }
+
+    let executor = state
+        .replay_executor()
+        .ok_or_else(|| ApiEndpointError::proxy_not_ready("replay executor is not configured"))?;
+    let result = executor
+        .execute(ReplayExecutionRequest {
+            target_name: target_name.clone(),
+            sql,
+        })
+        .await
+        .map_err(|error| match error {
+            ReplayExecutionError::InvalidTarget => ApiEndpointError::not_found(
+                "replay target is not configured",
+                "target_name",
+                target_name.clone(),
+            ),
+            ReplayExecutionError::Timeout => {
+                ApiEndpointError::proxy_not_ready("replay execution timed out")
+            }
+            ReplayExecutionError::Backend => ApiEndpointError::internal("replay execution failed"),
+        })?;
+
+    Ok(Json(ReplayExecuteResponse {
+        source: event_id
+            .as_ref()
+            .map_or_else(|| "raw_sql".to_owned(), |_| "event".to_owned()),
+        event_id,
+        target_name,
+        result,
+    }))
 }
 
 async fn preview_event(
@@ -93,6 +248,38 @@ fn preview_sql(
 enum ReplayPreviewSource {
     Event { event_id: String },
     RawSql { sql: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplayExecuteSource {
+    Event { event_id: String },
+    RawSql { sql: String },
+}
+
+impl ReplayExecuteSource {
+    fn try_from_request(request: &ReplayExecuteRequest) -> Result<Self, ApiEndpointError> {
+        let event_id = request.event_id.as_deref().map(|value| value.trim());
+        let sql = request.sql.as_deref().map(|value| value.trim());
+
+        match (event_id, sql) {
+            (Some(event_id), None) if !event_id.is_empty() => Ok(Self::Event {
+                event_id: event_id.to_owned(),
+            }),
+            (None, Some(sql)) => Ok(Self::RawSql {
+                sql: sql.to_owned(),
+            }),
+            (Some(event_id), Some(_)) if !event_id.is_empty() => {
+                Err(ApiEndpointError::bad_request(
+                    "replay execute accepts either event_id or sql, not both",
+                    "source",
+                ))
+            }
+            _ => Err(ApiEndpointError::bad_request(
+                "replay execute requires event_id or sql",
+                "source",
+            )),
+        }
+    }
 }
 
 impl ReplayPreviewSource {
@@ -206,6 +393,7 @@ fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::sync::Arc;
 
     use axum::{
         body::{Body, to_bytes},
@@ -239,12 +427,39 @@ mod tests {
         router_with_state(sqlite_api_state_with_events(events))
     }
 
+    #[derive(Debug)]
+    struct MockReplayExecutor {
+        result: Result<ReplayExecutionResult, ReplayExecutionError>,
+    }
+
+    impl ReplayExecutor for MockReplayExecutor {
+        fn execute(&self, _request: ReplayExecutionRequest) -> ReplayExecutionFuture {
+            let result = self.result.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    fn app_with_replay(result: Result<ReplayExecutionResult, ReplayExecutionError>) -> Router {
+        let state = ApiState::new(RingBufferStore::new(capacity(10))).with_replay_runtime(
+            ReplayPolicy {
+                enabled: true,
+                require_confirmation_for_mutations: true,
+            },
+            Arc::new(MockReplayExecutor { result }),
+        );
+        router_with_state(state)
+    }
+
     async fn post_json(app: Router, body: Value) -> (StatusCode, Value, bool) {
+        post_json_at(app, REPLAY_PREVIEW_PATH, body).await
+    }
+
+    async fn post_json_at(app: Router, path: &str, body: Value) -> (StatusCode, Value, bool) {
         let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(REPLAY_PREVIEW_PATH)
+                    .uri(path)
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
                     .expect("request should build"),
@@ -404,5 +619,94 @@ mod tests {
         let store = event_store.read().await;
 
         assert_eq!(store.get(&state_event_id), Some(&event));
+    }
+
+    #[tokio::test]
+    async fn replay_execute_requires_an_explicit_target_and_returns_result() {
+        let (status, json, has_request_id) = post_json_at(
+            app_with_replay(Ok(ReplayExecutionResult {
+                affected_rows: None,
+                returned_rows: Some(1),
+                columns: vec!["answer".to_owned()],
+                rows: vec![vec![json!(42)]],
+            })),
+            REPLAY_EXECUTE_PATH,
+            json!({
+                "target_name": "mysql-local",
+                "sql": "SELECT 42",
+                "confirm_mutation": false
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(has_request_id);
+        assert_eq!(json["source"], "raw_sql");
+        assert_eq!(json["target_name"], "mysql-local");
+        assert_eq!(json["result"]["rows"][0][0], 42);
+    }
+
+    #[tokio::test]
+    async fn replay_execute_rejects_mutation_without_confirmation() {
+        let (status, json, has_request_id) = post_json_at(
+            app_with_replay(Ok(ReplayExecutionResult {
+                affected_rows: Some(1),
+                returned_rows: None,
+                columns: Vec::new(),
+                rows: Vec::new(),
+            })),
+            REPLAY_EXECUTE_PATH,
+            json!({
+                "target_name": "mysql-local",
+                "sql": "UPDATE users SET name = 'a'",
+                "confirm_mutation": false
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(has_request_id);
+        assert_eq!(json["error"]["code"], "CONFLICT");
+        assert_eq!(json["error"]["details"]["field"], "confirm_mutation");
+    }
+
+    #[tokio::test]
+    async fn replay_execute_reports_missing_event() {
+        let (status, json, has_request_id) = post_json_at(
+            app_with_replay(Ok(ReplayExecutionResult {
+                affected_rows: None,
+                returned_rows: Some(1),
+                columns: vec!["answer".to_owned()],
+                rows: vec![vec![json!(42)]],
+            })),
+            REPLAY_EXECUTE_PATH,
+            json!({
+                "target_name": "mysql-local",
+                "event_id": "missing-event"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(has_request_id);
+        assert_eq!(json["error"]["details"]["event_id"], "missing-event");
+    }
+
+    #[tokio::test]
+    async fn replay_execute_is_rejected_when_disabled() {
+        let (status, json, has_request_id) = post_json_at(
+            app_with_events(Vec::new()),
+            REPLAY_EXECUTE_PATH,
+            json!({
+                "target_name": "mysql-local",
+                "sql": "SELECT 1",
+                "confirm_mutation": false
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(has_request_id);
+        assert_eq!(json["error"]["message"], "replay execution is disabled");
     }
 }
