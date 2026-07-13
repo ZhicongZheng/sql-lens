@@ -570,6 +570,25 @@ fn retention_enforcement_interval_requires_a_positive_supported_duration() {
 }
 
 #[test]
+fn retention_validation_rejects_invalid_age_and_unsupported_bytes() {
+    let mut config = SqlLensConfig::default();
+    config.retention.max_age = "not-a-duration".to_owned();
+    config.retention.max_bytes = Some(1_024);
+
+    let error = config
+        .validate()
+        .expect_err("unsupported retention settings should fail validation");
+
+    assert_eq!(
+        error.violations,
+        vec![
+            ConfigValidationViolation::InvalidRetentionMaxAge,
+            ConfigValidationViolation::UnsupportedRetentionMaxBytes,
+        ]
+    );
+}
+
+#[test]
 fn partial_toml_uses_existing_defaults() {
     let config = SqlLensConfig::from_toml_str(
         r#"

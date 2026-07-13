@@ -17,6 +17,18 @@ impl SqlLensConfig {
             violations.push(ConfigValidationViolation::InvalidRetentionEnforcementInterval);
         }
 
+        let max_age = self.retention.max_age.trim();
+        if !max_age.is_empty()
+            && max_age != "0"
+            && parse_retention_enforcement_interval(max_age).is_none()
+        {
+            violations.push(ConfigValidationViolation::InvalidRetentionMaxAge);
+        }
+
+        if self.retention.max_bytes.is_some() {
+            violations.push(ConfigValidationViolation::UnsupportedRetentionMaxBytes);
+        }
+
         if self.targets.is_empty() {
             validate_legacy_target(self, &mut violations);
         } else {

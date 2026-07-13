@@ -237,6 +237,9 @@ impl RetentionRuntime {
         ring_buffer: Arc<RwLock<RingBufferStore>>,
         sqlite_store: Option<Arc<Mutex<SqliteEventStore>>>,
     ) -> Result<Option<Self>, MinimalMysqlRuntimeError> {
+        RetentionEnforcer::validate_config(&config)
+            .map_err(|error| MinimalMysqlRuntimeError::RetentionConfig(error.to_string()))?;
+
         if !config.enforcement_enabled {
             tracing::info!("retention enforcement disabled");
             return Ok(None);
@@ -249,7 +252,10 @@ impl RetentionRuntime {
                         .to_owned(),
                 )
             })?;
-        let enforcer = Arc::new(RetentionEnforcer::new(config, ring_buffer, sqlite_store));
+        let enforcer = Arc::new(
+            RetentionEnforcer::new(config, ring_buffer, sqlite_store)
+                .map_err(|error| MinimalMysqlRuntimeError::RetentionConfig(error.to_string()))?,
+        );
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(run_retention_scheduler(enforcer, interval, shutdown_rx));
 
@@ -2164,6 +2170,7 @@ path = "{}"
         let retention = RetentionRuntime::start(
             RetentionConfig {
                 max_events: 1,
+                max_age: "0".to_owned(),
                 enforcement_interval: "1ms".to_owned(),
                 ..RetentionConfig::default()
             },
@@ -2188,6 +2195,135 @@ path = "{}"
             .shutdown()
             .await
             .expect("retention scheduler should stop cleanly");
+    }
+
+    #[test]
+    fn retention_enforcer_deletes_old_events_from_ring_buffer() {
+        let ring_buffer = Arc::new(RwLock::new(RingBufferStore::new(
+            NonZeroUsize::new(10).expect("capacity should be non-zero"),
+        )));
+        let mut old = test_event(
+            SqlEventId("evt_retention_old".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(1),
+        );
+        old.timestamp = Timestamp("unix_ms:0".to_owned());
+        let mut new = test_event(
+            SqlEventId("evt_retention_new".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(1),
+        );
+        new.timestamp = runtime_timestamp();
+        {
+            let mut store = ring_buffer.blocking_write();
+            store.append(old);
+            store.append(new);
+        }
+
+        let enforcer = RetentionEnforcer::new(
+            RetentionConfig {
+                max_age: "1h".to_owned(),
+                max_events: 0,
+                ..RetentionConfig::default()
+            },
+            Arc::clone(&ring_buffer),
+            None,
+        )
+        .expect("retention configuration should be valid");
+
+        let deleted = enforcer
+            .enforce_blocking()
+            .expect("ring buffer age retention should succeed");
+
+        assert_eq!(deleted, 1);
+        let store = ring_buffer.blocking_read();
+        assert!(
+            store
+                .get(&SqlEventId("evt_retention_old".to_owned()))
+                .is_none()
+        );
+        assert!(
+            store
+                .get(&SqlEventId("evt_retention_new".to_owned()))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn retention_enforcer_deletes_old_events_from_sqlite() {
+        let path = temporary_sqlite_path("retention-age");
+        let mut store = SqliteEventStore::open(&path).expect("sqlite store should open");
+        let mut old = test_event(
+            SqlEventId("evt_sqlite_retention_old".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(1),
+        );
+        old.timestamp = Timestamp("unix_ms:0".to_owned());
+        let mut new = test_event(
+            SqlEventId("evt_sqlite_retention_new".to_owned()),
+            CaptureStatus::Ok,
+            DurationMillis(1),
+        );
+        new.timestamp = runtime_timestamp();
+        store.insert_event(&old).expect("old event should persist");
+        store.insert_event(&new).expect("new event should persist");
+        let sqlite_store = Arc::new(Mutex::new(store));
+        let ring_buffer = Arc::new(RwLock::new(RingBufferStore::new(
+            NonZeroUsize::new(10).expect("capacity should be non-zero"),
+        )));
+
+        let enforcer = RetentionEnforcer::new(
+            RetentionConfig {
+                max_age: "1h".to_owned(),
+                max_events: 0,
+                ..RetentionConfig::default()
+            },
+            ring_buffer,
+            Some(Arc::clone(&sqlite_store)),
+        )
+        .expect("retention configuration should be valid");
+
+        let deleted = enforcer
+            .enforce_blocking()
+            .expect("sqlite age retention should succeed");
+
+        assert_eq!(deleted, 1);
+        let store = sqlite_store
+            .lock()
+            .expect("sqlite lock should be available");
+        assert!(
+            store
+                .get_event_row(&SqlEventId("evt_sqlite_retention_old".to_owned()))
+                .expect("old event lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            store
+                .get_event_row(&SqlEventId("evt_sqlite_retention_new".to_owned()))
+                .expect("new event lookup should succeed")
+                .is_some()
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn retention_start_rejects_unsupported_max_bytes_before_scheduling() {
+        let error = RetentionRuntime::start(
+            RetentionConfig {
+                max_bytes: Some(1_024),
+                ..RetentionConfig::default()
+            },
+            ApiState::default().event_store(),
+            None,
+        )
+        .expect_err("unsupported max_bytes should fail before scheduling");
+
+        assert!(matches!(
+            error,
+            MinimalMysqlRuntimeError::RetentionConfig(message)
+                if message.contains("max_bytes")
+        ));
     }
 
     #[test]

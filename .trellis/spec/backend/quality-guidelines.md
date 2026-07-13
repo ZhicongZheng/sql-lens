@@ -5046,6 +5046,89 @@ let handle = tokio::spawn(async move {
 sessions.register(handle).await;
 ```
 
+## Scenario: Application Retention Runtime Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` schedules configured retention cleanup for runtime-owned Ring Buffer and SQLite stores.
+- Retention configuration is a startup snapshot; changed settings require a runtime restart because no reload source exists.
+- Cleanup runs in `spawn_blocking` and must not run on packet-forwarding workers.
+
+### 2. Signatures
+
+```rust
+pub struct RetentionEnforcer;
+
+impl RetentionEnforcer {
+    pub fn validate_config(config: &RetentionConfig) -> Result<(), RetentionError>;
+    pub fn enforce_blocking(&self) -> Result<usize, RetentionError>;
+}
+```
+
+### 3. Contracts
+
+- `RetentionConfig.max_age` is empty or `0` for disabled age cleanup, otherwise it is a positive supported duration.
+- Runtime event timestamps and age cutoffs use `unix_ms:<epoch-milliseconds>`; legacy timestamp formats are not compared against that cutoff.
+- `max_events` is applied after age cleanup to both configured storage backends.
+- `max_bytes` is rejected during config validation/startup because file-size cleanup is not implemented.
+- A failed SQLite age/count operation is logged and the other operation is still attempted in the same cycle.
+- Each backend emits before/after event counts; the scheduler logs worker errors and continues future cycles.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| Invalid `retention.max_age` | Reject config/startup with a retention validation error |
+| `retention.max_bytes` is configured | Reject config/startup as unsupported |
+| `retention.max_events = 0` | Disable count cleanup |
+| Event is older than canonical cutoff | Delete it from the owning backend |
+| Event timestamp uses another format | Preserve it for a canonical runtime cutoff |
+| One SQLite cleanup operation fails | Log the error and attempt the other operation |
+| Scheduler worker fails or panics | Log the failure without terminating the runtime |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Convert the startup config once, pass one enforcer to the scheduler, and execute blocking storage cleanup in bounded batches.
+
+Base:
+
+- Runtime config changes take effect after restart; a dynamic reader is a separate task with an explicit config source.
+
+Bad:
+
+- Compare ISO and `unix_ms:` timestamps lexically.
+- Return a recurring `max_bytes` error from every enforcement tick after the runtime has started.
+- Hold Tokio storage locks while awaiting asynchronous work.
+
+### 6. Tests Required
+
+- Ring Buffer age cleanup preserves newer canonical and legacy-format events.
+- SQLite age cleanup removes old canonical events and related parameter rows.
+- Count cleanup preserves newest events after age cleanup.
+- Invalid age and unsupported byte settings fail validation/startup.
+- Scheduler cleanup runs off the Tokio worker and continues after operation errors.
+- Run `cargo fmt --check`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+let cutoff = Timestamp(format!("unix_ms:{millis}"));
+if event.timestamp < cutoff {
+    delete(event);
+}
+```
+
+#### Correct
+
+```rust
+let outcome = store.delete_events_older_than(&cutoff);
+// Storage compares canonical epoch values and preserves incompatible legacy formats.
+```
+
 ## Scenario: HTTP API Server Foundation Contracts
 
 ### 1. Scope / Trigger

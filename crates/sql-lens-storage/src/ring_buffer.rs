@@ -79,6 +79,24 @@ impl RingBufferStore {
         RingBufferRetentionOutcome { deleted_event_ids }
     }
 
+    pub fn delete_events_older_than(&mut self, cutoff: &Timestamp) -> RingBufferRetentionOutcome {
+        let mut deleted_event_ids = Vec::new();
+        let mut retained_events = VecDeque::with_capacity(self.events.len());
+
+        while let Some(entry) = self.events.pop_front() {
+            if timestamp_is_older(&entry.event.timestamp, cutoff) {
+                self.total_evicted += 1;
+                deleted_event_ids.push(entry.event.id);
+            } else {
+                retained_events.push_back(entry);
+            }
+        }
+
+        self.events = retained_events;
+
+        RingBufferRetentionOutcome { deleted_event_ids }
+    }
+
     pub fn snapshot(&self) -> Vec<SqlEvent> {
         self.events
             .iter()
@@ -158,6 +176,21 @@ impl RingBufferStore {
 
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+}
+
+fn timestamp_is_older(timestamp: &Timestamp, cutoff: &Timestamp) -> bool {
+    match (
+        timestamp.0.strip_prefix("unix_ms:"),
+        cutoff.0.strip_prefix("unix_ms:"),
+    ) {
+        (Some(timestamp), Some(cutoff)) => timestamp
+            .parse::<u128>()
+            .ok()
+            .zip(cutoff.parse::<u128>().ok())
+            .is_some_and(|(timestamp, cutoff)| timestamp < cutoff),
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => timestamp < cutoff,
     }
 }
 
@@ -1147,5 +1180,34 @@ mod tests {
             ]
         );
         assert_eq!(store.stats().total_evicted, 2);
+    }
+
+    #[test]
+    fn ring_buffer_retention_deletes_events_older_than_cutoff() {
+        let mut store = RingBufferStore::new(capacity(5));
+        let mut old = test_event("evt_old");
+        old.timestamp = Timestamp("unix_ms:100".to_owned());
+        let mut keep = test_event("evt_keep");
+        keep.timestamp = Timestamp("unix_ms:200".to_owned());
+        let mut legacy = test_event("evt_legacy");
+        legacy.timestamp = Timestamp("2026-07-09T08:00:00Z".to_owned());
+        store.append(old);
+        store.append(keep);
+        store.append(legacy);
+
+        let outcome = store.delete_events_older_than(&Timestamp("unix_ms:200".to_owned()));
+
+        assert_eq!(
+            outcome.deleted_event_ids,
+            vec![SqlEventId("evt_old".to_owned())]
+        );
+        assert_eq!(
+            event_ids(&store.snapshot()),
+            vec![
+                SqlEventId("evt_keep".to_owned()),
+                SqlEventId("evt_legacy".to_owned())
+            ]
+        );
+        assert_eq!(store.stats().total_evicted, 1);
     }
 }

@@ -91,6 +91,8 @@ impl std::error::Error for ConfigValidationError {}
 pub enum ConfigValidationViolation {
     InvalidCaptureCapacity,
     InvalidRetentionEnforcementInterval,
+    InvalidRetentionMaxAge,
+    UnsupportedRetentionMaxBytes,
     MissingProxyListen,
     MissingBackendAddress,
     UnsupportedProtocol {
@@ -127,6 +129,13 @@ impl fmt::Display for ConfigValidationViolation {
                 f,
                 "`retention.enforcement_interval` must be a positive duration using ms, s, m, or h"
             ),
+            Self::InvalidRetentionMaxAge => write!(
+                f,
+                "`retention.max_age` must be empty, `0`, or a positive duration using ms, s, m, or h"
+            ),
+            Self::UnsupportedRetentionMaxBytes => {
+                write!(f, "`retention.max_bytes` is not supported by the runtime")
+            }
             Self::MissingProxyListen => write!(f, "`proxy.listen` must not be empty"),
             Self::MissingBackendAddress => write!(f, "`backend.address` must not be empty"),
             Self::UnsupportedProtocol { protocol } => write!(

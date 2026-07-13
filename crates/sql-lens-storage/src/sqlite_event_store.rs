@@ -9,6 +9,8 @@ use sql_lens_core::{
 
 use crate::{SqlEventFilter, SqlEventFilterError, apply_sqlite_schema};
 
+const RETENTION_BATCH_SIZE: usize = 1_000;
+
 #[derive(Debug)]
 pub struct SqliteEventStore {
     connection: Connection,
@@ -301,6 +303,10 @@ impl SqliteEventStore {
             .optional()
     }
 
+    pub fn event_count(&self) -> rusqlite::Result<usize> {
+        sqlite_event_count(&self.connection)
+    }
+
     pub fn get_parameter_rows(&self, id: &SqlEventId) -> rusqlite::Result<Vec<SqliteParameterRow>> {
         let mut statement = self.connection.prepare(
             r#"
@@ -326,26 +332,49 @@ impl SqliteEventStore {
         &mut self,
         cutoff: &Timestamp,
     ) -> rusqlite::Result<SqliteRetentionOutcome> {
-        let transaction = self.connection.transaction()?;
-        let deleted_event_ids = {
-            let mut statement = transaction.prepare(
-                r#"
-                SELECT id
-                FROM sql_events
-                WHERE timestamp < ?1
-                ORDER BY timestamp ASC, id ASC
-                "#,
-            )?;
+        let mut outcome = SqliteRetentionOutcome::default();
 
-            statement
-                .query_map(params![&cutoff.0], |row| {
-                    row.get::<_, String>(0).map(SqlEventId)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        loop {
+            let transaction = self.connection.transaction()?;
+            let deleted_event_ids = {
+                let query = if cutoff.0.starts_with("unix_ms:") {
+                    r#"
+                    SELECT id
+                    FROM sql_events
+                    WHERE timestamp LIKE 'unix_ms:%'
+                      AND CAST(substr(timestamp, 9) AS INTEGER)
+                          < CAST(substr(?1, 9) AS INTEGER)
+                    ORDER BY CAST(substr(timestamp, 9) AS INTEGER) ASC, id ASC
+                    LIMIT ?2
+                    "#
+                } else {
+                    r#"
+                    SELECT id
+                    FROM sql_events
+                    WHERE timestamp < ?1
+                    ORDER BY timestamp ASC, id ASC
+                    LIMIT ?2
+                    "#
+                };
+                let mut statement = transaction.prepare(query)?;
 
-        let outcome = delete_sqlite_events(&transaction, deleted_event_ids)?;
-        transaction.commit()?;
+                statement
+                    .query_map(
+                        params![&cutoff.0, usize_to_i64(RETENTION_BATCH_SIZE)],
+                        |row| row.get::<_, String>(0).map(SqlEventId),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+
+            if deleted_event_ids.is_empty() {
+                transaction.commit()?;
+                break;
+            }
+
+            let batch = delete_sqlite_events(&transaction, deleted_event_ids)?;
+            transaction.commit()?;
+            merge_retention_outcome(&mut outcome, batch);
+        }
 
         Ok(outcome)
     }
@@ -354,35 +383,45 @@ impl SqliteEventStore {
         &mut self,
         max_events: NonZeroUsize,
     ) -> rusqlite::Result<SqliteRetentionOutcome> {
-        let transaction = self.connection.transaction()?;
-        let event_count = sqlite_event_count(&transaction)?;
+        let event_count = self.event_count()?;
         let max_events = max_events.get();
 
         if event_count <= max_events {
-            transaction.commit()?;
             return Ok(SqliteRetentionOutcome::default());
         }
 
-        let delete_count = event_count - max_events;
-        let deleted_event_ids = {
-            let mut statement = transaction.prepare(
-                r#"
-                SELECT id
-                FROM sql_events
-                ORDER BY timestamp ASC, id ASC
-                LIMIT ?1
-                "#,
-            )?;
+        let mut remaining = event_count - max_events;
+        let mut outcome = SqliteRetentionOutcome::default();
+        while remaining > 0 {
+            let transaction = self.connection.transaction()?;
+            let batch_size = remaining.min(RETENTION_BATCH_SIZE);
+            let deleted_event_ids = {
+                let mut statement = transaction.prepare(
+                    r#"
+                    SELECT id
+                    FROM sql_events
+                    ORDER BY timestamp ASC, id ASC
+                    LIMIT ?1
+                    "#,
+                )?;
 
-            statement
-                .query_map(params![usize_to_i64(delete_count)], |row| {
-                    row.get::<_, String>(0).map(SqlEventId)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+                statement
+                    .query_map(params![usize_to_i64(batch_size)], |row| {
+                        row.get::<_, String>(0).map(SqlEventId)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
 
-        let outcome = delete_sqlite_events(&transaction, deleted_event_ids)?;
-        transaction.commit()?;
+            if deleted_event_ids.is_empty() {
+                transaction.commit()?;
+                break;
+            }
+
+            let batch = delete_sqlite_events(&transaction, deleted_event_ids)?;
+            transaction.commit()?;
+            remaining = remaining.saturating_sub(batch.deleted_event_count);
+            merge_retention_outcome(&mut outcome, batch);
+        }
 
         Ok(outcome)
     }
@@ -502,6 +541,12 @@ fn delete_sqlite_events(
         deleted_event_count,
         deleted_parameter_count,
     })
+}
+
+fn merge_retention_outcome(target: &mut SqliteRetentionOutcome, source: SqliteRetentionOutcome) {
+    target.deleted_event_ids.extend(source.deleted_event_ids);
+    target.deleted_event_count += source.deleted_event_count;
+    target.deleted_parameter_count += source.deleted_parameter_count;
 }
 
 fn push_cursor_predicate(
@@ -1344,6 +1389,32 @@ mod tests {
                 .get_event_row(&deleted.id)
                 .expect("deleted event lookup should succeed"),
             None
+        );
+    }
+
+    #[test]
+    fn sqlite_retention_batches_large_count_cleanup() {
+        let mut store = in_memory_store();
+        for index in 0..1_005 {
+            insert_events(
+                &mut store,
+                vec![event_at(
+                    &format!("evt_batch_{index}"),
+                    &format!("unix_ms:{index:013}"),
+                )],
+            );
+        }
+
+        let outcome = store
+            .enforce_max_events(NonZeroUsize::new(2).expect("max events should be non-zero"))
+            .expect("large count cleanup should succeed");
+
+        assert_eq!(outcome.deleted_event_count, 1_003);
+        assert_eq!(outcome.deleted_parameter_count, 2_006);
+        assert_eq!(store.event_count().expect("event count should succeed"), 2);
+        assert_eq!(
+            row_ids(&query_page(&store, timeline_query(10, None)).events),
+            ["evt_batch_1004", "evt_batch_1003"]
         );
     }
 

@@ -372,6 +372,10 @@ pub struct RingBufferRetentionOutcome {
 
 impl RingBufferStore {
     pub fn enforce_max_events(&mut self, max_events: NonZeroUsize) -> RingBufferRetentionOutcome;
+    pub fn delete_events_older_than(
+        &mut self,
+        cutoff: &Timestamp,
+    ) -> RingBufferRetentionOutcome;
 }
 
 pub struct SqliteRetentionOutcome {
@@ -381,6 +385,8 @@ pub struct SqliteRetentionOutcome {
 }
 
 impl SqliteEventStore {
+    pub fn event_count(&self) -> rusqlite::Result<usize>;
+
     pub fn delete_events_older_than(
         &mut self,
         cutoff: &Timestamp,
@@ -397,13 +403,24 @@ impl SqliteEventStore {
 
 - Ring buffer max-events retention evicts oldest entries until `len <=
   max_events` and reports deleted IDs oldest-first.
-- SQLite age retention deletes `sql_events.timestamp < cutoff`.
+- Ring buffer age retention removes only events whose timestamps use the same
+  canonical representation as the cutoff. Runtime timestamps use
+  `unix_ms:<epoch-milliseconds>` and are compared numerically; mixed legacy
+  timestamp formats are preserved instead of being compared as unrelated
+  strings.
+- SQLite age retention deletes rows older than the cutoff; canonical
+  `unix_ms:` timestamps are compared by numeric suffix and legacy formats use
+  the existing textual ordering only when the cutoff is also legacy-formatted.
+- When the cutoff uses the runtime `unix_ms:` representation, SQLite filters
+  and orders by the numeric suffix and ignores legacy timestamp formats.
 - SQLite max-events retention keeps the newest rows by timeline ordering:
   `timestamp DESC, id DESC`.
 - SQLite retention deletes `sql_parameters` rows explicitly before deleting
   their owning `sql_events` rows. Do not rely on foreign-key cascades being
   enabled.
 - SQLite retention runs in one transaction per cleanup operation.
+- Large SQLite cleanup operations are split into bounded batches of at most
+  1,000 events per transaction.
 - Maximum byte retention is not currently supported. Do not add no-op max-byte
   APIs that imply enforcement happened; file-size cleanup needs a VACUUM /
   incremental-vacuum design.
