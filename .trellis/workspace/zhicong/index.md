@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 86
-- **Last Active**: 2026-07-10
+- **Total Sessions**: 87
+- **Last Active**: 2026-07-13
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~865 | Active |
+| `journal-2.md` | ~898 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 87 | 2026-07-13 | Enforce configured retention in app runtime (Issue 117) | `55bd14d` | `main` |
 | 86 | 2026-07-10 | Wire configured SQLite storage into app runtime (Issue 112) | `e449bcb` | `main` |
 | 85 | 2026-07-10 | Serve built web UI from app runtime | `fc38673` | `main` |
 | 84 | 2026-07-10 | Add retention policy enforcement (Issue 089) | `0d12b34` | `main` |

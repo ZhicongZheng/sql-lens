@@ -863,3 +863,36 @@ Verified SQLite storage wiring for Issue 112. Confirmed RuntimeStorage::from_con
 ### Next Steps
 
 - None - task complete
+
+
+## Session 87: Enforce configured retention in app runtime (Issue 117)
+
+**Date**: 2026-07-13
+**Task**: Enforce configured retention in app runtime (Issue 117)
+**Branch**: `main`
+
+### Summary
+
+Implemented runtime retention enforcement for Issue 117. RetentionEnforcer reads RetentionConfig, schedules periodic cleanup via tokio interval, calls enforce_max_events on ring buffer and delete_events_older_than/enforce_max_events on SQLite. Added max_age parsing using existing duration parser. max_bytes explicitly unsupported. All ACs met: config→cleanup conversion, non-blocking scheduler, graceful error handling, parameter row deletion. 4 new retention scheduler tests pass. Committed and archived.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `55bd14d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
