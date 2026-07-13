@@ -23,8 +23,8 @@ use sql_lens_capture::{
 };
 use sql_lens_config::{
     CaptureConfig, CaptureOverloadPolicy as ConfigCaptureOverloadPolicy,
-    DatabaseType as ConfigDatabaseType, ProxyTargetConfig, RetentionConfig, SqlLensConfig,
-    StorageConfig, StorageType, parse_retention_enforcement_interval,
+    DatabaseType as ConfigDatabaseType, ProxyConfig, ProxyTargetConfig, RetentionConfig,
+    SqlLensConfig, StorageConfig, StorageType, parse_retention_enforcement_interval,
 };
 use sql_lens_core::{
     ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, SqlEvent, Timestamp,
@@ -32,15 +32,15 @@ use sql_lens_core::{
 use sql_lens_protocol::{CaptureEventEmitter, ProtocolAdapter, ProtocolConnectionContext};
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
 use sql_lens_proxy::{
-    AcceptedClient, BackendDialConfig, BackendDialError, BackendDialer,
+    AcceptedClient, ActiveSessionDrain, BackendDialConfig, BackendDialError, BackendDialer,
     ConnectionLifecycleIdGenerator, ConnectionLifecycleRecord, ForwardingError, ForwardingFailure,
     ForwardingSummary, ProxiedConnection, ProxyListenerConfig, ProxyListenerError,
-    TcpProxyListener,
+    ProxyShutdownConfig, TcpProxyListener,
 };
 use sql_lens_storage::{RingBufferStore, SqliteEventStore};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{RwLock, oneshot, watch},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, RwLock, Semaphore, oneshot, watch},
     task::JoinError,
     time::{Instant, MissedTickBehavior},
 };
@@ -61,6 +61,8 @@ pub struct MinimalMysqlRuntime {
     proxy_shutdown_tx: watch::Sender<bool>,
     api_task: tokio::task::JoinHandle<Result<(), HttpServerError>>,
     proxy_tasks: Vec<tokio::task::JoinHandle<()>>,
+    proxy_sessions: Arc<ProxySessionRegistry>,
+    proxy_shutdown_config: ProxyShutdownConfig,
     capture_runtime: CaptureRuntime,
     retention_runtime: Option<RetentionRuntime>,
     persistence: EventPersistence,
@@ -114,6 +116,59 @@ struct MysqlProxyTargetRuntimeConfig {
     name: String,
     database_type: DatabaseType,
     backend_config: BackendDialConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProxyRuntimeConfig {
+    max_connections: NonZeroUsize,
+    idle_timeout: Duration,
+    shutdown_timeout: Duration,
+}
+
+#[derive(Debug)]
+struct RuntimeOptions {
+    backend_connect_timeout: Duration,
+    capture_config: CapturePipelineConfig,
+    classifier: SlowQueryClassifier,
+    retention_config: RetentionConfig,
+    proxy: ProxyRuntimeConfig,
+}
+
+#[derive(Debug)]
+struct ProxySessionRegistry {
+    slots: Arc<Semaphore>,
+    sessions: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl ProxySessionRegistry {
+    fn new(max_connections: NonZeroUsize) -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(max_connections.get())),
+            sessions: AsyncMutex::new(Vec::new()),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        self.slots.clone().try_acquire_owned().ok()
+    }
+
+    async fn register(&self, task: tokio::task::JoinHandle<()>) {
+        let mut sessions = self.sessions.lock().await;
+        sessions.retain(|session| !session.is_finished());
+        sessions.push(task);
+    }
+
+    async fn drain(&self, config: &ProxyShutdownConfig) {
+        let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        let summary = ActiveSessionDrain::drain(sessions, config).await;
+        tracing::info!(
+            completed_sessions = summary.completed_sessions,
+            failed_sessions = summary.failed_sessions,
+            timed_out_sessions = summary.timed_out_sessions,
+            timed_out = summary.timed_out,
+            "proxy session drain completed"
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -250,6 +305,8 @@ impl MinimalMysqlRuntime {
             proxy_shutdown_tx,
             api_task,
             proxy_tasks,
+            proxy_sessions,
+            proxy_shutdown_config,
             capture_runtime,
             retention_runtime,
             persistence,
@@ -264,6 +321,7 @@ impl MinimalMysqlRuntime {
         for proxy_task in proxy_tasks {
             proxy_task.await.map_err(MinimalMysqlRuntimeError::Join)?;
         }
+        proxy_sessions.drain(&proxy_shutdown_config).await;
         if let Some(retention_runtime) = retention_runtime {
             retention_runtime.shutdown().await?;
         }
@@ -300,19 +358,21 @@ pub async fn start_runtime_from_config(
         .iter()
         .map(MinimalMysqlTargetConfig::from)
         .collect();
-    let backend_connect_timeout = Duration::from_millis(config.proxy.connect_timeout_ms);
+    let proxy_runtime_config = runtime_proxy_config(&config.proxy)?;
     let runtime_storage = RuntimeStorage::from_config(&config.storage)?;
-    let capture_config = runtime_capture_config(&config.capture)?;
-    let classifier = runtime_slow_query_classifier(config);
+    let options = RuntimeOptions {
+        backend_connect_timeout: Duration::from_millis(config.proxy.connect_timeout_ms),
+        capture_config: runtime_capture_config(&config.capture)?,
+        classifier: runtime_slow_query_classifier(config),
+        retention_config: config.retention.clone(),
+        proxy: proxy_runtime_config,
+    };
 
     start_minimal_mysql_runtime_with_runtime_storage(
         HttpServerConfig::from(&config.web),
-        backend_connect_timeout,
         targets,
         runtime_storage,
-        capture_config,
-        classifier,
-        config.retention.clone(),
+        options,
     )
     .await
 }
@@ -340,24 +400,25 @@ pub async fn start_minimal_mysql_runtime_with_options(
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     start_minimal_mysql_runtime_with_runtime_storage(
         http_config,
-        backend_connect_timeout,
         targets,
         RuntimeStorage::ring_buffer_default(),
-        default_capture_pipeline_config(),
-        SlowQueryClassifier::default(),
-        RetentionConfig::default(),
+        RuntimeOptions {
+            backend_connect_timeout,
+            capture_config: default_capture_pipeline_config(),
+            classifier: SlowQueryClassifier::default(),
+            retention_config: RetentionConfig::default(),
+            proxy: runtime_proxy_config(&ProxyConfig::default())
+                .expect("default proxy configuration should be valid"),
+        },
     )
     .await
 }
 
 async fn start_minimal_mysql_runtime_with_runtime_storage(
     http_config: HttpServerConfig,
-    backend_connect_timeout: Duration,
     targets: Vec<MinimalMysqlTargetConfig>,
     runtime_storage: RuntimeStorage,
-    capture_config: CapturePipelineConfig,
-    classifier: SlowQueryClassifier,
-    retention_config: RetentionConfig,
+    options: RuntimeOptions,
 ) -> Result<MinimalMysqlRuntime, MinimalMysqlRuntimeError> {
     if targets.is_empty() {
         return Err(MinimalMysqlRuntimeError::NoProxyTargets);
@@ -376,13 +437,13 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         ApiState::new(event_store)
     };
     let retention_runtime = RetentionRuntime::start(
-        retention_config,
+        options.retention_config,
         state.event_store(),
         retention_sqlite_store,
     )?;
     let capture_runtime = CaptureRuntime::start(
-        capture_config,
-        classifier,
+        options.capture_config,
+        options.classifier,
         state.clone(),
         persistence.clone(),
     );
@@ -405,7 +466,10 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         let runtime_config = MysqlProxyTargetRuntimeConfig {
             name: target.name.clone(),
             database_type: DatabaseType(target.database_type.clone()),
-            backend_config: BackendDialConfig::new(target.backend_address, backend_connect_timeout),
+            backend_config: BackendDialConfig::new(
+                target.backend_address,
+                options.backend_connect_timeout,
+            ),
         };
 
         proxy_targets.push(MinimalMysqlRuntimeTarget {
@@ -420,6 +484,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
 
     let (api_shutdown_tx, api_shutdown_rx) = oneshot::channel::<()>();
     let (proxy_shutdown_tx, proxy_shutdown_rx) = watch::channel(false);
+    let proxy_sessions = Arc::new(ProxySessionRegistry::new(options.proxy.max_connections));
 
     let api_task = tokio::spawn(http_server.serve_with_shutdown(async move {
         let _ = api_shutdown_rx.await;
@@ -433,6 +498,8 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
                 state.clone(),
                 capture_runtime.publisher(),
                 proxy_shutdown_rx.clone(),
+                Arc::clone(&proxy_sessions),
+                options.proxy.idle_timeout,
             ))
         })
         .collect();
@@ -445,6 +512,8 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         proxy_shutdown_tx,
         api_task,
         proxy_tasks,
+        proxy_sessions,
+        proxy_shutdown_config: ProxyShutdownConfig::new(options.proxy.shutdown_timeout),
         capture_runtime,
         retention_runtime,
         persistence,
@@ -476,6 +545,34 @@ fn default_capture_pipeline_config() -> CapturePipelineConfig {
 
 fn runtime_slow_query_classifier(config: &SqlLensConfig) -> SlowQueryClassifier {
     SlowQueryClassifier::new(DurationMillis(config.proxy.slow_threshold_ms))
+}
+
+fn runtime_proxy_config(
+    config: &ProxyConfig,
+) -> Result<ProxyRuntimeConfig, MinimalMysqlRuntimeError> {
+    let max_connections = NonZeroUsize::new(config.max_connections as usize).ok_or_else(|| {
+        MinimalMysqlRuntimeError::ProxyConfig(
+            "proxy.max_connections must be greater than zero".to_owned(),
+        )
+    })?;
+
+    if config.idle_timeout_ms == 0 {
+        return Err(MinimalMysqlRuntimeError::ProxyConfig(
+            "proxy.idle_timeout_ms must be greater than zero".to_owned(),
+        ));
+    }
+
+    if config.shutdown_timeout_ms == 0 {
+        return Err(MinimalMysqlRuntimeError::ProxyConfig(
+            "proxy.shutdown_timeout_ms must be greater than zero".to_owned(),
+        ));
+    }
+
+    Ok(ProxyRuntimeConfig {
+        max_connections,
+        idle_timeout: Duration::from_millis(config.idle_timeout_ms),
+        shutdown_timeout: Duration::from_millis(config.shutdown_timeout_ms),
+    })
 }
 
 #[derive(Debug)]
@@ -630,6 +727,8 @@ async fn run_mysql_proxy(
     state: ApiState,
     publisher: CaptureEventPublisher,
     mut shutdown: watch::Receiver<bool>,
+    sessions: Arc<ProxySessionRegistry>,
+    idle_timeout: Duration,
 ) {
     let id_generator = ConnectionLifecycleIdGenerator::new();
 
@@ -649,14 +748,36 @@ async fn run_mysql_proxy(
             accepted = listener.accept() => {
                 match accepted {
                     Ok(accepted) => {
-                        handle_accepted_mysql_client(
+                        let client_peer_addr = accepted.peer_addr();
+                        let connection_id = id_generator.next_id();
+                        let Some(session_permit) = sessions.try_acquire() else {
+                            let mut lifecycle = runtime_connection_lifecycle(
+                                connection_id,
+                                target_config.name.clone(),
+                                target_config.database_type.clone(),
+                                client_peer_addr,
+                                target_config.backend_config.address.clone(),
+                            );
+                            lifecycle.mark_connection_rejected(runtime_timestamp());
+                            record_connection_finished(&state, lifecycle.into_info()).await;
+                            tracing::warn!(
+                                %client_peer_addr,
+                                "proxy connection limit reached; rejecting client"
+                            );
+                            continue;
+                        };
+
+                        let session = tokio::spawn(handle_accepted_mysql_client(
                             accepted,
                             target_config.clone(),
                             state.clone(),
                             publisher.clone(),
-                            id_generator.next_id(),
-                        )
-                        .await;
+                            connection_id,
+                            session_permit,
+                            idle_timeout,
+                        ));
+
+                        sessions.register(session).await;
                     }
                     Err(source) => {
                         tracing::warn!(error = %source, "failed to accept MySQL proxy client");
@@ -673,7 +794,10 @@ async fn handle_accepted_mysql_client(
     state: ApiState,
     publisher: CaptureEventPublisher,
     connection_id: sql_lens_core::ConnectionId,
+    session_permit: OwnedSemaphorePermit,
+    idle_timeout: Duration,
 ) {
+    let _session_permit = session_permit;
     let client_peer_addr = accepted.peer_addr();
     let mut lifecycle = runtime_connection_lifecycle(
         connection_id,
@@ -688,13 +812,12 @@ async fn handle_accepted_mysql_client(
             lifecycle.mark_backend_connected(runtime_timestamp());
             record_connection_started(&state, &lifecycle).await;
 
-            tokio::spawn(async move {
-                if let Err(source) =
-                    forward_mysql_connection(connection, lifecycle, state, publisher).await
-                {
-                    tracing::warn!(error = %source, "MySQL proxy forwarding failed");
-                }
-            });
+            if let Err(source) =
+                forward_mysql_connection(connection, lifecycle, state, publisher, idle_timeout)
+                    .await
+            {
+                tracing::warn!(error = %source, "MySQL proxy forwarding failed");
+            }
         }
         Err(source) => {
             lifecycle.mark_backend_dial_failed(source.failure(), runtime_timestamp());
@@ -731,6 +854,7 @@ async fn forward_mysql_connection(
     mut lifecycle: ConnectionLifecycleRecord,
     state: ApiState,
     publisher: CaptureEventPublisher,
+    idle_timeout: Duration,
 ) -> Result<ForwardingSummary, ForwardingError> {
     let connection_info = lifecycle.info().clone();
     let (mut client_stream, mut backend_stream, client_peer_addr, backend_address) =
@@ -747,81 +871,98 @@ async fn forward_mysql_connection(
 
     let forwarding_result = async {
         while client_open || backend_open {
-            tokio::select! {
-                client_read = client_stream.read(&mut client_buffer), if client_open => {
-                    let bytes_read = client_read.map_err(|source| forwarding_io_error(
-                        client_peer_addr,
-                        backend_address.clone(),
-                        client_to_backend_bytes,
-                        backend_to_client_bytes,
-                        source,
-                    ))?;
-
-                    if bytes_read == 0 {
-                        client_open = false;
-                        backend_stream.shutdown().await.map_err(|source| forwarding_io_error(
+            let step = tokio::time::timeout(idle_timeout, async {
+                tokio::select! {
+                    client_read = client_stream.read(&mut client_buffer), if client_open => {
+                        let bytes_read = client_read.map_err(|source| forwarding_io_error(
                             client_peer_addr,
                             backend_address.clone(),
                             client_to_backend_bytes,
                             backend_to_client_bytes,
                             source,
                         ))?;
-                        continue;
-                    }
 
-                    observe_client_bytes(
-                        &adapter,
-                        protocol_state.as_mut(),
-                        &client_buffer[..bytes_read],
-                    );
-                    backend_stream.write_all(&client_buffer[..bytes_read]).await.map_err(|source| {
-                        forwarding_io_error(
+                        if bytes_read == 0 {
+                            client_open = false;
+                            backend_stream.shutdown().await.map_err(|source| forwarding_io_error(
+                                client_peer_addr,
+                                backend_address.clone(),
+                                client_to_backend_bytes,
+                                backend_to_client_bytes,
+                                source,
+                            ))?;
+                            return Ok::<(), ForwardingError>(());
+                        }
+
+                        observe_client_bytes(
+                            &adapter,
+                            protocol_state.as_mut(),
+                            &client_buffer[..bytes_read],
+                        );
+                        backend_stream.write_all(&client_buffer[..bytes_read]).await.map_err(|source| {
+                            forwarding_io_error(
+                                client_peer_addr,
+                                backend_address.clone(),
+                                client_to_backend_bytes,
+                                backend_to_client_bytes,
+                                source,
+                            )
+                        })?;
+                        client_to_backend_bytes += bytes_read as u64;
+                        Ok(())
+                    }
+                    backend_read = backend_stream.read(&mut backend_buffer), if backend_open => {
+                        let bytes_read = backend_read.map_err(|source| forwarding_io_error(
                             client_peer_addr,
                             backend_address.clone(),
                             client_to_backend_bytes,
                             backend_to_client_bytes,
                             source,
-                        )
-                    })?;
-                    client_to_backend_bytes += bytes_read as u64;
+                        ))?;
+
+                        if bytes_read == 0 {
+                            backend_open = false;
+                            client_stream.shutdown().await.map_err(|source| forwarding_io_error(
+                                client_peer_addr,
+                                backend_address.clone(),
+                                client_to_backend_bytes,
+                                backend_to_client_bytes,
+                                source,
+                            ))?;
+                            return Ok::<(), ForwardingError>(());
+                        }
+
+                        let events = observe_backend_bytes(
+                            &adapter,
+                            protocol_state.as_mut(),
+                            &backend_buffer[..bytes_read],
+                        );
+                        client_stream.write_all(&backend_buffer[..bytes_read]).await.map_err(|source| {
+                            forwarding_io_error(
+                                client_peer_addr,
+                                backend_address.clone(),
+                                client_to_backend_bytes,
+                                backend_to_client_bytes,
+                                source,
+                            )
+                        })?;
+                        backend_to_client_bytes += bytes_read as u64;
+                        publish_sql_events(&publisher, events);
+                        Ok(())
+                    }
                 }
-                backend_read = backend_stream.read(&mut backend_buffer), if backend_open => {
-                    let bytes_read = backend_read.map_err(|source| forwarding_io_error(
+            }).await;
+
+            match step {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(forwarding_io_error(
                         client_peer_addr,
                         backend_address.clone(),
                         client_to_backend_bytes,
                         backend_to_client_bytes,
-                        source,
-                    ))?;
-
-                    if bytes_read == 0 {
-                        backend_open = false;
-                        client_stream.shutdown().await.map_err(|source| forwarding_io_error(
-                            client_peer_addr,
-                            backend_address.clone(),
-                            client_to_backend_bytes,
-                            backend_to_client_bytes,
-                            source,
-                        ))?;
-                        continue;
-                    }
-
-                    let events = observe_backend_bytes(
-                        &adapter,
-                        protocol_state.as_mut(),
-                        &backend_buffer[..bytes_read],
-                    );
-                    client_stream.write_all(&backend_buffer[..bytes_read]).await.map_err(|source| {
-                        forwarding_io_error(
-                            client_peer_addr,
-                            backend_address.clone(),
-                            client_to_backend_bytes,
-                            backend_to_client_bytes,
-                            source,
-                        )
-                    })?;
-                    backend_to_client_bytes += bytes_read as u64;
-                    publish_sql_events(&publisher, events);
+                        io::Error::new(io::ErrorKind::TimedOut, "proxy session idle timeout"),
+                    ));
                 }
             }
         }
@@ -1327,6 +1468,143 @@ mod tests {
             .expect_err("empty target list should fail");
 
         assert!(matches!(error, MinimalMysqlRuntimeError::NoProxyTargets));
+    }
+
+    #[tokio::test]
+    async fn proxy_session_registry_enforces_and_releases_global_capacity() {
+        let registry = ProxySessionRegistry::new(NonZeroUsize::new(1).expect("non-zero capacity"));
+        let permit = registry
+            .try_acquire()
+            .expect("first session should reserve the only slot");
+
+        assert!(
+            registry.try_acquire().is_none(),
+            "second session should be rejected while the first is active"
+        );
+
+        drop(permit);
+        assert!(
+            registry.try_acquire().is_some(),
+            "released session slot should be reusable"
+        );
+    }
+
+    #[test]
+    fn runtime_proxy_config_rejects_zero_values() {
+        for proxy in [
+            ProxyConfig {
+                max_connections: 0,
+                ..ProxyConfig::default()
+            },
+            ProxyConfig {
+                idle_timeout_ms: 0,
+                ..ProxyConfig::default()
+            },
+            ProxyConfig {
+                shutdown_timeout_ms: 0,
+                ..ProxyConfig::default()
+            },
+        ] {
+            assert!(matches!(
+                runtime_proxy_config(&proxy),
+                Err(MinimalMysqlRuntimeError::ProxyConfig(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_closes_idle_proxy_sessions() {
+        let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("backend listener should bind");
+        let backend_addr = backend_listener
+            .local_addr()
+            .expect("backend listener should have an address");
+        let backend_task = tokio::spawn(async move {
+            let (_backend_stream, _) = backend_listener
+                .accept()
+                .await
+                .expect("backend should accept the idle session");
+            std::future::pending::<()>().await;
+        });
+
+        let listen = unused_loopback_addr();
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[proxy]
+listen = "{listen}"
+idle_timeout_ms = 20
+shutdown_timeout_ms = 100
+
+[backend]
+address = "{backend_addr}"
+
+[web]
+listen = "127.0.0.1:0"
+"#
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+        let runtime = start_runtime_from_config(&config)
+            .await
+            .expect("runtime should start");
+
+        let _client = tokio::net::TcpStream::connect(runtime.proxy_addr)
+            .await
+            .expect("client should connect to proxy");
+        let connection = wait_for_runtime_connection(&runtime, "conn_1", "failed").await;
+
+        assert_eq!(connection["state"], "failed");
+        runtime.shutdown().await.expect("runtime should shut down");
+        backend_task.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_drains_sessions_within_configured_timeout() {
+        let backend_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("backend listener should bind");
+        let backend_addr = backend_listener
+            .local_addr()
+            .expect("backend listener should have an address");
+        let backend_task = tokio::spawn(async move {
+            let (_backend_stream, _) = backend_listener
+                .accept()
+                .await
+                .expect("backend should accept the session");
+            std::future::pending::<()>().await;
+        });
+
+        let listen = unused_loopback_addr();
+        let config = SqlLensConfig::from_toml_str(&format!(
+            r#"
+[proxy]
+listen = "{listen}"
+idle_timeout_ms = 60_000
+shutdown_timeout_ms = 20
+
+[backend]
+address = "{backend_addr}"
+
+[web]
+listen = "127.0.0.1:0"
+"#
+        ))
+        .expect("config should parse");
+        config.validate().expect("config should validate");
+        let runtime = start_runtime_from_config(&config)
+            .await
+            .expect("runtime should start");
+        let _client = tokio::net::TcpStream::connect(runtime.proxy_addr)
+            .await
+            .expect("client should connect to proxy");
+
+        wait_for_runtime_connection(&runtime, "conn_1", "backend_connected").await;
+        tokio::time::timeout(Duration::from_millis(200), runtime.shutdown())
+            .await
+            .expect("shutdown should honor the configured drain timeout")
+            .expect("runtime should shut down cleanly");
+        backend_task.abort();
     }
 
     #[tokio::test]
@@ -1896,6 +2174,7 @@ path = "{}"
 #[derive(Debug)]
 pub enum MinimalMysqlRuntimeError {
     NoProxyTargets,
+    ProxyConfig(String),
     CaptureConfig(String),
     RetentionConfig(String),
     StorageConfig(String),
@@ -1917,6 +2196,7 @@ impl fmt::Display for MinimalMysqlRuntimeError {
                 f,
                 "minimal MySQL runtime requires at least one proxy target"
             ),
+            Self::ProxyConfig(message) => write!(f, "invalid proxy configuration: {message}"),
             Self::CaptureConfig(message) => write!(f, "invalid capture configuration: {message}"),
             Self::RetentionConfig(message) => {
                 write!(f, "invalid retention configuration: {message}")
@@ -1948,6 +2228,7 @@ impl Error for MinimalMysqlRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::NoProxyTargets => None,
+            Self::ProxyConfig(_) => None,
             Self::CaptureConfig(_) => None,
             Self::RetentionConfig(_) => None,
             Self::StorageConfig(_) => None,

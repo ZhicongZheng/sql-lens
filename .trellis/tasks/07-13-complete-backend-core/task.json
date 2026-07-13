@@ -1,0 +1,33 @@
+{
+  "id": "complete-backend-core",
+  "name": "complete-backend-core",
+  "title": "Complete backend core runtime capabilities",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "zhicong",
+  "assignee": "zhicong",
+  "createdAt": "2026-07-13",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-13-proxy-connection-governance",
+    "07-13-wire-runtime-redaction-config",
+    "07-13-complete-runtime-retention",
+    "07-13-implement-mysql-replay-execution",
+    "07-13-integrate-protocol-registry-runtime",
+    "07-13-implement-plugin-runtime"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

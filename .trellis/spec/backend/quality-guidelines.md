@@ -4950,6 +4950,99 @@ shutdown.request_shutdown()?;
 let summary = ActiveSessionDrain::drain(session_handles, &shutdown_config).await;
 ```
 
+## Scenario: Application Proxy Session Governance Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` composes configured proxy limits and shutdown primitives with accepted MySQL sessions.
+- The app owns global admission across multiple target listeners, idle timeout application, session task tracking, and lifecycle recording for rejected clients.
+- This layer must not move SQL parsing or storage writes into the proxy session registry.
+
+### 2. Signatures
+
+Runtime configuration is derived from `ProxyConfig`:
+
+```rust
+struct ProxyRuntimeConfig {
+    max_connections: NonZeroUsize,
+    idle_timeout: Duration,
+    shutdown_timeout: Duration,
+}
+```
+
+The runtime owns a registry equivalent to:
+
+```rust
+struct ProxySessionRegistry {
+    slots: Arc<tokio::sync::Semaphore>,
+    sessions: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+```
+
+### 3. Contracts
+
+- The connection semaphore is shared by all configured target listeners, so `max_connections` is process-wide.
+- A permit is acquired before backend dialing and released when the complete session task exits.
+- Rejected clients produce a failed connection lifecycle record with `ConnectionLifecycleFailureKind::ConnectionLimit`.
+- Idle timeout is applied per bidirectional I/O step, so successful traffic resets the timeout.
+- Listener tasks stop accepting before `ActiveSessionDrain` consumes tracked session handles.
+- Runtime shutdown logs completed, failed, and timed-out session counts and does not block on storage or plugin work.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `max_connections = 0` | Reject runtime startup with `MinimalMysqlRuntimeError::ProxyConfig` |
+| `idle_timeout_ms = 0` | Reject runtime startup with `MinimalMysqlRuntimeError::ProxyConfig` |
+| `shutdown_timeout_ms = 0` | Reject runtime startup with `MinimalMysqlRuntimeError::ProxyConfig` |
+| Semaphore has no permits | Record connection-limit failure and close the accepted client |
+| Session has no client/backend activity for idle timeout | Finalize as forwarding failure with timeout IO error |
+| Runtime shutdown begins | Stop listeners, then drain tracked sessions with bounded timeout |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Register the whole accepted session task, including backend dialing, so shutdown can drain it.
+- Keep the semaphore permit inside that task until forwarding or dial failure completes.
+
+Base:
+
+- Completed sessions are removed from the registry before adding later handles; their permits are already released.
+
+Bad:
+
+- Spawn a forwarding task without retaining its `JoinHandle`.
+- Acquire a separate connection limit per target when the configured field is global.
+- Apply one timeout around the whole process lifetime instead of resetting it after activity.
+
+### 6. Tests Required
+
+- Semaphore capacity and permit reuse.
+- Rejected connection lifecycle has `ConnectionLimit` failure kind.
+- Idle session closes and reaches failed lifecycle state.
+- Shutdown drains completed sessions and returns within the configured timeout for a pending session.
+- Run `cargo fmt --check`, `cargo test --workspace`, and `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+tokio::spawn(forward_session(connection));
+```
+
+#### Correct
+
+```rust
+let permit = sessions.try_acquire()?;
+let handle = tokio::spawn(async move {
+    let _permit = permit;
+    forward_session(connection).await;
+});
+sessions.register(handle).await;
+```
+
 ## Scenario: HTTP API Server Foundation Contracts
 
 ### 1. Scope / Trigger

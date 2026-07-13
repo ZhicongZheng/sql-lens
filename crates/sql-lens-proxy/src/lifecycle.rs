@@ -105,6 +105,16 @@ impl ConnectionLifecycleRecord {
         self.transition_to(ConnectionState::Failed, failed_at);
     }
 
+    pub fn mark_connection_rejected(&mut self, rejected_at: Timestamp) {
+        self.failure = Some(ConnectionLifecycleFailure {
+            client_addr: self.info.client_addr.clone(),
+            backend_addr: self.info.backend_addr.clone(),
+            kind: ConnectionLifecycleFailureKind::ConnectionLimit,
+        });
+        self.info.closed_at = Some(rejected_at.clone());
+        self.transition_to(ConnectionState::Failed, rejected_at);
+    }
+
     pub fn mark_forwarding_failed(&mut self, failure: &ForwardingFailure, failed_at: Timestamp) {
         if let Some(bytes_in) = failure.client_to_backend_bytes {
             self.info.bytes_in = bytes_in;
@@ -167,6 +177,7 @@ impl ConnectionLifecycleFailure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionLifecycleFailureKind {
+    ConnectionLimit,
     BackendDialTimeout { timeout: Duration },
     BackendDialConnect,
     ForwardingIo,

@@ -195,6 +195,24 @@ fn lifecycle_record_tracks_backend_dial_failure() {
 }
 
 #[test]
+fn lifecycle_record_tracks_connection_limit_rejection() {
+    let mut record = test_lifecycle_record();
+
+    record.mark_connection_rejected(test_timestamp("rejected"));
+
+    assert_eq!(record.info().state, ConnectionState::Failed);
+    assert_eq!(record.info().closed_at, Some(test_timestamp("rejected")));
+    assert_eq!(
+        record.failure(),
+        Some(&ConnectionLifecycleFailure {
+            client_addr: "127.0.0.1:51000".to_owned(),
+            backend_addr: "127.0.0.1:3306".to_owned(),
+            kind: ConnectionLifecycleFailureKind::ConnectionLimit,
+        })
+    );
+}
+
+#[test]
 fn proxy_shutdown_config_uses_runtime_config() {
     let proxy = ProxyConfig {
         shutdown_timeout_ms: 2_500,
