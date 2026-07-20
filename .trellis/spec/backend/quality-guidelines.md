@@ -6778,6 +6778,122 @@ pub trait OnQuery {
 }
 ```
 
+## Scenario: Application Plugin Runtime Contracts
+
+### 1. Scope / Trigger
+
+- Trigger: `sql-lens-app` turns protocol-neutral plugin hook traits into a
+  runtime-owned dispatcher when `plugins.enabled` is true.
+- Loading, timeout, failure isolation, and fan-out from connection lifecycle /
+  capture delivery belong in the app runtime, not in `sql-lens-plugin`.
+- Packet forwarding and capture storage/broadcast must not wait on plugin hooks.
+
+### 2. Signatures
+
+```rust
+pub(crate) struct PluginRuntimeHandle;
+pub(crate) struct PluginRuntime;
+
+impl PluginRuntime {
+    pub(crate) fn start(
+        config: &PluginsConfig,
+        redaction_policy: RedactionPolicy,
+    ) -> Result<Option<Self>, PluginRuntimeError>;
+    pub(crate) fn handle(&self) -> PluginRuntimeHandle;
+    pub(crate) async fn shutdown(self) -> Result<(), PluginRuntimeError>;
+}
+
+impl PluginRuntimeHandle {
+    pub(crate) fn dispatch_connect(&self, connection: ConnectionInfo);
+    pub(crate) fn dispatch_event(&self, event: SqlEvent);
+}
+```
+
+### 3. Contracts
+
+- Plugins load only when `plugins.enabled` is true. Disabled mode returns
+  `Ok(None)` without reading the plugin directory.
+- Supported production artifacts are `.toml` manifests under
+  `plugins.directory`. Non-`.toml` files are skipped; invalid TOML, empty
+  `name`, or unknown `kind` fail startup with a clear error.
+- The only supported production kind today is `builtin_noop` (statically
+  registered). Native / dynamic shared-library loading is unsupported.
+  `plugins.allow_network` is accepted without effect until network-capable
+  plugins exist.
+- Manifest load order is sorted filesystem path order; injected test plugins
+  keep registration order.
+- `dispatch_event` applies `redact_sql_event` before enqueue. Dispatch uses a
+  bounded mpsc queue and `try_send`; full/stopped queues drop payloads with a
+  warning and never fail the caller.
+- Worker execution is off the proxy hot path: each plugin hook runs under
+  `spawn_blocking` with `plugins.timeout_ms`. Failures, panics, and timeouts
+  are logged per plugin and do not stop later plugins or capture delivery.
+- Fan-out points:
+  - successful backend connect / `record_connection_started` → `dispatch_connect`
+  - capture consumer `store_sql_events` after classify → `dispatch_event`
+- Shutdown signals the worker, drains queued payloads, and joins the task.
+  Drop aborts a detached worker if startup fails mid-flight.
+
+### 4. Validation & Error Matrix
+
+| Condition | Required behavior |
+| --- | --- |
+| `plugins.enabled = false` | No load, no worker, no dispatch |
+| `plugins.timeout_ms = 0` when enabled | Startup error `PluginRuntimeError::InvalidConfig` |
+| Missing plugin directory when enabled | Startup error `PluginRuntimeError::Directory` |
+| Invalid TOML / empty name / unknown kind | Startup error `PluginRuntimeError::Artifact` |
+| Hook returns `PluginError` | Log and continue remaining plugins |
+| Hook exceeds timeout | Log timeout and continue remaining plugins |
+| Plugin queue full | Drop payload with warning; caller continues |
+
+### 5. Good/Base/Bad Cases
+
+Good:
+
+- Start `PluginRuntime` from `PluginsConfig` at runtime composition and pass
+  `Option<PluginRuntimeHandle>` into capture and connection paths.
+- Keep storage/broadcast before or independent of plugin try-send so plugin
+  misbehavior cannot suppress event delivery.
+
+Base:
+
+- Empty enabled directory starts an empty plugin list without error.
+- Tests inject recording/failing/slow plugins without filesystem loading.
+
+Bad:
+
+- Calling hooks on the proxy I/O path.
+- Loading native `.so` / `.dylib` plugins without an explicit safety design.
+- Propagating plugin errors into forwarding or capture consumer results.
+
+### 6. Tests Required
+
+- Disabled plugins do not load or start.
+- Zero timeout, missing directory, malformed TOML, empty name, and unknown kind
+  produce clear startup errors when enabled.
+- Valid manifests load in sorted path order and skip non-toml files.
+- Recording plugin receives redacted connect/query/prepare/execute/error payloads.
+- Failing and timing-out plugins are isolated; later plugins still run.
+- Registration order and shutdown drain are covered.
+- Run `cargo fmt --check`, `cargo test -p sql-lens-plugin -p sql-lens-app`,
+  workspace tests, and workspace clippy.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+plugin.on_query(&event, &connection)?; // on the proxy hot path
+```
+
+#### Correct
+
+```rust
+if let Some(plugin_handle) = plugin_handle {
+    plugin_handle.dispatch_event(event.clone()); // try_send + redaction off hot path
+}
+```
+
 ## Forbidden Patterns
 
 - Do not put MySQL-only fields directly on shared core models.

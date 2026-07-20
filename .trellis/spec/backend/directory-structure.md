@@ -47,8 +47,8 @@ Member packages inherit shared package metadata instead of repeating it.
 - `sql-lens-protocol-mysql`: MySQL-compatible packet framing, handshake observation, command parsing, prepared statement lifecycle, parameter decoding, and error packet mapping.
 - `sql-lens-storage`: ring buffer, SQLite, future DuckDB, retention, query filters, and statistics helpers.
 - `sql-lens-api`: REST handlers, WebSocket handlers, API error mapping, and OpenAPI schema generation.
-- `sql-lens-plugin`: hook traits, exporter traits, plugin lifecycle, and plugin safety boundaries.
-- `sql-lens-app`: CLI, config loading, logging setup, runtime startup, and graceful shutdown.
+- `sql-lens-plugin`: hook traits, exporter traits, and plugin safety boundaries for protocol-neutral payloads.
+- `sql-lens-app`: CLI, config loading, logging setup, runtime startup, graceful shutdown, retention scheduler, and plugin runtime dispatch.
 
 ## Multi-Target Proxy Architecture
 
@@ -104,6 +104,7 @@ Current module boundaries:
 - `sql-lens-protocol`: `adapter`, `registry`, and tests.
 - `sql-lens-proxy`: `listener`, `dialer`, `forwarding`, `lifecycle`, `shutdown`, and cross-module tests.
 - `sql-lens-storage`: `ring_buffer`, `live_statistics`, and crate-level re-exports.
+- `sql-lens-app`: `plugins` (manifest load + isolated hook dispatch), `retention` (scheduler/enforcer), and runtime composition in `lib.rs`.
 
 ## Dependency Rules
 
