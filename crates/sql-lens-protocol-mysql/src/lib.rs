@@ -22,7 +22,7 @@ use sql_lens_core::{
 };
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
-    ProtocolConnectionState, ProtocolObservation,
+    ProtocolConnectionState, ProtocolObservation, SessionIdentity,
 };
 
 pub use authentication::{
@@ -113,10 +113,14 @@ impl ProtocolAdapter for MysqlProtocolAdapter {
     ) -> Result<ProtocolObservation, ProtocolAdapterError> {
         let state = self.state_mut(state)?;
         state.client_bytes_observed += bytes.len();
-        state.observe_client_handshake_response(bytes);
+        let session_identity = state.observe_client_handshake_response(bytes);
         state.observe_client_command(bytes, self.clock.as_ref());
 
-        Ok(ProtocolObservation::new(bytes.len(), 0))
+        let observation = ProtocolObservation::new(bytes.len(), 0);
+        Ok(match session_identity {
+            Some(identity) => observation.with_session_identity(identity),
+            None => observation,
+        })
     }
 
     fn observe_backend_bytes(
@@ -363,25 +367,32 @@ impl MysqlConnectionState {
         self.phase = MysqlConnectionPhase::InitialHandshakeSeen;
     }
 
-    fn observe_client_handshake_response(&mut self, bytes: &[u8]) {
+    fn observe_client_handshake_response(&mut self, bytes: &[u8]) -> Option<SessionIdentity> {
         if self.phase != MysqlConnectionPhase::InitialHandshakeSeen {
-            return;
+            return None;
         }
 
         let Ok(packet) = parse_mysql_packet(bytes) else {
-            return;
+            return None;
         };
 
         if packet.header.sequence_id != 1 {
-            return;
+            return None;
         }
 
         let Ok(handshake) = parse_client_handshake_response(packet.payload) else {
-            return;
+            return None;
         };
 
+        self.connection.user = handshake.username.clone();
+        self.connection.database = handshake.database.clone();
+        let identity = SessionIdentity {
+            user: handshake.username.clone(),
+            database: handshake.database.clone(),
+        };
         self.client_handshake = Some(handshake);
         self.phase = MysqlConnectionPhase::ClientHandshakeSeen;
+        Some(identity)
     }
 
     fn observe_authentication_result(&mut self, bytes: &[u8]) {
@@ -1291,14 +1302,21 @@ mod tests {
             .client_handshake()
             .expect("client handshake response should be stored");
 
+        assert_eq!(observation.bytes_observed, client_packet.len());
+        assert_eq!(observation.events_emitted, 0);
         assert_eq!(
-            observation,
-            ProtocolObservation::new(client_packet.len(), 0)
+            observation.session_identity,
+            Some(SessionIdentity {
+                user: Some("app".to_owned()),
+                database: Some("app_db".to_owned()),
+            })
         );
         assert_eq!(state.phase(), MysqlConnectionPhase::ClientHandshakeSeen);
         assert_eq!(state.client_bytes_observed(), client_packet.len());
         assert_eq!(client_handshake.username, Some("app".to_owned()));
         assert_eq!(client_handshake.database, Some("app_db".to_owned()));
+        assert_eq!(state.connection().user, Some("app".to_owned()));
+        assert_eq!(state.connection().database, Some("app_db".to_owned()));
         assert_eq!(
             client_handshake.auth_plugin_name,
             Some("mysql_native_password".to_owned())

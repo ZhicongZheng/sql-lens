@@ -42,7 +42,7 @@ use sql_lens_core::{
 use crate::plugins::{PluginRuntime, PluginRuntimeError, PluginRuntimeHandle};
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterRegistry, ProtocolAdapterRegistryError,
-    ProtocolConnectionContext,
+    ProtocolConnectionContext, SessionIdentity,
 };
 use sql_lens_protocol_mysql::MysqlProtocolAdapter;
 use sql_lens_proxy::{
@@ -1158,11 +1158,18 @@ async fn forward_protocol_connection(
                             return Ok::<(), ForwardingError>(());
                         }
 
-                        observe_client_bytes(
+                        let identity = observe_client_bytes(
                             adapter.as_ref(),
                             protocol_state.as_mut(),
                             &client_buffer[..bytes_read],
                         );
+                        if let Some(identity) = identity {
+                            apply_session_identity(
+                                &state,
+                                &mut lifecycle,
+                                identity,
+                            ).await;
+                        }
                         backend_stream.write_all(&client_buffer[..bytes_read]).await.map_err(|source| {
                             forwarding_io_error(
                                 client_peer_addr,
@@ -1351,10 +1358,14 @@ fn observe_client_bytes(
     adapter: &dyn ProtocolAdapter,
     protocol_state: &mut dyn sql_lens_protocol::ProtocolConnectionState,
     bytes: &[u8],
-) {
+) -> Option<SessionIdentity> {
     let mut events = VecCaptureEventEmitter::default();
-    if let Err(source) = adapter.observe_client_bytes(protocol_state, bytes, &mut events) {
-        tracing::warn!(error = %source, "failed to observe MySQL client bytes");
+    match adapter.observe_client_bytes(protocol_state, bytes, &mut events) {
+        Ok(observation) => observation.session_identity,
+        Err(source) => {
+            tracing::warn!(error = %source, "failed to observe MySQL client bytes");
+            None
+        }
     }
 }
 
@@ -1369,6 +1380,22 @@ fn observe_backend_bytes(
     }
 
     events.events
+}
+
+async fn apply_session_identity(
+    state: &ApiState,
+    lifecycle: &mut ConnectionLifecycleRecord,
+    identity: SessionIdentity,
+) {
+    if !lifecycle.set_session_identity(identity.user, identity.database) {
+        return;
+    }
+
+    state
+        .connection_store()
+        .write()
+        .await
+        .upsert(lifecycle.info().clone());
 }
 
 async fn store_sql_events(
@@ -1502,6 +1529,34 @@ mod tests {
         assert_runtime_connection(&state, "conn_closed", ConnectionState::Closed, 12, 34, true)
             .await;
         assert_active_connection_count(&state, 0).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_connection_store_receives_session_identity_updates() {
+        let state = ApiState::default();
+        let mut lifecycle = test_connection_lifecycle("conn_identity");
+        lifecycle.mark_backend_connected(Timestamp("connected".to_owned()));
+        record_connection_started(&state, &lifecycle, None).await;
+
+        apply_session_identity(
+            &state,
+            &mut lifecycle,
+            SessionIdentity {
+                user: Some("app".to_owned()),
+                database: Some("app_db".to_owned()),
+            },
+        )
+        .await;
+
+        let stored = state
+            .connection_store()
+            .read()
+            .await
+            .get(&ConnectionId("conn_identity".to_owned()))
+            .expect("connection should be stored")
+            .clone();
+        assert_eq!(stored.user.as_deref(), Some("app"));
+        assert_eq!(stored.database.as_deref(), Some("app_db"));
     }
 
     #[tokio::test]

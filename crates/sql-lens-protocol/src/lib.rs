@@ -5,7 +5,7 @@ mod registry;
 
 pub use adapter::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterError, ProtocolConnectionContext,
-    ProtocolConnectionState, ProtocolObservation,
+    ProtocolConnectionState, ProtocolObservation, SessionIdentity,
 };
 pub use registry::{ProtocolAdapterRegistry, ProtocolAdapterRegistryError};
 

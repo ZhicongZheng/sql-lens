@@ -89,6 +89,18 @@ impl ConnectionLifecycleRecord {
         self.transition_to(ConnectionState::BackendConnected, connected_at);
     }
 
+    /// Update database session identity observed from protocol login.
+    ///
+    /// Returns `true` when either field changed.
+    pub fn set_session_identity(&mut self, user: Option<String>, database: Option<String>) -> bool {
+        let changed = self.info.user != user || self.info.database != database;
+        if changed {
+            self.info.user = user;
+            self.info.database = database;
+        }
+        changed
+    }
+
     pub fn mark_forwarding_closed(&mut self, summary: &ForwardingSummary, closed_at: Timestamp) {
         self.info.bytes_in = summary.client_to_backend_bytes;
         self.info.bytes_out = summary.backend_to_client_bytes;

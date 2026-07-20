@@ -105,6 +105,18 @@ fn lifecycle_id_generator_produces_sequential_connection_ids() {
 }
 
 #[test]
+fn lifecycle_record_tracks_session_identity() {
+    let mut record = test_lifecycle_record();
+
+    assert_eq!(record.info().user, None);
+    assert_eq!(record.info().database, None);
+    assert!(record.set_session_identity(Some("app".to_owned()), Some("app_db".to_owned())));
+    assert!(!record.set_session_identity(Some("app".to_owned()), Some("app_db".to_owned())));
+    assert_eq!(record.info().user.as_deref(), Some("app"));
+    assert_eq!(record.info().database.as_deref(), Some("app_db"));
+}
+
+#[test]
 fn lifecycle_record_tracks_normal_forwarding_close() {
     let mut record = test_lifecycle_record();
     let summary = ForwardingSummary {

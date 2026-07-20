@@ -57,10 +57,19 @@ pub trait CaptureEventEmitter {
     fn emit(&mut self, event: SqlEvent);
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Session identity observed from protocol login (not SQL Lens product auth).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionIdentity {
+    pub user: Option<String>,
+    pub database: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProtocolObservation {
     pub bytes_observed: usize,
     pub events_emitted: usize,
+    /// Present when this observation newly captured or refreshed session identity.
+    pub session_identity: Option<SessionIdentity>,
 }
 
 impl ProtocolObservation {
@@ -68,7 +77,13 @@ impl ProtocolObservation {
         Self {
             bytes_observed,
             events_emitted,
+            session_identity: None,
         }
+    }
+
+    pub fn with_session_identity(mut self, identity: SessionIdentity) -> Self {
+        self.session_identity = Some(identity);
+        self
     }
 }
 
