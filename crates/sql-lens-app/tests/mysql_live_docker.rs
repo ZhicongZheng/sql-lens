@@ -9,7 +9,7 @@ use testcontainers::{GenericImage, ImageExt, core::IntoContainerPort, runners::A
 
 use support::{
     MysqlConnectionOptions, TestResult, get_sql_event_detail, mysql_url, shutdown_runtime,
-    skip_unless_env, wait_for_captured_event, wait_for_mysql_compatible_ready,
+    skip_unless_env, wait_for_captured_event, wait_for_connection, wait_for_mysql_compatible_ready,
 };
 
 const DOCKER_TESTS_ENV: &str = "SQL_LENS_DOCKER_TESTS";
@@ -153,6 +153,84 @@ async fn docker_mysql_prepared_statement_capture_redacts_via_api() -> TestResult
         Some(SqlParameterValueDataResponse::String("***".to_owned()))
     );
     assert!(detail.parameters[1].redacted);
+
+    shutdown_runtime(runtime).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn docker_mysql_session_identity_and_prepare_reuse_are_captured() -> TestResult {
+    if skip_unless_env(DOCKER_TESTS_ENV, "Docker MySQL session identity") {
+        return Ok(());
+    }
+
+    let mysql = GenericImage::new("mysql", "8.0")
+        .with_exposed_port(MYSQL_PORT.tcp())
+        .with_env_var("MYSQL_ROOT_PASSWORD", MYSQL_ROOT_PASSWORD)
+        .with_env_var("MYSQL_DATABASE", MYSQL_DATABASE)
+        .with_cmd(["--default-authentication-plugin=mysql_native_password"])
+        .with_startup_timeout(Duration::from_secs(90))
+        .start()
+        .await?;
+    let mysql_host = mysql.get_host().await?;
+    let mysql_port = mysql.get_host_port_ipv4(MYSQL_PORT.tcp()).await?;
+    let backend_addr = format!("{mysql_host}:{mysql_port}");
+    let options = MysqlConnectionOptions::root_with_password(MYSQL_ROOT_PASSWORD, MYSQL_DATABASE);
+    wait_for_mysql_compatible_ready("MySQL", &backend_addr, options, Duration::from_secs(90))
+        .await?;
+    let runtime = start_minimal_mysql_runtime(backend_addr).await?;
+
+    let proxy_url = mysql_url(&runtime.proxy_addr.to_string(), options);
+    let mut conn = Conn::from_url(proxy_url).await?;
+    conn.query_drop(
+        "CREATE TABLE reuse_users (
+            id INT PRIMARY KEY,
+            name VARCHAR(64) NOT NULL
+        )",
+    )
+    .await?;
+    conn.query_drop("INSERT INTO reuse_users (id, name) VALUES (1, 'seed')")
+        .await?;
+    let stmt = conn
+        .prep("UPDATE reuse_users SET name = ? WHERE id = 1")
+        .await?;
+    conn.exec_drop(&stmt, ("first",)).await?;
+    conn.exec_drop(&stmt, ("second",)).await?;
+    conn.query_drop("DO 2").await?;
+    conn.close(stmt).await?;
+    conn.disconnect().await?;
+
+    let connection = wait_for_connection(runtime.api_addr, |connection| {
+        connection.user.as_deref() == Some("root")
+            && connection.database.as_deref() == Some(MYSQL_DATABASE)
+    })
+    .await?;
+    assert_eq!(connection.user.as_deref(), Some("root"));
+    assert_eq!(connection.database.as_deref(), Some(MYSQL_DATABASE));
+
+    let first = wait_for_captured_event(runtime.api_addr, |event| {
+        event.kind == "statement_execute"
+            && event.expanded_sql.as_deref()
+                == Some("UPDATE reuse_users SET name = 'first' WHERE id = 1")
+            && event.user.as_deref() == Some("root")
+            && event.database.as_deref() == Some(MYSQL_DATABASE)
+    })
+    .await?;
+    let second = wait_for_captured_event(runtime.api_addr, |event| {
+        event.kind == "statement_execute"
+            && event.expanded_sql.as_deref()
+                == Some("UPDATE reuse_users SET name = 'second' WHERE id = 1")
+            && event.id != first.id
+    })
+    .await?;
+    assert_ne!(first.id, second.id);
+
+    let text = wait_for_captured_event(runtime.api_addr, |event| {
+        event.kind == "query" && event.original_sql == "DO 2"
+    })
+    .await?;
+    assert_eq!(text.user.as_deref(), Some("root"));
+    assert_eq!(text.database.as_deref(), Some(MYSQL_DATABASE));
 
     shutdown_runtime(runtime).await?;
     Ok(())

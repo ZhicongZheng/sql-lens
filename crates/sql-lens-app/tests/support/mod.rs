@@ -135,6 +135,38 @@ pub async fn get_sql_event_detail(
     Ok(detail)
 }
 
+#[allow(dead_code)]
+pub async fn wait_for_connection(
+    api_addr: SocketAddr,
+    matches: impl Fn(&sql_lens_api::ConnectionResponse) -> bool,
+) -> TestResult<sql_lens_api::ConnectionResponse> {
+    use sql_lens_api::{CONNECTIONS_PATH, ConnectionListResponse};
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{api_addr}{CONNECTIONS_PATH}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        let response = client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ConnectionListResponse>()
+            .await?;
+
+        if let Some(connection) = response.items.into_iter().find(|item| matches(item)) {
+            return Ok(connection);
+        }
+
+        if Instant::now() >= deadline {
+            return Err("matching connection did not appear before timeout".into());
+        }
+
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 pub async fn shutdown_runtime(runtime: MinimalMysqlRuntime) -> TestResult {
     runtime.shutdown().await?;
     Ok(())
