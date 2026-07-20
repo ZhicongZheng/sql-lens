@@ -896,3 +896,36 @@ Implemented runtime retention enforcement for Issue 117. RetentionEnforcer reads
 ### Next Steps
 
 - None - task complete
+
+
+## Session 88: Implement plugin loading and hook dispatch
+
+**Date**: 2026-07-20
+**Task**: Implement plugin loading and hook dispatch
+**Branch**: `main`
+
+### Summary
+
+Added PluginRuntime in sql-lens-app: load .toml manifests (builtin_noop only), async queue + timeout isolation, redacted connect/SQL hook fan-out from capture/lifecycle, and tests for disable/load/failure/timeout/shutdown.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `48c2566` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
