@@ -1,0 +1,29 @@
+{
+  "id": "docs-align-and-client-hardening",
+  "name": "docs-align-and-client-hardening",
+  "title": "Align docs and harden real client boundaries",
+  "description": "",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "zhicong",
+  "assignee": "zhicong",
+  "createdAt": "2026-07-20",
+  "completedAt": "2026-07-20",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-20-align-product-docs-with-implementation",
+    "07-20-harden-real-mysql-client-boundaries"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
