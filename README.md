@@ -56,38 +56,33 @@ Protocol-specific parsing must stay behind protocol adapters. The API, storage m
 
 ## Features
 
-Planned v1 features:
+Implemented for local MySQL-compatible debugging:
 
-- Transparent TCP proxy.
-- MySQL-compatible handshake and authentication forwarding.
-- SQL capture for text queries.
-- Prepared statement lifecycle tracking.
-- Prepared statement parameter expansion.
-- Query timeline.
-- Slow SQL detection.
-- Error SQL detection.
-- Connection list.
-- SQL statistics.
-- REST API.
-- WebSocket live updates.
-- Local dashboard.
-- Ring buffer storage by default.
+- Transparent multi-target TCP proxy (MySQL protocol family: MySQL, StarRocks, TiDB, Doris, …).
+- Handshake and authentication forwarding (pass-through; no credential storage).
+- SQL capture for text queries (`COM_QUERY`) and prepared statements (prepare / execute / close).
+- Prepared statement parameter decoding and expanded SQL for common types.
+- Result summaries, slow / error classification, and SQL fingerprinting.
+- Connection list with session identity (user / database when present on the wire).
+- Ring buffer storage by default; optional SQLite persistence and retention (age / count).
+- Configured redaction before storage, API, export, and live streams.
+- REST API, WebSocket live SQL stream, OpenAPI surface.
+- Local web dashboard (build SPA; serve via `web.static_dir` or auto-discover `dist`).
+- Guarded SQL replay (preview + optional execute with mutation confirmation).
+- SQL export (JSON / NDJSON).
+- In-process plugin hook runtime (manifest-based; no remote install).
 
-Future features:
+Planned / not productized yet:
 
-- SQL replay.
-- SQL export.
-- SQL fingerprinting.
 - EXPLAIN helper.
-- SQLite persistence.
-- DuckDB analytics.
-- PostgreSQL support.
-- Plugin hooks.
-- Prometheus and OpenTelemetry exporters.
+- DuckDB analytics storage.
+- PostgreSQL and ClickHouse protocol adapters.
+- Prometheus and OpenTelemetry exporters (beyond hook contracts).
+- Prebuilt release packages (Homebrew, Docker Hub image, GitHub Releases).
 
 ## Screenshot
 
-Screenshots are placeholders until the web UI exists.
+ASCII sketch of the dashboard layout (UI ships under `crates/sql-lens-app/web`):
 
 ```text
 +-------------------------------------------------------------+
@@ -106,20 +101,23 @@ Screenshots are placeholders until the web UI exists.
 
 ## Installation
 
-SQL Lens is not implemented yet. The intended installation channels are:
-
-- Prebuilt binaries from GitHub Releases.
-- Homebrew tap.
-- Docker image.
-- Cargo install for source users.
-
-Target commands:
+**From source (supported today):**
 
 ```bash
-brew install sql-lens/tap/sql-lens
-docker run --rm -p 3307:3307 -p 5173:5173 sql-lens/sql-lens
-cargo install sql-lens
+git clone <repo-url> sql-lens
+cd sql-lens
+./scripts/build-web.sh
+cargo run -p sql-lens-app -- --config sql-lens.example.toml
 ```
+
+Copy `sql-lens.example.toml` to `sql-lens.toml` and set `[backend].address` to your database.
+
+**Planned distribution channels** (not published yet):
+
+- Prebuilt binaries from GitHub Releases
+- Homebrew tap
+- Docker image
+- `cargo install` of a published crate
 
 ## Quick Start
 
@@ -202,12 +200,13 @@ capture pipeline
 REST API and Web UI
 ```
 
-Recommended Rust workspace:
+Recommended Rust workspace (web UI lives under the app crate):
 
 ```text
 crates/
   sql-lens-core/
   sql-lens-config/
+  sql-lens-capture/
   sql-lens-proxy/
   sql-lens-protocol/
   sql-lens-protocol-mysql/
@@ -215,21 +214,18 @@ crates/
   sql-lens-api/
   sql-lens-plugin/
   sql-lens-app/
-web/
-docs/
-examples/
-tests/
+    web/          # React dashboard (npm build → web/dist)
+docs/             # product docs at repo root + .trellis/spec
+tests/            # integration / live docker tests under crates/sql-lens-app/tests
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full design.
 
 ## Roadmap
 
-- v0.1: TCP proxy foundation and capture event model.
-- v0.5: MySQL-compatible protocol parsing and prepared statements.
-- v1.0: Usable local SQL debugging proxy with web UI.
-- v1.5: Plugin system, exporters, SQLite persistence, stable extension points.
-- v2.0: Additional protocol families such as PostgreSQL and ClickHouse.
+- **Done (local MVP path):** TCP proxy, MySQL-compatible capture, ring buffer + SQLite, redaction, retention, REST/WS, web UI, guarded replay, export, fingerprinting, plugin hook runtime.
+- **Near-term:** real-client boundary hardening, packaging / release readiness (M17).
+- **Later:** Prometheus/OTel exporters, EXPLAIN helper, PostgreSQL / ClickHouse, DuckDB analytics.
 
 See [ROADMAP.md](ROADMAP.md) and [MILESTONE.md](MILESTONE.md).
 
@@ -237,28 +233,27 @@ See [ROADMAP.md](ROADMAP.md) and [MILESTONE.md](MILESTONE.md).
 
 ### Directory Structure
 
-Use a Rust workspace plus a separate web application:
+Use a Rust workspace; the dashboard is `crates/sql-lens-app/web`:
 
 ```text
 sql-lens/
   crates/
-  web/
-  docs/
-  examples/
-  tests/
+  scripts/
+  .trellis/
 ```
 
 ### Rust Crate Split
 
 - `sql-lens-core`: protocol-neutral domain models.
 - `sql-lens-config`: configuration model, option enums, and defaults.
+- `sql-lens-capture`: bounded capture channel and slow-query classification.
 - `sql-lens-proxy`: TCP proxy, sessions, forwarding, shutdown.
 - `sql-lens-protocol`: protocol adapter traits and registry.
 - `sql-lens-protocol-mysql`: MySQL-compatible protocol adapter.
-- `sql-lens-storage`: ring buffer, SQLite, future DuckDB.
+- `sql-lens-storage`: ring buffer, SQLite (DuckDB reserved).
 - `sql-lens-api`: REST and WebSocket API.
-- `sql-lens-plugin`: hooks and exporters.
-- `sql-lens-app`: CLI and service composition.
+- `sql-lens-plugin`: hook traits (runtime dispatch lives in app).
+- `sql-lens-app`: CLI, runtime composition, web UI assets.
 
 ### Optional Go Package Split
 

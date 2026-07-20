@@ -235,9 +235,11 @@ Deliverable: SQL Lens is useful as a local SQL debugger.
 
 Goal: make the project releasable.
 
+**Context:** Milestones 1–16 are substantially implemented in-tree for MySQL-compatible local debugging. This milestone is packaging, CI, and polish—not greenfield product features.
+
 Tasks:
 
-- Complete docs.
+- Complete docs (status claims aligned with implementation).
 - Complete CI.
 - Run compatibility tests.
 - Run benchmarks.

@@ -63,21 +63,21 @@ Exit criteria:
 
 Goal: ship a useful local SQL debugging product.
 
-Scope:
+**Status:** largely implemented in-tree for MySQL-compatible local use. Remaining gap is primarily packaging / release readiness and broader real-client hardening—not greenfield feature work.
 
-- Web UI shell.
-- Dashboard.
-- SQL List.
-- SQL Detail.
-- Connections.
-- Statistics.
-- Search filters.
-- Slow SQL classification.
-- Error SQL classification.
-- Replay design and guarded API surface.
-- Configuration documentation.
-- Security baseline.
-- Packaging design.
+Scope (done or substantially present):
+
+- Web UI (dashboard, SQL list/detail, connections, statistics, settings, replay).
+- Search filters, slow / error classification.
+- Guarded replay API + UI safeguards.
+- Configuration docs, redaction baseline.
+- Single-process static UI delivery (`web.static_dir` / auto-discover).
+
+Still open for a formal v1.0 release:
+
+- Published binaries / installers / container image.
+- Broader real-client boundary test matrix.
+- Screenshot and install polish.
 
 Exit criteria:
 
@@ -89,18 +89,15 @@ Exit criteria:
 
 Goal: make SQL Lens extensible and useful for longer debugging sessions.
 
+**Status (partial):** SQLite storage, retention policies, SQL fingerprinting, SQL export, plugin *hook traits + isolated app runtime*, and a stable protocol adapter registry already exist. Remaining v1.5 themes are mostly **exporters and richer plugin/exporter productization**.
+
 Scope:
 
-- SQLite storage backend.
-- Retention policies.
-- Plugin hook API.
-- Exporter interface.
-- Webhook exporter.
-- Prometheus exporter.
-- OpenTelemetry exporter.
-- Stable protocol adapter interface.
-- SQL fingerprinting.
-- SQL export.
+- ~~SQLite storage backend~~ (implemented).
+- ~~Retention policies~~ (age/count; max_bytes unsupported).
+- ~~Plugin hook API / in-process runtime~~ (implemented; no remote install).
+- Exporter interface productization (webhook / Prometheus / OpenTelemetry).
+- ~~SQL fingerprinting~~ / ~~SQL export~~ (implemented).
 - EXPLAIN helper.
 
 Exit criteria:
@@ -108,7 +105,6 @@ Exit criteria:
 - Users can persist captures locally.
 - Plugin authors can observe query events without modifying proxy internals.
 - Metrics can be exported to common observability systems.
-
 ## v2.0: Multi-Protocol Expansion
 
 Goal: prove the architecture supports additional SQL execution surfaces.
