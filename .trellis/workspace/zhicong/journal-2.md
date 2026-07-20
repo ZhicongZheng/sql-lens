@@ -962,3 +962,37 @@ All six backend-core child tasks done. Ran workspace fmt/test/clippy gate and do
 ### Next Steps
 
 - None - task complete
+
+
+## Session 90: Connection identity write-back and default static UI
+
+**Date**: 2026-07-20
+**Task**: Connection identity write-back and default static UI
+**Branch**: `main`
+
+### Summary
+
+Wrote MySQL handshake user/database into connection store and SQL events; auto-discover built web dist for single-process UI serving with docs/scripts.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6df5231` | (see git log) |
+| `656d084` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

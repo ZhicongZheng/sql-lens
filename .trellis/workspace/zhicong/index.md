@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 89
+- **Total Sessions**: 90
 - **Last Active**: 2026-07-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~964 | Active |
+| `journal-2.md` | ~998 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 90 | 2026-07-20 | Connection identity write-back and default static UI | `6df5231`, `656d084` | `main` |
 | 89 | 2026-07-20 | Complete backend core final quality gate | `f7529aa` | `main` |
 | 88 | 2026-07-20 | Implement plugin loading and hook dispatch | `48c2566` | `main` |
 | 87 | 2026-07-13 | Enforce configured retention in app runtime (Issue 117) | `55bd14d` | `main` |
