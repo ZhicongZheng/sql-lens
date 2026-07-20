@@ -1,0 +1,29 @@
+{
+  "id": "complete-connection-identity-and-default-ui",
+  "name": "complete-connection-identity-and-default-ui",
+  "title": "Complete connection identity and default UI delivery",
+  "description": "",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "zhicong",
+  "assignee": "zhicong",
+  "createdAt": "2026-07-20",
+  "completedAt": "2026-07-20",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "07-20-write-back-connection-auth-identity",
+    "07-20-default-static-ui-delivery"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
