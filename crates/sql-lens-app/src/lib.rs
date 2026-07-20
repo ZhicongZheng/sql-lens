@@ -1,5 +1,6 @@
 //! Minimal runtime composition helpers for SQL Lens integration tests.
 
+mod plugins;
 mod retention;
 
 use std::{
@@ -29,14 +30,16 @@ use sql_lens_capture::{
 };
 use sql_lens_config::{
     CaptureConfig, CaptureOverloadPolicy as ConfigCaptureOverloadPolicy,
-    DatabaseType as ConfigDatabaseType, ProxyConfig, ProxyTargetConfig, RedactionConfig,
-    RetentionConfig, SqlLensConfig, StorageConfig, StorageType,
+    DatabaseType as ConfigDatabaseType, PluginsConfig, ProxyConfig, ProxyTargetConfig,
+    RedactionConfig, RetentionConfig, SqlLensConfig, StorageConfig, StorageType,
     parse_retention_enforcement_interval,
 };
 use sql_lens_core::{
     ConnectionInfo, DatabaseType, DurationMillis, ProtocolName, RedactionPolicy, SqlEvent,
     Timestamp,
 };
+
+use crate::plugins::{PluginRuntime, PluginRuntimeError, PluginRuntimeHandle};
 use sql_lens_protocol::{
     CaptureEventEmitter, ProtocolAdapter, ProtocolAdapterRegistry, ProtocolAdapterRegistryError,
     ProtocolConnectionContext,
@@ -76,6 +79,7 @@ pub struct MinimalMysqlRuntime {
     proxy_shutdown_config: ProxyShutdownConfig,
     capture_runtime: CaptureRuntime,
     retention_runtime: Option<RetentionRuntime>,
+    plugin_runtime: Option<PluginRuntime>,
     persistence: EventPersistence,
     sqlite_worker: Option<thread::JoinHandle<()>>,
 }
@@ -147,6 +151,7 @@ struct RuntimeOptions {
     capture_config: CapturePipelineConfig,
     classifier: SlowQueryClassifier,
     retention_config: RetentionConfig,
+    plugins_config: PluginsConfig,
     redaction_policy: RedactionPolicy,
     replay_policy: ReplayPolicy,
     replay_executor: Option<Arc<dyn ReplayExecutor>>,
@@ -324,6 +329,7 @@ impl CaptureRuntime {
         classifier: SlowQueryClassifier,
         state: ApiState,
         persistence: EventPersistence,
+        plugin_handle: Option<PluginRuntimeHandle>,
     ) -> Self {
         let (publisher, receiver) = CapturePipeline::channel(config);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -332,6 +338,7 @@ impl CaptureRuntime {
             classifier,
             state,
             persistence,
+            plugin_handle,
             shutdown_rx,
         ));
 
@@ -455,6 +462,7 @@ impl MinimalMysqlRuntime {
             proxy_shutdown_config,
             capture_runtime,
             retention_runtime,
+            plugin_runtime,
             persistence,
             sqlite_worker,
             ..
@@ -472,6 +480,12 @@ impl MinimalMysqlRuntime {
             retention_runtime.shutdown().await?;
         }
         capture_runtime.shutdown().await?;
+        if let Some(plugin_runtime) = plugin_runtime {
+            plugin_runtime
+                .shutdown()
+                .await
+                .map_err(MinimalMysqlRuntimeError::PluginRuntime)?;
+        }
         drop(persistence);
 
         if let Some(worker) = sqlite_worker {
@@ -523,6 +537,7 @@ pub async fn start_runtime_from_config(
         capture_config: runtime_capture_config(&config.capture)?,
         classifier: runtime_slow_query_classifier(config),
         retention_config: config.retention.clone(),
+        plugins_config: config.plugins.clone(),
         redaction_policy,
         replay_policy,
         replay_executor,
@@ -570,6 +585,7 @@ pub async fn start_minimal_mysql_runtime_with_options(
             capture_config: default_capture_pipeline_config(),
             classifier: SlowQueryClassifier::default(),
             retention_config: RetentionConfig::default(),
+            plugins_config: PluginsConfig::default(),
             redaction_policy: RedactionPolicy::default(),
             replay_policy: ReplayPolicy::default(),
             replay_executor: None,
@@ -633,11 +649,15 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         state.event_store(),
         retention_sqlite_store,
     )?;
+    let plugin_runtime = PluginRuntime::start(&options.plugins_config, options.redaction_policy)
+        .map_err(MinimalMysqlRuntimeError::PluginRuntime)?;
+    let plugin_handle = plugin_runtime.as_ref().map(PluginRuntime::handle);
     let capture_runtime = CaptureRuntime::start(
         options.capture_config,
         options.classifier,
         state.clone(),
         persistence.clone(),
+        plugin_handle.clone(),
     );
     let http_server = bind_http_server_with_state(&http_config, state.clone()).await?;
     let api_addr = http_server.local_addr();
@@ -691,6 +711,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
                 runtime_config,
                 state.clone(),
                 capture_runtime.publisher(),
+                plugin_handle.clone(),
                 proxy_shutdown_rx.clone(),
                 Arc::clone(&proxy_sessions),
                 options.proxy.idle_timeout,
@@ -710,6 +731,7 @@ async fn start_minimal_mysql_runtime_with_runtime_storage(
         proxy_shutdown_config: ProxyShutdownConfig::new(options.proxy.shutdown_timeout),
         capture_runtime,
         retention_runtime,
+        plugin_runtime,
         persistence,
         sqlite_worker,
     })
@@ -949,11 +971,13 @@ impl EventPersistence {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_mysql_proxy(
     listener: TcpProxyListener,
     target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
     publisher: CaptureEventPublisher,
+    plugin_handle: Option<PluginRuntimeHandle>,
     mut shutdown: watch::Receiver<bool>,
     sessions: Arc<ProxySessionRegistry>,
     idle_timeout: Duration,
@@ -1001,6 +1025,7 @@ async fn run_mysql_proxy(
                             target_config.clone(),
                             state.clone(),
                             publisher.clone(),
+                            plugin_handle.clone(),
                             connection_id,
                             session_permit,
                             idle_timeout,
@@ -1017,11 +1042,13 @@ async fn run_mysql_proxy(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_accepted_mysql_client(
     accepted: AcceptedClient,
     target_config: MysqlProxyTargetRuntimeConfig,
     state: ApiState,
     publisher: CaptureEventPublisher,
+    plugin_handle: Option<PluginRuntimeHandle>,
     connection_id: sql_lens_core::ConnectionId,
     session_permit: OwnedSemaphorePermit,
     idle_timeout: Duration,
@@ -1040,7 +1067,7 @@ async fn handle_accepted_mysql_client(
     match BackendDialer::dial(accepted, &target_config.backend_config).await {
         Ok(connection) => {
             lifecycle.mark_backend_connected(runtime_timestamp());
-            record_connection_started(&state, &lifecycle).await;
+            record_connection_started(&state, &lifecycle, plugin_handle.as_ref()).await;
 
             if let Err(source) = forward_protocol_connection(
                 connection,
@@ -1223,17 +1250,34 @@ async fn run_capture_consumer(
     classifier: SlowQueryClassifier,
     state: ApiState,
     persistence: EventPersistence,
+    plugin_handle: Option<PluginRuntimeHandle>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
         tokio::select! {
             event = receiver.recv() => match event {
-                Some(event) => store_sql_events(&state, &persistence, classifier, vec![event]).await,
+                Some(event) => {
+                    store_sql_events(
+                        &state,
+                        &persistence,
+                        classifier,
+                        plugin_handle.as_ref(),
+                        vec![event],
+                    )
+                    .await
+                }
                 None => return,
             },
             _ = &mut shutdown => {
                 while let Some(event) = receiver.try_recv() {
-                    store_sql_events(&state, &persistence, classifier, vec![event]).await;
+                    store_sql_events(
+                        &state,
+                        &persistence,
+                        classifier,
+                        plugin_handle.as_ref(),
+                        vec![event],
+                    )
+                    .await;
                 }
                 return;
             }
@@ -1256,16 +1300,28 @@ fn publish_sql_events(publisher: &CaptureEventPublisher, events: Vec<SqlEvent>) 
     }
 }
 
-async fn record_connection_started(state: &ApiState, lifecycle: &ConnectionLifecycleRecord) {
+async fn record_connection_started(
+    state: &ApiState,
+    lifecycle: &ConnectionLifecycleRecord,
+    plugin_handle: Option<&PluginRuntimeHandle>,
+) {
     let connection = lifecycle.info().clone();
     let connection_id = connection.id.clone();
 
-    state.connection_store().write().await.upsert(connection);
+    state
+        .connection_store()
+        .write()
+        .await
+        .upsert(connection.clone());
     state
         .live_statistics()
         .write()
         .await
         .record_connection_opened(connection_id);
+
+    if let Some(plugin_handle) = plugin_handle {
+        plugin_handle.dispatch_connect(connection);
+    }
 }
 
 async fn record_connection_finished(state: &ApiState, connection: ConnectionInfo) {
@@ -1319,6 +1375,7 @@ async fn store_sql_events(
     state: &ApiState,
     persistence: &EventPersistence,
     classifier: SlowQueryClassifier,
+    plugin_handle: Option<&PluginRuntimeHandle>,
     events: Vec<SqlEvent>,
 ) {
     if events.is_empty() {
@@ -1336,6 +1393,11 @@ async fn store_sql_events(
         let _ = broadcaster.publish(event.clone());
         statistics.record_sql_event(&event);
         store.append(event.clone());
+        if let Some(plugin_handle) = plugin_handle {
+            // Fan-out after classify so storage/broadcast still happen even if
+            // plugins misbehave. Dispatch is non-blocking (try_send).
+            plugin_handle.dispatch_event(event.clone());
+        }
         persistence.persist(event);
     }
 }
@@ -1412,7 +1474,7 @@ mod tests {
         let mut lifecycle = test_connection_lifecycle("conn_closed");
         lifecycle.mark_backend_connected(Timestamp("connected".to_owned()));
 
-        record_connection_started(&state, &lifecycle).await;
+        record_connection_started(&state, &lifecycle, None).await;
 
         assert_runtime_connection(
             &state,
@@ -1447,7 +1509,7 @@ mod tests {
         let state = ApiState::default();
         let mut lifecycle = test_connection_lifecycle("conn_forwarding_failed");
         lifecycle.mark_backend_connected(Timestamp("connected".to_owned()));
-        record_connection_started(&state, &lifecycle).await;
+        record_connection_started(&state, &lifecycle, None).await;
 
         finalize_forwarding_lifecycle(
             &state,
@@ -2100,6 +2162,7 @@ path = "{}"
             &state,
             &EventPersistence::default(),
             SlowQueryClassifier::default(),
+            None,
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -2141,6 +2204,7 @@ path = "{}"
                 &state,
                 &EventPersistence::default(),
                 runtime_slow_query_classifier(&config),
+                None,
                 vec![test_event(
                     event_id.clone(),
                     CaptureStatus::Ok,
@@ -2175,6 +2239,7 @@ path = "{}"
             SlowQueryClassifier::default(),
             state.clone(),
             EventPersistence::default(),
+            None,
         );
         let event = test_event(
             SqlEventId("evt_capture_fanout".to_owned()),
@@ -2239,6 +2304,7 @@ path = "{}"
             &state,
             &EventPersistence::default(),
             SlowQueryClassifier::default(),
+            None,
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -2267,6 +2333,7 @@ path = "{}"
             &state,
             &persistence,
             SlowQueryClassifier::default(),
+            None,
             vec![test_event(
                 event_id.clone(),
                 CaptureStatus::Ok,
@@ -2303,6 +2370,7 @@ path = "{}"
             &state,
             &persistence,
             SlowQueryClassifier::default(),
+            None,
             vec![event.clone(), event],
         )
         .await;
@@ -2719,6 +2787,7 @@ pub enum MinimalMysqlRuntimeError {
     ProxyConfig(String),
     CaptureConfig(String),
     RetentionConfig(String),
+    PluginRuntime(PluginRuntimeError),
     StorageConfig(String),
     SqliteStorage {
         path: PathBuf,
@@ -2753,6 +2822,7 @@ impl fmt::Display for MinimalMysqlRuntimeError {
             Self::RetentionConfig(message) => {
                 write!(f, "invalid retention configuration: {message}")
             }
+            Self::PluginRuntime(source) => write!(f, "plugin runtime failed: {source}"),
             Self::StorageConfig(message) => write!(f, "invalid runtime storage config: {message}"),
             Self::SqliteStorage { path, source } => {
                 write!(
@@ -2786,6 +2856,7 @@ impl Error for MinimalMysqlRuntimeError {
             Self::ProxyConfig(_) => None,
             Self::CaptureConfig(_) => None,
             Self::RetentionConfig(_) => None,
+            Self::PluginRuntime(source) => Some(source),
             Self::StorageConfig(_) => None,
             Self::SqliteStorage { source, .. } => Some(source.as_ref()),
             Self::SqlitePersistenceWorkerPanicked => None,
