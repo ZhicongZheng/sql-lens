@@ -996,3 +996,37 @@ Wrote MySQL handshake user/database into connection store and SQL events; auto-d
 ### Next Steps
 
 - None - task complete
+
+
+## Session 91: Docs align and MySQL client boundary hardening
+
+**Date**: 2026-07-20
+**Task**: Docs align and MySQL client boundary hardening
+**Branch**: `main`
+
+### Summary
+
+Aligned README/ROADMAP/MILESTONE with shipped features. Added Docker live test for session identity and prepare reuse.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `db1428f` | (see git log) |
+| `600f0ca` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
