@@ -545,13 +545,36 @@ pub async fn start_runtime_from_config(
     };
 
     start_minimal_mysql_runtime_with_runtime_storage(
-        HttpServerConfig::from(&config.web),
+        runtime_http_config_from_web(&config.web),
         targets,
         protocol_registry,
         runtime_storage,
         options,
     )
     .await
+}
+
+fn runtime_http_config_from_web(web: &sql_lens_config::WebConfig) -> HttpServerConfig {
+    let mut http = HttpServerConfig::from(web);
+    if http.static_dir.is_none() {
+        if let Some(discovered) = discover_default_static_dir() {
+            tracing::info!(
+                path = %discovered.display(),
+                "using discovered web static directory"
+            );
+            http.static_dir = Some(discovered);
+        }
+    }
+    http
+}
+
+/// When `web.static_dir` is unset, look for a built SPA next to common repo layouts.
+fn discover_default_static_dir() -> Option<PathBuf> {
+    const CANDIDATES: &[&str] = &["crates/sql-lens-app/web/dist", "web/dist"];
+    CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.join("index.html").is_file())
 }
 
 pub async fn start_minimal_mysql_runtime_with_targets(
@@ -1984,6 +2007,50 @@ listen = "127.0.0.1:0"
             .expect("shutdown should honor the configured drain timeout")
             .expect("runtime should shut down cleanly");
         backend_task.abort();
+    }
+
+    #[test]
+    fn runtime_http_config_discovers_default_static_dir_when_unset() {
+        let root = temporary_static_dist_root("discovered-static");
+        let dist = root.join("crates/sql-lens-app/web/dist");
+        std::fs::create_dir_all(&dist).expect("create dist");
+        std::fs::write(dist.join("index.html"), "<html>sql-lens</html>").expect("index");
+
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("chdir into fixture root");
+        let discovered = discover_default_static_dir();
+        let http = runtime_http_config_from_web(&sql_lens_config::WebConfig {
+            static_dir: None,
+            ..sql_lens_config::WebConfig::default()
+        });
+        std::env::set_current_dir(previous).expect("restore cwd");
+
+        assert_eq!(
+            discovered,
+            Some(PathBuf::from("crates/sql-lens-app/web/dist"))
+        );
+        assert_eq!(
+            http.static_dir,
+            Some(PathBuf::from("crates/sql-lens-app/web/dist"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_http_config_prefers_explicit_static_dir_over_discovery() {
+        let http = runtime_http_config_from_web(&sql_lens_config::WebConfig {
+            static_dir: Some("explicit-dist".to_owned()),
+            ..sql_lens_config::WebConfig::default()
+        });
+        assert_eq!(http.static_dir, Some(PathBuf::from("explicit-dist")));
+    }
+
+    fn temporary_static_dist_root(name: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_millis();
+        std::env::temp_dir().join(format!("sql-lens-{name}-{}-{millis}", std::process::id()))
     }
 
     #[tokio::test]

@@ -1,0 +1,28 @@
+# Example SQL Lens config for local MySQL-compatible debugging.
+# Copy to sql-lens.toml and adjust addresses as needed.
+
+[proxy]
+listen = "127.0.0.1:3307"
+protocol = "mysql"
+slow_threshold_ms = 500
+max_connections = 512
+
+[backend]
+address = "127.0.0.1:3306"
+database_type = "mysql"
+
+[web]
+listen = "127.0.0.1:5173"
+base_url = "http://127.0.0.1:5173"
+# Optional: explicit SPA directory (must contain index.html).
+# When omitted, sql-lens auto-discovers crates/sql-lens-app/web/dist or web/dist
+# if a built UI is present under the process working directory.
+static_dir = "crates/sql-lens-app/web/dist"
+
+[storage]
+type = "ring_buffer"
+capacity = 100000
+
+[logging]
+level = "info"
+format = "pretty"

@@ -123,24 +123,18 @@ cargo install sql-lens
 
 ## Quick Start
 
-Target v1 workflow:
+Local single-process workflow (API + dashboard on one HTTP listener):
 
-1. Build the web UI:
-
-   ```bash
-   cd crates/sql-lens-app/web
-   npm install
-   npm run build
-   cd ../../..
-   ```
-
-2. Start SQL Lens:
+1. Build the web UI (from the repository root):
 
    ```bash
-   sql-lens --config sql-lens.toml
+   ./scripts/build-web.sh
+   # equivalent: cd crates/sql-lens-app/web && npm install && npm run build
    ```
 
-3. Configure SQL Lens:
+   Output: `crates/sql-lens-app/web/dist` (must contain `index.html`).
+
+2. Configure SQL Lens (see also `sql-lens.example.toml`):
 
    ```toml
    [proxy]
@@ -148,24 +142,37 @@ Target v1 workflow:
 
    [backend]
    address = "127.0.0.1:3306"
-   protocol = "mysql"
+   database_type = "mysql"
 
    [web]
    listen = "127.0.0.1:5173"
+   # Optional. When omitted, sql-lens auto-discovers
+   # crates/sql-lens-app/web/dist or web/dist if present.
    static_dir = "crates/sql-lens-app/web/dist"
    ```
 
-4. Change the application database address:
+3. Start SQL Lens from the repository root (so relative `static_dir` resolves):
+
+   ```bash
+   cargo run -p sql-lens-app -- --config sql-lens.toml
+   # or: sql-lens --config sql-lens.toml
+   ```
+
+4. Point the application at the proxy:
 
    ```text
    mysql://user:password@127.0.0.1:3307/app
    ```
 
-5. Open the dashboard:
+5. Open the dashboard on the **web** listener (same process as the API):
 
    ```text
    http://127.0.0.1:5173
    ```
+
+During UI development you can still run Vite (`npm run dev` in
+`crates/sql-lens-app/web`, port 5174) with its proxy to the API. The build +
+`static_dir` path above is the default single-process delivery.
 
 ## Architecture
 
