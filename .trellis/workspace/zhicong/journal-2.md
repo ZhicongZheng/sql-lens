@@ -1030,3 +1030,36 @@ Aligned README/ROADMAP/MILESTONE with shipped features. Added Docker live test f
 ### Next Steps
 
 - None - task complete
+
+
+## Session 92: Single-binary release with embedded web UI
+
+**Date**: 2026-07-21
+**Task**: Single-binary release with embedded web UI
+**Branch**: `main`
+
+### Summary
+
+Embedded SPA via rust-embed (feature embedded-ui), serve priority static_dir > discovery > embed, release-binary.sh and CI web build for one-file sql-lens delivery.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `094765d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

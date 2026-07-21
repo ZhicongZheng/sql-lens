@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 91
-- **Last Active**: 2026-07-20
+- **Total Sessions**: 92
+- **Last Active**: 2026-07-21
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~1032 | Active |
+| `journal-2.md` | ~1065 | Active |
 | `journal-1.md` | ~1996 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 92 | 2026-07-21 | Single-binary release with embedded web UI | `094765d` | `main` |
 | 91 | 2026-07-20 | Docs align and MySQL client boundary hardening | `db1428f`, `600f0ca` | `main` |
 | 90 | 2026-07-20 | Connection identity write-back and default static UI | `6df5231`, `656d084` | `main` |
 | 89 | 2026-07-20 | Complete backend core final quality gate | `f7529aa` | `main` |
