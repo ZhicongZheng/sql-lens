@@ -14,10 +14,10 @@ database_type = "mysql"
 [web]
 listen = "127.0.0.1:5173"
 base_url = "http://127.0.0.1:5173"
-# Optional: explicit SPA directory (must contain index.html).
-# When omitted, sql-lens auto-discovers crates/sql-lens-app/web/dist or web/dist
-# if a built UI is present under the process working directory.
-static_dir = "crates/sql-lens-app/web/dist"
+# Optional SPA directory (must contain index.html).
+# Leave unset for a release binary built with ./scripts/release-binary.sh —
+# the UI is embedded in the binary. For source dev, you may set:
+# static_dir = "crates/sql-lens-app/web/dist"
 
 [storage]
 type = "ring_buffer"

@@ -33,6 +33,9 @@ pub struct HttpServerConfig {
     pub listen: String,
     pub cors_origins: Vec<String>,
     pub static_dir: Option<PathBuf>,
+    /// When true and `static_dir` is unset, serve the SPA compiled into the binary
+    /// (requires the `embedded-ui` cargo feature).
+    pub use_embedded_ui: bool,
     pub request_timeout_ms: u64,
 }
 
@@ -42,6 +45,7 @@ impl From<&WebConfig> for HttpServerConfig {
             listen: config.listen.clone(),
             cors_origins: config.cors_origins.clone(),
             static_dir: config.static_dir.as_ref().map(PathBuf::from),
+            use_embedded_ui: false,
             request_timeout_ms: config.request_timeout_ms,
         }
     }
@@ -101,7 +105,7 @@ pub fn router() -> Router {
 }
 
 pub fn router_with_state(state: ApiState) -> Router {
-    router_with_state_and_cors(state, CorsLayer::new(), None)
+    router_with_state_and_cors(state, CorsLayer::new(), None, false)
         .expect("API-only router configuration should be valid")
 }
 
@@ -109,13 +113,19 @@ fn router_with_config(
     state: ApiState,
     config: &HttpServerConfig,
 ) -> Result<Router, HttpServerError> {
-    router_with_state_and_cors(state, cors_layer(config)?, config.static_dir.as_deref())
+    router_with_state_and_cors(
+        state,
+        cors_layer(config)?,
+        config.static_dir.as_deref(),
+        config.use_embedded_ui,
+    )
 }
 
 fn router_with_state_and_cors(
     state: ApiState,
     cors: CorsLayer,
     static_dir: Option<&Path>,
+    use_embedded_ui: bool,
 ) -> Result<Router, HttpServerError> {
     let router = Router::new()
         .merge(health::routes())
@@ -138,6 +148,17 @@ fn router_with_state_and_cors(
                     .append_index_html_on_directories(true)
                     .fallback(ServeFile::new(index_path)),
             )
+        }
+        None if use_embedded_ui => {
+            #[cfg(feature = "embedded-ui")]
+            {
+                router.fallback(crate::embedded_ui::embedded_spa_fallback)
+            }
+            #[cfg(not(feature = "embedded-ui"))]
+            {
+                let _ = use_embedded_ui;
+                return Err(HttpServerError::EmbeddedUiUnavailable);
+            }
         }
         None => router.fallback(api_not_found),
     };
@@ -213,6 +234,7 @@ pub enum HttpServerError {
     StaticIndexMissing {
         path: PathBuf,
     },
+    EmbeddedUiUnavailable,
     Serve(std::io::Error),
 }
 
@@ -242,6 +264,10 @@ impl fmt::Display for HttpServerError {
                     path.display()
                 )
             }
+            Self::EmbeddedUiUnavailable => write!(
+                f,
+                "embedded UI was requested but this binary was built without the `embedded-ui` feature"
+            ),
             Self::Serve(source) => write!(f, "HTTP server failed: {source}"),
         }
     }
@@ -253,7 +279,9 @@ impl Error for HttpServerError {
             Self::Bind { source, .. } => Some(source),
             Self::LocalAddr(source) => Some(source),
             Self::InvalidCorsOrigin { source, .. } => Some(source),
-            Self::StaticDirMissing { .. } | Self::StaticIndexMissing { .. } => None,
+            Self::StaticDirMissing { .. }
+            | Self::StaticIndexMissing { .. }
+            | Self::EmbeddedUiUnavailable => None,
             Self::Serve(source) => Some(source),
         }
     }
@@ -301,6 +329,7 @@ mod tests {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
             static_dir: None,
+            use_embedded_ui: false,
             request_timeout_ms: 30_000,
         })
         .await
@@ -316,6 +345,7 @@ mod tests {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
             static_dir: None,
+            use_embedded_ui: false,
             request_timeout_ms: 30_000,
         })
         .await
@@ -343,6 +373,7 @@ mod tests {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: vec!["http://localhost:5174".to_owned()],
             static_dir: None,
+            use_embedded_ui: false,
             request_timeout_ms: 30_000,
         };
         let router = router_with_config(ApiState::default(), &config)
@@ -483,6 +514,7 @@ mod tests {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
             static_dir,
+            use_embedded_ui: false,
             request_timeout_ms: 30_000,
         }
     }

@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+# Embed crates/sql-lens-app/web/dist into the binary for single-file release.
+# Requires `./scripts/build-web.sh` before compile when this feature is enabled.
+embedded-ui = ["dep:rust-embed", "dep:mime_guess"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -15,6 +22,8 @@ sql-lens-storage = { path = "../sql-lens-storage" }
 tokio = { version = "1", features = ["net", "sync"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 utoipa = { version = "5.5", features = ["yaml"] }
+rust-embed = { version = "8", optional = true, features = ["interpolate-folder-path"] }
+mime_guess = { version = "2", optional = true }
 
 [dev-dependencies]
 futures-util = "0.3"

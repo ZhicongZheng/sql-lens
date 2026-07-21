@@ -101,16 +101,39 @@ ASCII sketch of the dashboard layout (UI ships under `crates/sql-lens-app/web`):
 
 ## Installation
 
-**From source (supported today):**
+### Single binary (recommended for local use)
+
+Build one executable that embeds the web dashboard:
 
 ```bash
 git clone <repo-url> sql-lens
 cd sql-lens
+./scripts/release-binary.sh
+# produces: target/release/sql-lens
+```
+
+Copy and edit config, then run from any directory (no `web/dist` folder required):
+
+```bash
+cp sql-lens.example.toml sql-lens.toml
+# set [backend].address to your MySQL-compatible database
+./target/release/sql-lens --config sql-lens.toml
+```
+
+Open the dashboard at the configured `[web].listen` address (default example: `http://127.0.0.1:5173`).
+
+Priority for UI assets:
+
+1. `web.static_dir` if set
+2. On-disk discovery (`crates/sql-lens-app/web/dist` or `web/dist`)
+3. **Embedded SPA** baked into the binary (default feature `embedded-ui`)
+
+### Dev run without packaging
+
+```bash
 ./scripts/build-web.sh
 cargo run -p sql-lens-app -- --config sql-lens.example.toml
 ```
-
-Copy `sql-lens.example.toml` to `sql-lens.toml` and set `[backend].address` to your database.
 
 **Planned distribution channels** (not published yet):
 

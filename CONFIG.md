@@ -178,11 +178,12 @@ Fields:
 - `static_dir`: optional built frontend directory. When set, `sql-lens` serves
   the UI and SPA routes from this directory on the same listener as its API and
   WebSocket endpoints. The directory must contain `index.html`. When omitted,
-  the runtime auto-discovers a built UI at `crates/sql-lens-app/web/dist` or
-  `web/dist` relative to the process working directory (first match with
-  `index.html`). If none is found, the process stays API-only.
-  Build the UI with `./scripts/build-web.sh` or
-  `cd crates/sql-lens-app/web && npm install && npm run build`.
+  the runtime tries, in order: (1) auto-discover `crates/sql-lens-app/web/dist`
+  or `web/dist` under the process working directory; (2) the **embedded SPA**
+  compiled into release binaries (`embedded-ui` feature, default for
+  `sql-lens-app`); (3) API-only if neither is available.
+  Build a standalone binary with `./scripts/release-binary.sh` (builds the web
+  UI then `cargo build --release`).
 - `request_timeout_ms`.
 
 ### `storage`

@@ -563,6 +563,9 @@ fn runtime_http_config_from_web(web: &sql_lens_config::WebConfig) -> HttpServerC
                 "using discovered web static directory"
             );
             http.static_dir = Some(discovered);
+        } else if cfg!(feature = "embedded-ui") {
+            tracing::info!("using embedded web UI assets from the binary");
+            http.use_embedded_ui = true;
         }
     }
     http
@@ -585,6 +588,7 @@ pub async fn start_minimal_mysql_runtime_with_targets(
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
             static_dir: None,
+            use_embedded_ui: false,
             request_timeout_ms: 30_000,
         },
         DEFAULT_BACKEND_CONNECT_TIMEOUT,

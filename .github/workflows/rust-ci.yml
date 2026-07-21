@@ -39,6 +39,16 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: crates/sql-lens-app/web/package-lock.json
+
+      - name: Build web UI (for embedded-ui feature)
+        run: ./scripts/build-web.sh
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -47,3 +57,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      - name: Build release binary
+        run: cargo build -p sql-lens-app --release

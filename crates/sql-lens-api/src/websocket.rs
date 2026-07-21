@@ -388,6 +388,7 @@ mod tests {
             listen: "127.0.0.1:0".to_owned(),
             cors_origins: Vec::new(),
             static_dir: None,
+            use_embedded_ui: false,
             request_timeout_ms: 30_000,
         })
         .await

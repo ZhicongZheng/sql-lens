@@ -9,6 +9,11 @@ license.workspace = true
 name = "sql-lens"
 path = "src/main.rs"
 
+[features]
+default = ["embedded-ui"]
+# Compile the built SPA into the binary so one file can serve the dashboard.
+embedded-ui = ["sql-lens-api/embedded-ui"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 mysql_async = "0.37"

@@ -3,6 +3,8 @@
 mod api_error;
 mod api_state;
 mod connections;
+#[cfg(feature = "embedded-ui")]
+mod embedded_ui;
 mod event_reader;
 mod export;
 mod health;
