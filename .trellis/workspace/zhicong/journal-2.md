@@ -1063,3 +1063,36 @@ Embedded SPA via rust-embed (feature embedded-ui), serve priority static_dir > d
 ### Next Steps
 
 - None - task complete
+
+
+## Session 93: Multi-backend listener configuration
+
+**Date**: 2026-07-24
+**Task**: Multi-backend listener configuration
+**Branch**: `main`
+
+### Summary
+
+Documented the existing multi-target listener configuration for running MySQL and StarRocks through separate listener ports in one SQL Lens process; verified workspace build, clippy, and tests.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a0d6490` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
