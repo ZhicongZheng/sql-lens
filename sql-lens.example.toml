@@ -11,6 +11,23 @@ max_connections = 512
 address = "127.0.0.1:3306"
 database_type = "mysql"
 
+# To observe and forward multiple MySQL-compatible backends from one SQL Lens
+# process, replace [backend] above with one [[targets]] entry per listener.
+#
+# [[targets]]
+# name = "mysql-local"
+# listen = "127.0.0.1:3307"
+# protocol = "mysql"
+# database_type = "mysql"
+# backend_address = "127.0.0.1:3306"
+#
+# [[targets]]
+# name = "starrocks-local"
+# listen = "127.0.0.1:9031"
+# protocol = "mysql"
+# database_type = "starrocks"
+# backend_address = "127.0.0.1:9030"
+
 [web]
 listen = "127.0.0.1:5173"
 base_url = "http://127.0.0.1:5173"
